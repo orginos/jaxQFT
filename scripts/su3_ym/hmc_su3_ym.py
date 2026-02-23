@@ -121,6 +121,12 @@ def main():
     ap.add_argument("--warmup-log-every", type=int, default=5)
     ap.add_argument("--layout", type=str, default="BMXYIJ", choices=["BMXYIJ", "BXYMIJ", "auto"])
     ap.add_argument("--layout-bench-iters", type=int, default=3)
+    ap.add_argument("--fast-hmc-jit", action=argparse.BooleanOptionalAction, default=True, help="use jitted scan HMC path in jaxqft.core.update.HMC")
+    ap.add_argument("--jit-force", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 force kernel")
+    ap.add_argument("--jit-evolve-q", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 link update (evolve_q)")
+    ap.add_argument("--jit-action", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 action kernel")
+    ap.add_argument("--jit-kinetic", action=argparse.BooleanOptionalAction, default=True, help="jit kinetic-energy kernel")
+    ap.add_argument("--jit-refresh-key", action=argparse.BooleanOptionalAction, default=True, help="jit refresh_p_with_key kernel used by fast HMC")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", type=str, default="su3_hmc_ckpt.pkl", help="checkpoint path")
     ap.add_argument("--resume", type=str, default="", help="resume from checkpoint")
@@ -173,10 +179,23 @@ def main():
         layout=selected_layout,
         seed=args.seed,
     )
+    # Optional explicit kernel JITs for single-device performance tuning.
+    if args.jit_force:
+        theory.force = jax.jit(theory.force)
+    if args.jit_evolve_q:
+        theory.evolve_q = jax.jit(theory.evolve_q)
+        theory.evolveQ = theory.evolve_q
+    if args.jit_action:
+        theory.action = jax.jit(theory.action)
+    if args.jit_kinetic:
+        theory.kinetic = jax.jit(theory.kinetic)
+    if args.jit_refresh_key and hasattr(theory, "refresh_p_with_key"):
+        theory.refresh_p_with_key = jax.jit(theory.refresh_p_with_key)
+
     q = theory.hotStart(scale=0.2)
 
     I = _build_integrator(integrator_name, theory, nmd, tau)
-    chain = hmc(T=theory, I=I, verbose=False)
+    chain = hmc(T=theory, I=I, verbose=False, use_fast_jit=bool(args.fast_hmc_jit))
 
     warmup_done = 0
     meas_done = 0
@@ -210,6 +229,15 @@ def main():
     print(f"  layout: {selected_layout}")
     print(f"  integrator: {integrator_name} (nmd={nmd}, tau={tau})")
     print(f"  warmup/meas/skip: {args.warmup}/{args.meas}/{skip}")
+    print(
+        "  jit:"
+        f" fast_hmc={bool(args.fast_hmc_jit)}"
+        f" force={bool(args.jit_force)}"
+        f" evolve_q={bool(args.jit_evolve_q)}"
+        f" action={bool(args.jit_action)}"
+        f" kinetic={bool(args.jit_kinetic)}"
+        f" refresh_key={bool(args.jit_refresh_key)}"
+    )
     print(
         "  warmup nmd adaptation:"
         f" enabled={args.adapt_nmd}"

@@ -48,6 +48,9 @@ class Phi4:
     def refresh_p(self) -> jax.Array:
         return jax.random.normal(self._split_key(), shape=(self.Bs, *self.V), dtype=self.dtype)
 
+    def refresh_p_with_key(self, key: jax.Array) -> jax.Array:
+        return jax.random.normal(key, shape=(self.Bs, *self.V), dtype=self.dtype)
+
     def evolve_q(self, dt: float, P: jax.Array, Q: jax.Array) -> jax.Array:
         return Q + dt * P
 
@@ -60,4 +63,3 @@ class Phi4:
     refreshP = refresh_p
     evolveQ = evolve_q
     hotStart = hot_start
-

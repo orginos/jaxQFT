@@ -143,6 +143,13 @@ class SU2YangMills:
     def refresh_p(self) -> Array:
         return self._sample_algebra(scale=1.0)
 
+    def refresh_p_with_key(self, key: Array) -> Array:
+        k1, k2 = jax.random.split(key)
+        re = jax.random.normal(k1, self.field_shape(), dtype=jnp.float32)
+        im = jax.random.normal(k2, self.field_shape(), dtype=jnp.float32)
+        a = (re + 1j * im).astype(self.dtype)
+        return project_su2_algebra(a)
+
     def evolve_q(self, dt: float, P: Array, Q: Array) -> Array:
         return self.algebra_to_links(dt * P) @ Q
 

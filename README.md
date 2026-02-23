@@ -23,6 +23,7 @@ JAX transcription of core `torchQFT` utilities.
   - `scripts/phi4/train_mg_single.py`
   - `scripts/phi4/train_stacked_mg.py`
   - `scripts/su3_ym/hmc_su3_ym.py`
+  - `scripts/su3_ym/bench_hmc_su3.py`
 
 ## Install
 
@@ -35,6 +36,7 @@ pip install -e .
 ```bash
 python scripts/phi4/hmc_phi4.py
 python scripts/su3_ym/hmc_su3_ym.py --L 4 --Nd 4 --beta 5.8 --layout auto
+python scripts/su3_ym/bench_hmc_su3.py --shape 8,8,8,8 --integrator forcegrad --nmd 8 --tau 1.0
 ```
 
 ```bash

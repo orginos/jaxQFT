@@ -127,6 +127,11 @@ class U1YangMills:
     def refresh_p(self) -> Array:
         return self._sample_algebra(scale=1.0)
 
+    def refresh_p_with_key(self, key: Array) -> Array:
+        im = jax.random.normal(key, self.field_shape(), dtype=jnp.float32)
+        a = (1j * im).astype(self.dtype)
+        return project_u1_algebra(a)
+
     def evolve_q(self, dt: float, P: Array, Q: Array) -> Array:
         return jnp.exp(dt * P) * Q
 
