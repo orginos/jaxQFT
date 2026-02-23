@@ -35,6 +35,56 @@ def _algebra_inner(a: Array, b: Array) -> Array:
     return -jnp.sum(trab, axis=tuple(range(1, trab.ndim)))
 
 
+def _force_bmxyij_nd4_reference(U: Array, beta: float) -> Array:
+    """Reference-force path for BMXYIJ/4D (matches generic implementation)."""
+    coef = -(beta / 3.0)
+    links_force = []
+    for mu in range(4):
+        U_mu = U[:, mu]
+        staple = jnp.zeros_like(U_mu)
+        for nu in range(4):
+            if nu == mu:
+                continue
+            U_nu = U[:, nu]
+            fwd = U_nu @ jnp.roll(U_mu, -1, axis=1 + nu) @ _dagger(jnp.roll(U_nu, -1, axis=1 + mu))
+            U_nu_m = jnp.roll(U_nu, +1, axis=1 + nu)
+            bwd = _dagger(U_nu_m) @ jnp.roll(U_mu, +1, axis=1 + nu) @ jnp.roll(U_nu_m, -1, axis=1 + mu)
+            staple = staple + fwd + bwd
+        G_mu = coef * project_su3_algebra(U_mu @ _dagger(staple))
+        links_force.append(G_mu)
+    return jnp.stack(links_force, axis=1)
+
+
+def _force_bmxyij_nd4_optimized(U: Array, beta: float) -> Array:
+    """Optimized-force path for BMXYIJ/4D with reused shifted links."""
+    coef = -(beta / 3.0)
+    links = [U[:, 0], U[:, 1], U[:, 2], U[:, 3]]
+    plus = [[jnp.roll(links[r], -1, axis=1 + d) for d in range(4)] for r in range(4)]
+    minus = [[jnp.roll(links[r], +1, axis=1 + d) for d in range(4)] for r in range(4)]
+    out = []
+    for mu in range(4):
+        U_mu = links[mu]
+        staple = jnp.zeros_like(U_mu)
+        for nu in range(4):
+            if nu == mu:
+                continue
+            U_nu = links[nu]
+            U_mu_xpnu = plus[mu][nu]
+            U_nu_xpmu = plus[nu][mu]
+            fwd = U_nu @ U_mu_xpnu @ _dagger(U_nu_xpmu)
+
+            U_nu_m = minus[nu][nu]
+            U_mu_m = minus[mu][nu]
+            U_nu_m_xpmu = jnp.roll(U_nu_m, -1, axis=1 + mu)
+            bwd = _dagger(U_nu_m) @ U_mu_m @ U_nu_m_xpmu
+            staple = staple + fwd + bwd
+        out.append(coef * project_su3_algebra(U_mu @ _dagger(staple)))
+    return jnp.stack(out, axis=1)
+
+
+_force_bmxyij_nd4_optimized_jit = jax.jit(_force_bmxyij_nd4_optimized)
+
+
 @dataclass
 class SU3YangMills:
     lattice_shape: Tuple[int, ...]
@@ -63,6 +113,7 @@ class SU3YangMills:
             raise ValueError("exp_method must be one of: expm, su3")
         self.key = jax.random.PRNGKey(self.seed)
         self._set_axes()
+        self._use_optimized_force = (self.Nd == 4 and self.layout == "BMXYIJ")
 
     def _set_axes(self):
         if self.layout == "BMXYIJ":
@@ -143,7 +194,7 @@ class SU3YangMills:
             staple = staple + fwd + bwd
         return staple
 
-    def force(self, U: Array) -> Array:
+    def force_reference(self, U: Array) -> Array:
         # Left-invariant gauge force for S = -(beta/3) sum_p ReTr(U_p).
         # Returns Pdot so integrators can use P <- P + dt * force(U).
         links_force = []
@@ -156,6 +207,11 @@ class SU3YangMills:
         if self.layout == "BMXYIJ":
             return jnp.stack(links_force, axis=1)
         return jnp.stack(links_force, axis=1 + self.Nd)
+
+    def force(self, U: Array) -> Array:
+        if self._use_optimized_force:
+            return _force_bmxyij_nd4_optimized_jit(U, self.beta)
+        return self.force_reference(U)
 
     def refresh_p(self) -> Array:
         return self._sample_algebra(scale=1.0)
@@ -553,6 +609,37 @@ def force_gauge_covariance_test(
     }
 
 
+def force_impl_consistency_test(
+    theory: SU3YangMills,
+    q_scale: float = 0.05,
+    n_trials: int = 3,
+) -> Dict[str, float]:
+    if not theory._use_optimized_force:
+        return {
+            "enabled": 0.0,
+            "max_rel_force_diff": float("nan"),
+            "mean_rel_force_diff": float("nan"),
+            "max_abs_force_diff": float("nan"),
+        }
+
+    rels = []
+    max_abs = []
+    for _ in range(max(1, n_trials)):
+        U = theory.hot_start(scale=q_scale)
+        F_ref = theory.force_reference(U)
+        F_opt = theory.force(U)
+        d = F_opt - F_ref
+        rel = jnp.linalg.norm(d) / (jnp.linalg.norm(F_ref) + 1e-12)
+        rels.append(float(rel))
+        max_abs.append(float(jnp.max(jnp.abs(d))))
+    return {
+        "enabled": 1.0,
+        "max_rel_force_diff": float(np.max(rels)),
+        "mean_rel_force_diff": float(np.mean(rels)),
+        "max_abs_force_diff": float(np.max(max_abs)),
+    }
+
+
 def full_selfcheck(
     theory: SU3YangMills,
     lattice_shape: Tuple[int, ...],
@@ -612,6 +699,12 @@ def full_selfcheck(
     fg_rel = float(fg["max_rel_force_cov_diff"])
     fg_ok = fg_rel < 1e-5
     checks.append(("force_covariance", fg_ok, f"max_rel_force_cov_diff={fg_rel:.3e}"))
+
+    fic = force_impl_consistency_test(theory, q_scale=0.05, n_trials=max(1, gauge_trials))
+    if bool(int(fic["enabled"])):
+        fic_rel = float(fic["max_rel_force_diff"])
+        fic_ok = fic_rel < 1e-6
+        checks.append(("force_impl_consistency", fic_ok, f"max_rel_force_diff={fic_rel:.3e}"))
 
     fd = force_action_fd_test(theory, eps=fd_eps)
     fd_rel = float(fd["rel_fd_vs_force_minus"])
@@ -676,7 +769,7 @@ def main():
         "--tests",
         type=str,
         default="all",
-        help="comma-separated subset of: layout,expo,timing,fd,eps2,eps4,gauge,forcecov,selfcheck,all",
+        help="comma-separated subset of: layout,expo,timing,fd,eps2,eps4,gauge,forcecov,forceimpl,selfcheck,all",
     )
     ap.add_argument("--selfcheck", action="store_true", help="run only the selfcheck suite")
     ap.add_argument("--selfcheck-fail", action="store_true", help="return nonzero exit if any selfcheck fails")
@@ -688,7 +781,7 @@ def main():
     else:
         tests = {t.strip().lower() for t in args.tests.split(",") if t.strip()}
         if "all" in tests:
-            tests = {"layout", "expo", "timing", "fd", "eps2", "eps4", "gauge", "forcecov"}
+            tests = {"layout", "expo", "timing", "fd", "eps2", "eps4", "gauge", "forcecov", "forceimpl"}
 
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
@@ -856,6 +949,20 @@ def main():
         print(f"  max rel diff F(Up) vs Omega^dag F(U) Omega: {fg['max_rel_force_cov_diff']:.6e}")
         print(f"  mean rel diff F(Up) vs Omega^dag F(U) Omega: {fg['mean_rel_force_cov_diff']:.6e}")
         print(f"  max abs entrywise diff: {fg['max_abs_force_cov_diff']:.6e}")
+
+    if "forceimpl" in tests:
+        fic = force_impl_consistency_test(
+            theory,
+            q_scale=0.05,
+            n_trials=max(1, args.gauge_trials),
+        )
+        if bool(int(fic["enabled"])):
+            print("Force implementation consistency test (optimized vs reference):")
+            print(f"  max rel force diff: {fic['max_rel_force_diff']:.6e}")
+            print(f"  mean rel force diff: {fic['mean_rel_force_diff']:.6e}")
+            print(f"  max abs force diff: {fic['max_abs_force_diff']:.6e}")
+        else:
+            print("Force implementation consistency test: skipped (optimized path not active for this layout/shape)")
 
     if "selfcheck" in tests:
         gauge_exp_method = args.gauge_exp_method
