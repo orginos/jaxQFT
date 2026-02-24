@@ -28,6 +28,98 @@ def _algebra_inner(a: Array, b: Array) -> Array:
     return -jnp.sum(trab, axis=tuple(range(1, trab.ndim)))
 
 
+def _plaquette_sum_bmxyij_nd2_optimized(U: Array) -> Array:
+    """Return sum_x Re U_{0,1}(x) for BMXYIJ/2D."""
+    U0 = U[:, 0]
+    U1 = U[:, 1]
+    U1_xp0 = jnp.roll(U1, -1, axis=1)
+    U0_xp1 = jnp.roll(U0, -1, axis=2)
+    plaq = U0 * U1_xp0 * jnp.conj(U0_xp1) * jnp.conj(U1)
+    trp = jnp.real(plaq)
+    return jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
+
+
+def _plaquette_sum_bmxyij_nd4_optimized(U: Array) -> Array:
+    """Return sum_{x,mu<nu} Re U_{mu,nu}(x) for BMXYIJ/4D."""
+    B = U.shape[0]
+    plaq_sum = jnp.zeros((B,), dtype=jnp.float32)
+    U_plus = [jnp.roll(U, -1, axis=2 + d) for d in range(4)]
+    for mu in range(4):
+        U_mu = U[:, mu]
+        for nu in range(mu + 1, 4):
+            U_nu = U[:, nu]
+            U_nu_xpmu = U_plus[mu][:, nu]
+            U_mu_xpnu = U_plus[nu][:, mu]
+            plaq = U_mu * U_nu_xpmu * jnp.conj(U_mu_xpnu) * jnp.conj(U_nu)
+            trp = jnp.real(plaq)
+            plaq_sum = plaq_sum + jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
+    return plaq_sum
+
+
+def _action_bmxyij_nd4_optimized(U: Array, beta: float) -> Array:
+    return -beta * _plaquette_sum_bmxyij_nd4_optimized(U)
+
+
+def _action_bmxyij_nd2_optimized(U: Array, beta: float) -> Array:
+    return -beta * _plaquette_sum_bmxyij_nd2_optimized(U)
+
+
+def _force_bmxyij_nd2_optimized(U: Array, beta: float) -> Array:
+    coef = -beta
+    U_plus = [jnp.roll(U, -1, axis=2 + d) for d in range(2)]
+    U_minus = [jnp.roll(U, +1, axis=2 + d) for d in range(2)]
+    U_minus_nu = [U_minus[nu][:, nu] for nu in range(2)]
+    out = []
+    for mu in range(2):
+        nu = 1 - mu
+        U_mu = U[:, mu]
+        U_nu = U[:, nu]
+        U_mu_xpnu = U_plus[nu][:, mu]
+        U_nu_xpmu = U_plus[mu][:, nu]
+        fwd = U_nu * U_mu_xpnu * jnp.conj(U_nu_xpmu)
+
+        U_nu_m = U_minus_nu[nu]
+        U_mu_m = U_minus[nu][:, mu]
+        U_nu_m_xpmu = jnp.roll(U_nu_m, -1, axis=1 + mu)
+        bwd = jnp.conj(U_nu_m) * U_mu_m * U_nu_m_xpmu
+        staple = fwd + bwd
+        out.append(coef * project_u1_algebra(U_mu * jnp.conj(staple)))
+    return jnp.stack(out, axis=1)
+
+
+def _force_bmxyij_nd4_optimized(U: Array, beta: float) -> Array:
+    coef = -beta
+    U_plus = [jnp.roll(U, -1, axis=2 + d) for d in range(4)]
+    U_minus = [jnp.roll(U, +1, axis=2 + d) for d in range(4)]
+    U_minus_nu = [U_minus[nu][:, nu] for nu in range(4)]
+    out = []
+    for mu in range(4):
+        U_mu = U[:, mu]
+        staple = jnp.zeros_like(U_mu)
+        for nu in range(4):
+            if nu == mu:
+                continue
+            U_nu = U[:, nu]
+            U_mu_xpnu = U_plus[nu][:, mu]
+            U_nu_xpmu = U_plus[mu][:, nu]
+            fwd = U_nu * U_mu_xpnu * jnp.conj(U_nu_xpmu)
+
+            U_nu_m = U_minus_nu[nu]
+            U_mu_m = U_minus[nu][:, mu]
+            U_nu_m_xpmu = jnp.roll(U_nu_m, -1, axis=1 + mu)
+            bwd = jnp.conj(U_nu_m) * U_mu_m * U_nu_m_xpmu
+            staple = staple + fwd + bwd
+        out.append(coef * project_u1_algebra(U_mu * jnp.conj(staple)))
+    return jnp.stack(out, axis=1)
+
+
+def _evolve_q_u1_fused(dt: float, P: Array, Q: Array) -> Array:
+    # P is anti-Hermitian scalar i*phi (phi real). This avoids generic complex exp.
+    phi = jnp.imag(P)
+    a = dt * phi
+    return (jnp.cos(a) + 1j * jnp.sin(a)) * Q
+
+
 @dataclass
 class U1YangMills:
     lattice_shape: Tuple[int, ...]
@@ -53,6 +145,42 @@ class U1YangMills:
         else:
             self.mu_axis = 1 + self.Nd
             self.lat_axes = tuple(range(1, 1 + self.Nd))
+        # For U(1), 2D specialized action/force are consistently faster.
+        # 4D specialized kernels can be slower than reference on CPU due to extra
+        # memory traffic from pre-rolled link fields; keep 4D opt-in via env.
+        use_nd4_specialized = os.environ.get("JAXQFT_U1_ENABLE_ND4_SPECIALIZED", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        opt_nd_set = {2}
+        if use_nd4_specialized:
+            opt_nd_set.add(4)
+
+        self._use_optimized_action = self.layout == "BMXYIJ" and self.Nd in opt_nd_set
+        self._action_is_jitted = False
+        if self._use_optimized_action:
+            beta = float(self.beta)
+            if self.Nd == 2:
+                self._action_opt = jax.jit(lambda U: _action_bmxyij_nd2_optimized(U, beta))
+            else:
+                self._action_opt = jax.jit(lambda U: _action_bmxyij_nd4_optimized(U, beta))
+            self._action_is_jitted = True
+        self._use_optimized_force = self.layout == "BMXYIJ" and self.Nd in opt_nd_set
+        self._force_is_jitted = False
+        if self._use_optimized_force:
+            beta = float(self.beta)
+            if self.Nd == 2:
+                self._force_opt = jax.jit(lambda U: _force_bmxyij_nd2_optimized(U, beta))
+            else:
+                self._force_opt = jax.jit(lambda U: _force_bmxyij_nd4_optimized(U, beta))
+            self._force_is_jitted = True
+        self._use_optimized_evolve_q = True
+        self._evolve_q_is_jitted = False
+        if self._use_optimized_evolve_q:
+            self._evolve_q_opt = jax.jit(_evolve_q_u1_fused)
+            self._evolve_q_is_jitted = True
 
     def _split_key(self):
         self.key, sub = jax.random.split(self.key)
@@ -78,14 +206,14 @@ class U1YangMills:
     def _sample_algebra(self, scale: float = 1.0) -> Array:
         k = self._split_key()
         im = jax.random.normal(k, self.field_shape(), dtype=jnp.float32)
-        a = (1j * scale * im).astype(self.dtype)
-        return project_u1_algebra(a)
+        # Already anti-Hermitian (i * real), no projection needed.
+        return (1j * scale * im).astype(self.dtype)
 
     def algebra_to_links(self, q: Array) -> Array:
         q = project_u1_algebra(q)
         return jnp.exp(q).astype(self.dtype)
 
-    def action(self, U: Array) -> Array:
+    def action_reference(self, U: Array) -> Array:
         B = U.shape[0]
         S = jnp.zeros((B,), dtype=jnp.float32)
         for mu in range(self.Nd):
@@ -98,6 +226,18 @@ class U1YangMills:
                 trp = jnp.real(plaq)
                 S = S - self.beta * jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
         return S
+
+    def action(self, U: Array) -> Array:
+        if self._use_optimized_action:
+            return self._action_opt(U)
+        return self.action_reference(U)
+
+    def action_optimized_unjitted(self, U: Array) -> Array:
+        if self.layout != "BMXYIJ" or self.Nd not in (2, 4):
+            return self.action_reference(U)
+        if self.Nd == 2:
+            return _action_bmxyij_nd2_optimized(U, self.beta)
+        return _action_bmxyij_nd4_optimized(U, self.beta)
 
     def _staple(self, U: Array, mu: int) -> Array:
         U_mu = self._take_mu(U, mu)
@@ -112,7 +252,7 @@ class U1YangMills:
             staple = staple + fwd + bwd
         return staple
 
-    def force(self, U: Array) -> Array:
+    def force_reference(self, U: Array) -> Array:
         links_force = []
         coef = -self.beta
         for mu in range(self.Nd):
@@ -124,16 +264,38 @@ class U1YangMills:
             return jnp.stack(links_force, axis=1)
         return jnp.stack(links_force, axis=1 + self.Nd)
 
+    def force(self, U: Array) -> Array:
+        if self._use_optimized_force:
+            return self._force_opt(U)
+        return self.force_reference(U)
+
+    def force_optimized_unjitted(self, U: Array) -> Array:
+        if self.layout != "BMXYIJ" or self.Nd not in (2, 4):
+            return self.force_reference(U)
+        if self.Nd == 2:
+            return _force_bmxyij_nd2_optimized(U, self.beta)
+        return _force_bmxyij_nd4_optimized(U, self.beta)
+
     def refresh_p(self) -> Array:
         return self._sample_algebra(scale=1.0)
 
     def refresh_p_with_key(self, key: Array) -> Array:
         im = jax.random.normal(key, self.field_shape(), dtype=jnp.float32)
-        a = (1j * im).astype(self.dtype)
-        return project_u1_algebra(a)
+        # Already anti-Hermitian (i * real), no projection needed.
+        return (1j * im).astype(self.dtype)
+
+    def evolve_q_reference(self, dt: float, P: Array, Q: Array) -> Array:
+        return jnp.exp(dt * P) * Q
 
     def evolve_q(self, dt: float, P: Array, Q: Array) -> Array:
-        return jnp.exp(dt * P) * Q
+        if self._use_optimized_evolve_q:
+            return self._evolve_q_opt(dt, P, Q)
+        return self.evolve_q_reference(dt, P, Q)
+
+    def evolve_q_optimized_unjitted(self, dt: float, P: Array, Q: Array) -> Array:
+        if not self._use_optimized_evolve_q:
+            return self.evolve_q_reference(dt, P, Q)
+        return _evolve_q_u1_fused(dt, P, Q)
 
     def kinetic(self, P: Array) -> Array:
         trp2 = jnp.real(P * P)
@@ -143,20 +305,26 @@ class U1YangMills:
         return self.algebra_to_links(self._sample_algebra(scale=scale))
 
     def average_plaquette(self, U: Array) -> Array:
-        B = U.shape[0]
-        plaq_sum = jnp.zeros((B,), dtype=jnp.float32)
-        count = 0
-        for mu in range(self.Nd):
-            U_mu = self._take_mu(U, mu)
-            for nu in range(mu + 1, self.Nd):
-                U_nu = self._take_mu(U, nu)
-                U_nu_xpmu = self._roll(U_nu, -1, mu)
-                U_mu_xpnu = self._roll(U_mu, -1, nu)
-                plaq = U_mu * U_nu_xpmu * jnp.conj(U_mu_xpnu) * jnp.conj(U_nu)
-                trp = jnp.real(plaq)
-                plaq_sum = plaq_sum + jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
-                count += int(math.prod(self.lattice_shape))
-        return plaq_sum / (count * (self.Nd * (self.Nd - 1) // 2))
+        vol = int(math.prod(self.lattice_shape))
+        nplanes = self.Nd * (self.Nd - 1) // 2
+        if self._use_optimized_action:
+            if self.Nd == 2:
+                plaq_sum = _plaquette_sum_bmxyij_nd2_optimized(U)
+            else:
+                plaq_sum = _plaquette_sum_bmxyij_nd4_optimized(U)
+        else:
+            B = U.shape[0]
+            plaq_sum = jnp.zeros((B,), dtype=jnp.float32)
+            for mu in range(self.Nd):
+                U_mu = self._take_mu(U, mu)
+                for nu in range(mu + 1, self.Nd):
+                    U_nu = self._take_mu(U, nu)
+                    U_nu_xpmu = self._roll(U_nu, -1, mu)
+                    U_mu_xpnu = self._roll(U_mu, -1, nu)
+                    plaq = U_mu * U_nu_xpmu * jnp.conj(U_mu_xpnu) * jnp.conj(U_nu)
+                    trp = jnp.real(plaq)
+                    plaq_sum = plaq_sum + jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
+        return plaq_sum / (vol * nplanes)
 
     @staticmethod
     def benchmark_layout(
@@ -204,8 +372,8 @@ def force_action_fd_test(theory: U1YangMills, eps: float = 1e-5) -> Dict[str, fl
     U = theory.hot_start(scale=0.05)
     H = theory.refresh_p()
 
-    sp = theory.action(jnp.exp(+eps * H) * U)
-    sm = theory.action(jnp.exp(-eps * H) * U)
+    sp = theory.action(theory.algebra_to_links(+eps * H) * U)
+    sm = theory.action(theory.algebra_to_links(-eps * H) * U)
     dS_fd = (sp - sm) / (2.0 * eps)
     dS_fd_mean = jnp.mean(dS_fd)
 
@@ -429,6 +597,37 @@ def force_gauge_covariance_test(
     }
 
 
+def force_impl_consistency_test(
+    theory: U1YangMills,
+    q_scale: float = 0.05,
+    n_trials: int = 3,
+) -> Dict[str, float]:
+    if not theory._use_optimized_force:
+        return {
+            "enabled": 0.0,
+            "max_rel_force_diff": float("nan"),
+            "mean_rel_force_diff": float("nan"),
+            "max_abs_force_diff": float("nan"),
+        }
+
+    rels = []
+    max_abs = []
+    for _ in range(max(1, n_trials)):
+        U = theory.hot_start(scale=q_scale)
+        F_ref = theory.force_reference(U)
+        F_opt = theory.force(U)
+        d = F_opt - F_ref
+        rel = jnp.linalg.norm(d) / (jnp.linalg.norm(F_ref) + 1e-12)
+        rels.append(float(rel))
+        max_abs.append(float(jnp.max(jnp.abs(d))))
+    return {
+        "enabled": 1.0,
+        "max_rel_force_diff": float(np.max(rels)),
+        "mean_rel_force_diff": float(np.mean(rels)),
+        "max_abs_force_diff": float(np.max(max_abs)),
+    }
+
+
 def full_selfcheck(
     theory: U1YangMills,
     gauge_trials: int,
@@ -444,6 +643,15 @@ def full_selfcheck(
     fg = force_gauge_covariance_test(theory, q_scale=0.05, omega_scale=gauge_omega_scale, n_trials=max(1, gauge_trials))
     fg_rel = float(fg["max_rel_force_cov_diff"])
     checks.append(("force_covariance", fg_rel < 1e-6, f"max_rel_force_cov_diff={fg_rel:.3e}"))
+
+    fim = force_impl_consistency_test(
+        theory,
+        q_scale=0.05,
+        n_trials=max(1, gauge_trials),
+    )
+    if bool(fim.get("enabled", 0.0)):
+        fim_rel = float(fim["max_rel_force_diff"])
+        checks.append(("force_impl_consistency", fim_rel < 1e-6, f"max_rel_force_diff={fim_rel:.3e}"))
 
     fd = force_action_fd_test(theory, eps=fd_eps)
     fd_rel = float(fd["rel_fd_vs_force_minus"])
@@ -506,7 +714,7 @@ def main():
         "--tests",
         type=str,
         default="all",
-        help="comma-separated subset of: layout,timing,fd,eps2,eps4,gauge,forcecov,selfcheck,all",
+        help="comma-separated subset of: layout,timing,fd,eps2,eps4,gauge,forcecov,forceimpl,selfcheck,all",
     )
     ap.add_argument("--selfcheck", action="store_true", help="run only the selfcheck suite")
     ap.add_argument("--selfcheck-fail", action="store_true", help="return nonzero exit if any selfcheck fails")
@@ -518,7 +726,7 @@ def main():
     else:
         tests = {t.strip().lower() for t in args.tests.split(",") if t.strip()}
         if "all" in tests:
-            tests = {"layout", "timing", "fd", "eps2", "eps4", "gauge", "forcecov"}
+            tests = {"layout", "timing", "fd", "eps2", "eps4", "gauge", "forcecov", "forceimpl"}
 
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
@@ -647,6 +855,20 @@ def main():
         print(f"  max rel diff F(Up) vs Omega^dag F(U) Omega: {fg['max_rel_force_cov_diff']:.6e}")
         print(f"  mean rel diff F(Up) vs Omega^dag F(U) Omega: {fg['mean_rel_force_cov_diff']:.6e}")
         print(f"  max abs entrywise diff: {fg['max_abs_force_cov_diff']:.6e}")
+
+    if "forceimpl" in tests:
+        fim = force_impl_consistency_test(
+            theory,
+            q_scale=0.05,
+            n_trials=max(1, args.gauge_trials),
+        )
+        if bool(fim.get("enabled", 0.0)):
+            print("Force implementation consistency test:")
+            print(f"  max rel diff optimized vs reference: {fim['max_rel_force_diff']:.6e}")
+            print(f"  mean rel diff optimized vs reference: {fim['mean_rel_force_diff']:.6e}")
+            print(f"  max abs entrywise diff: {fim['max_abs_force_diff']:.6e}")
+        else:
+            print("Force implementation consistency test: skipped (optimized force not enabled for this layout/dimension)")
 
     if "selfcheck" in tests:
         report = full_selfcheck(
