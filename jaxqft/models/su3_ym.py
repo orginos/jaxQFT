@@ -22,6 +22,44 @@ def _dagger(x: Array) -> Array:
     return jnp.swapaxes(jnp.conj(x), -1, -2)
 
 
+def _trace3(x: Array) -> Array:
+    return x[..., 0, 0] + x[..., 1, 1] + x[..., 2, 2]
+
+
+def _mm3(a: Array, b: Array) -> Array:
+    """Specialized 3x3 complex matmul; faster than generic batched @ on tiny matrices."""
+    a00, a01, a02 = a[..., 0, 0], a[..., 0, 1], a[..., 0, 2]
+    a10, a11, a12 = a[..., 1, 0], a[..., 1, 1], a[..., 1, 2]
+    a20, a21, a22 = a[..., 2, 0], a[..., 2, 1], a[..., 2, 2]
+    b00, b01, b02 = b[..., 0, 0], b[..., 0, 1], b[..., 0, 2]
+    b10, b11, b12 = b[..., 1, 0], b[..., 1, 1], b[..., 1, 2]
+    b20, b21, b22 = b[..., 2, 0], b[..., 2, 1], b[..., 2, 2]
+    c00 = a00 * b00 + a01 * b10 + a02 * b20
+    c01 = a00 * b01 + a01 * b11 + a02 * b21
+    c02 = a00 * b02 + a01 * b12 + a02 * b22
+    c10 = a10 * b00 + a11 * b10 + a12 * b20
+    c11 = a10 * b01 + a11 * b11 + a12 * b21
+    c12 = a10 * b02 + a11 * b12 + a12 * b22
+    c20 = a20 * b00 + a21 * b10 + a22 * b20
+    c21 = a20 * b01 + a21 * b11 + a22 * b21
+    c22 = a20 * b02 + a21 * b12 + a22 * b22
+    return jnp.stack(
+        (
+            jnp.stack((c00, c01, c02), axis=-1),
+            jnp.stack((c10, c11, c12), axis=-1),
+            jnp.stack((c20, c21, c22), axis=-1),
+        ),
+        axis=-2,
+    )
+
+
+def _project_su3_algebra_3x3(x: Array) -> Array:
+    y = 0.5 * (x - _dagger(x))  # anti-hermitian
+    tr = (_trace3(y) / 3.0)[..., None, None]
+    eye = jnp.eye(3, dtype=x.dtype)
+    return y - tr * eye
+
+
 def project_su3_algebra(x: Array) -> Array:
     y = 0.5 * (x - _dagger(x))  # anti-hermitian
     tr = jnp.einsum("...aa->...", y)[..., None, None] / 3.0
@@ -56,33 +94,87 @@ def _force_bmxyij_nd4_reference(U: Array, beta: float) -> Array:
 
 
 def _force_bmxyij_nd4_optimized(U: Array, beta: float) -> Array:
-    """Optimized-force path for BMXYIJ/4D with reused shifted links."""
+    """Optimized-force path for BMXYIJ/4D using direction-shifted full link fields."""
     coef = -(beta / 3.0)
-    links = [U[:, 0], U[:, 1], U[:, 2], U[:, 3]]
-    plus = [[jnp.roll(links[r], -1, axis=1 + d) for d in range(4)] for r in range(4)]
-    minus = [[jnp.roll(links[r], +1, axis=1 + d) for d in range(4)] for r in range(4)]
+    # Roll full U over lattice axes once per direction, then select link direction.
+    U_plus = [jnp.roll(U, -1, axis=2 + d) for d in range(4)]
+    U_minus = [jnp.roll(U, +1, axis=2 + d) for d in range(4)]
+    U_minus_nu = [U_minus[nu][:, nu] for nu in range(4)]
+    U_minus_nu_dag = [_dagger(x) for x in U_minus_nu]
     out = []
     for mu in range(4):
-        U_mu = links[mu]
+        U_mu = U[:, mu]
         staple = jnp.zeros_like(U_mu)
         for nu in range(4):
             if nu == mu:
                 continue
-            U_nu = links[nu]
-            U_mu_xpnu = plus[mu][nu]
-            U_nu_xpmu = plus[nu][mu]
-            fwd = U_nu @ U_mu_xpnu @ _dagger(U_nu_xpmu)
+            U_nu = U[:, nu]
+            U_mu_xpnu = U_plus[nu][:, mu]
+            U_nu_xpmu = U_plus[mu][:, nu]
+            fwd = _mm3(_mm3(U_nu, U_mu_xpnu), _dagger(U_nu_xpmu))
 
-            U_nu_m = minus[nu][nu]
-            U_mu_m = minus[mu][nu]
+            U_nu_m = U_minus_nu[nu]
+            U_nu_m_dag = U_minus_nu_dag[nu]
+            U_mu_m = U_minus[nu][:, mu]
             U_nu_m_xpmu = jnp.roll(U_nu_m, -1, axis=1 + mu)
-            bwd = _dagger(U_nu_m) @ U_mu_m @ U_nu_m_xpmu
+            bwd = _mm3(_mm3(U_nu_m_dag, U_mu_m), U_nu_m_xpmu)
             staple = staple + fwd + bwd
-        out.append(coef * project_su3_algebra(U_mu @ _dagger(staple)))
+        out.append(coef * _project_su3_algebra_3x3(_mm3(U_mu, _dagger(staple))))
     return jnp.stack(out, axis=1)
 
 
-_force_bmxyij_nd4_optimized_jit = jax.jit(_force_bmxyij_nd4_optimized)
+def _evolve_q_su3_fused(dt: float, p: Array, q: Array) -> Array:
+    """Fast drift update for SU(3): compute exp(dt*p) @ q without materializing exp(dt*p)."""
+    x = dt * p
+    eps = jnp.finfo(x.real.dtype).eps
+    n_x = jnp.linalg.norm(x, axis=(-1, -2), keepdims=True) / np.sqrt(2.0)
+    xhat = x / (n_x + eps)
+    eta = jnp.linalg.det(xhat)[..., None, None]
+    psi = (jnp.arccos(-jnp.imag(eta) * 3.0 * np.sqrt(3.0) / 2.0) / 3.0).squeeze(-1).squeeze(-1)
+
+    z = jnp.stack(
+        (
+            (2.0 / np.sqrt(3.0) * jnp.cos(psi) * 1j),
+            ((-jnp.sin(psi) - (1.0 / np.sqrt(3.0)) * jnp.cos(psi)) * 1j),
+            ((jnp.sin(psi) - (1.0 / np.sqrt(3.0)) * jnp.cos(psi)) * 1j),
+        ),
+        axis=-1,
+    )[..., None, None]
+    n_x3 = n_x[..., None, :, :]
+    ez = jnp.exp(z * n_x3)
+    den = 3.0 * z * z + 1.0 + eps
+
+    xq = _mm3(xhat, q)
+    x2q = _mm3(xhat, xq)
+    q3 = q[..., None, :, :]
+    xq3 = xq[..., None, :, :]
+    x2q3 = x2q[..., None, :, :]
+
+    a0 = ez * (z * z + 1.0) / den
+    a1 = ez * z / den
+    a2 = ez / den
+    return jnp.sum(a0 * q3 + a1 * xq3 + a2 * x2q3, axis=-3)
+
+
+def _plaquette_sum_bmxyij_nd4_optimized(U: Array) -> Array:
+    """Return sum_{x,mu<nu} Re Tr U_{mu,nu}(x) for BMXYIJ/4D."""
+    B = U.shape[0]
+    plaq_sum = jnp.zeros((B,), dtype=jnp.float32)
+    U_plus = [jnp.roll(U, -1, axis=2 + d) for d in range(4)]
+    for mu in range(4):
+        U_mu = U[:, mu]
+        for nu in range(mu + 1, 4):
+            U_nu = U[:, nu]
+            U_nu_xpmu = U_plus[mu][:, nu]
+            U_mu_xpnu = U_plus[nu][:, mu]
+            plaq = _mm3(_mm3(_mm3(U_mu, U_nu_xpmu), _dagger(U_mu_xpnu)), _dagger(U_nu))
+            trp = jnp.real(_trace3(plaq))
+            plaq_sum = plaq_sum + jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
+    return plaq_sum
+
+
+def _action_bmxyij_nd4_optimized(U: Array, beta: float) -> Array:
+    return -(beta / 3.0) * _plaquette_sum_bmxyij_nd4_optimized(U)
 
 
 @dataclass
@@ -113,7 +205,23 @@ class SU3YangMills:
             raise ValueError("exp_method must be one of: expm, su3")
         self.key = jax.random.PRNGKey(self.seed)
         self._set_axes()
+        self._use_optimized_action = (self.Nd == 4 and self.layout == "BMXYIJ")
+        self._action_is_jitted = False
+        if self._use_optimized_action:
+            beta = float(self.beta)
+            self._action_opt = jax.jit(lambda U: _action_bmxyij_nd4_optimized(U, beta))
+            self._action_is_jitted = True
         self._use_optimized_force = (self.Nd == 4 and self.layout == "BMXYIJ")
+        self._force_is_jitted = False
+        if self._use_optimized_force:
+            beta = float(self.beta)
+            self._force_opt = jax.jit(lambda U: _force_bmxyij_nd4_optimized(U, beta))
+            self._force_is_jitted = True
+        self._use_optimized_evolve_q = self.exp_method == "su3"
+        self._evolve_q_is_jitted = False
+        if self._use_optimized_evolve_q:
+            self._evolve_q_opt = jax.jit(_evolve_q_su3_fused)
+            self._evolve_q_is_jitted = True
 
     def _set_axes(self):
         if self.layout == "BMXYIJ":
@@ -163,7 +271,7 @@ class SU3YangMills:
             return su3_lg.expo(q)
         return jax.scipy.linalg.expm(q)
 
-    def action(self, U: Array) -> Array:
+    def action_reference(self, U: Array) -> Array:
         B = U.shape[0]
         S = jnp.zeros((B,), dtype=jnp.float32)
         for mu in range(self.Nd):
@@ -176,6 +284,16 @@ class SU3YangMills:
                 trp = jnp.real(jnp.einsum("...aa->...", plaq))
                 S = S - (self.beta / 3.0) * jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
         return S
+
+    def action(self, U: Array) -> Array:
+        if self._use_optimized_action:
+            return self._action_opt(U)
+        return self.action_reference(U)
+
+    def action_optimized_unjitted(self, U: Array) -> Array:
+        if not self._use_optimized_action:
+            return self.action_reference(U)
+        return _action_bmxyij_nd4_optimized(U, self.beta)
 
     def _staple(self, U: Array, mu: int) -> Array:
         U_mu = self._take_mu(U, mu)
@@ -210,8 +328,13 @@ class SU3YangMills:
 
     def force(self, U: Array) -> Array:
         if self._use_optimized_force:
-            return _force_bmxyij_nd4_optimized_jit(U, self.beta)
+            return self._force_opt(U)
         return self.force_reference(U)
+
+    def force_optimized_unjitted(self, U: Array) -> Array:
+        if not self._use_optimized_force:
+            return self.force_reference(U)
+        return _force_bmxyij_nd4_optimized(U, self.beta)
 
     def refresh_p(self) -> Array:
         return self._sample_algebra(scale=1.0)
@@ -223,8 +346,18 @@ class SU3YangMills:
         a = (re + 1j * im).astype(self.dtype)
         return project_su3_algebra(a)
 
-    def evolve_q(self, dt: float, P: Array, Q: Array) -> Array:
+    def evolve_q_reference(self, dt: float, P: Array, Q: Array) -> Array:
         return self.algebra_to_links(dt * P) @ Q
+
+    def evolve_q(self, dt: float, P: Array, Q: Array) -> Array:
+        if self._use_optimized_evolve_q:
+            return self._evolve_q_opt(dt, P, Q)
+        return self.evolve_q_reference(dt, P, Q)
+
+    def evolve_q_optimized_unjitted(self, dt: float, P: Array, Q: Array) -> Array:
+        if not self._use_optimized_evolve_q:
+            return self.evolve_q_reference(dt, P, Q)
+        return _evolve_q_su3_fused(dt, P, Q)
 
     def kinetic(self, P: Array) -> Array:
         trp2 = jnp.real(jnp.einsum("...ab,...ba->...", P, P))
@@ -235,19 +368,22 @@ class SU3YangMills:
 
     def average_plaquette(self, q: Array) -> Array:
         U = q
-        B = q.shape[0]
-        plaq_sum = jnp.zeros((B,), dtype=jnp.float32)
         vol = int(math.prod(self.lattice_shape))
         nplanes = self.Nd * (self.Nd - 1) // 2
-        for mu in range(self.Nd):
-            U_mu = self._take_mu(U, mu)
-            for nu in range(mu + 1, self.Nd):
-                U_nu = self._take_mu(U, nu)
-                U_nu_xpmu = self._roll(U_nu, -1, mu)
-                U_mu_xpnu = self._roll(U_mu, -1, nu)
-                plaq = U_mu @ U_nu_xpmu @ _dagger(U_mu_xpnu) @ _dagger(U_nu)
-                trp = jnp.real(jnp.einsum("...aa->...", plaq))
-                plaq_sum = plaq_sum + jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
+        if self._use_optimized_action:
+            plaq_sum = _plaquette_sum_bmxyij_nd4_optimized(U)
+        else:
+            B = q.shape[0]
+            plaq_sum = jnp.zeros((B,), dtype=jnp.float32)
+            for mu in range(self.Nd):
+                U_mu = self._take_mu(U, mu)
+                for nu in range(mu + 1, self.Nd):
+                    U_nu = self._take_mu(U, nu)
+                    U_nu_xpmu = self._roll(U_nu, -1, mu)
+                    U_mu_xpnu = self._roll(U_mu, -1, nu)
+                    plaq = U_mu @ U_nu_xpmu @ _dagger(U_mu_xpnu) @ _dagger(U_nu)
+                    trp = jnp.real(jnp.einsum("...aa->...", plaq))
+                    plaq_sum = plaq_sum + jnp.sum(trp, axis=tuple(range(1, trp.ndim)))
         # <P> = (1 / (Nc * V * Nplanes)) * sum_{x,mu<nu} Re Tr U_{mu,nu}(x), Nc=3
         return plaq_sum / (3.0 * vol * nplanes)
 

@@ -15,6 +15,57 @@ import sys
 import time
 from pathlib import Path
 
+
+def _cli_value(argv, flag: str):
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _cli_bool(argv, on_flag: str, off_flag: str):
+    val = None
+    for a in argv:
+        if a == on_flag:
+            val = True
+        elif a == off_flag:
+            val = False
+    return val
+
+
+def _append_xla_flag(flag: str):
+    cur = os.environ.get("XLA_FLAGS", "").split()
+    if flag not in cur:
+        cur.append(flag)
+        os.environ["XLA_FLAGS"] = " ".join(cur).strip()
+
+
+def _configure_cpu_xla_flags_from_cli_env():
+    # Must run before importing jax.
+    threads = _cli_value(sys.argv, "--cpu-threads")
+    if threads is None:
+        threads = os.environ.get("JAXQFT_CPU_THREADS")
+    if threads is not None:
+        n = int(threads)
+        if n > 0:
+            _append_xla_flag("--xla_cpu_multi_thread_eigen=true")
+            _append_xla_flag(f"intra_op_parallelism_threads={n}")
+
+    onednn = _cli_bool(sys.argv, "--cpu-onednn", "--no-cpu-onednn")
+    if onednn is None:
+        env = os.environ.get("JAXQFT_CPU_ONEDNN")
+        if env is not None:
+            onednn = env.strip().lower() not in ("0", "false", "no", "off")
+    if onednn is True:
+        _append_xla_flag("--xla_cpu_use_onednn=true")
+    elif onednn is False:
+        _append_xla_flag("--xla_cpu_use_onednn=false")
+
+
+_configure_cpu_xla_flags_from_cli_env()
+
 if platform.system() == "Darwin" and "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
     os.environ["JAX_PLATFORMS"] = "cpu"
 
@@ -164,6 +215,18 @@ def main():
     ap.add_argument("--L", type=int, default=8, help="lattice size per dimension")
     ap.add_argument("--Nd", type=int, default=4, help="spacetime dimensions")
     ap.add_argument("--shape", type=str, default="", help="comma-separated lattice shape, e.g. 8,8,8,8")
+    ap.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=int(os.environ.get("JAXQFT_CPU_THREADS", "0") or 0),
+        help="CPU intra-op thread hint (applied before JAX import via XLA_FLAGS); 0 keeps runtime default",
+    )
+    ap.add_argument(
+        "--cpu-onednn",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="toggle oneDNN CPU backend (applied before JAX import via XLA_FLAGS)",
+    )
     ap.add_argument("--beta", type=float, default=5.8)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--integrator", type=str, default="forcegrad", choices=["minnorm2", "leapfrog", "forcegrad", "minnorm4pf4"])
@@ -186,6 +249,7 @@ def main():
 
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
+    print("XLA_FLAGS:", os.environ.get("XLA_FLAGS", "<unset>"))
 
     lattice_shape = _parse_shape(args.shape) if args.shape.strip() else tuple([args.L] * args.Nd)
 
@@ -225,12 +289,27 @@ def main():
     )
     # Optional explicit kernel JITs used by the profile.
     if args.jit_force:
-        theory.force = jax.jit(theory.force)
+        # Avoid nested jit if model already provides a jitted specialized force.
+        if not bool(getattr(theory, "_force_is_jitted", False)):
+            theory.force = jax.jit(theory.force)
+    else:
+        if bool(getattr(theory, "_use_optimized_force", False)):
+            theory.force = theory.force_optimized_unjitted
     if args.jit_evolve_q:
-        theory.evolve_q = jax.jit(theory.evolve_q)
-        theory.evolveQ = theory.evolve_q
+        # Avoid nested jit if model already provides a jitted specialized drift.
+        if not bool(getattr(theory, "_evolve_q_is_jitted", False)):
+            theory.evolve_q = jax.jit(theory.evolve_q)
+    else:
+        if bool(getattr(theory, "_use_optimized_evolve_q", False)):
+            theory.evolve_q = theory.evolve_q_optimized_unjitted
+    theory.evolveQ = theory.evolve_q
     if args.jit_action:
-        theory.action = jax.jit(theory.action)
+        # Avoid nested jit if model already provides a jitted specialized action.
+        if not bool(getattr(theory, "_action_is_jitted", False)):
+            theory.action = jax.jit(theory.action)
+    else:
+        if bool(getattr(theory, "_use_optimized_action", False)):
+            theory.action = theory.action_optimized_unjitted
     if args.jit_kinetic:
         theory.kinetic = jax.jit(theory.kinetic)
     if args.jit_refresh_key and hasattr(theory, "refresh_p_with_key"):

@@ -17,6 +17,57 @@ import sys
 import time
 from pathlib import Path
 
+
+def _cli_value(argv, flag: str):
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def _cli_bool(argv, on_flag: str, off_flag: str):
+    val = None
+    for a in argv:
+        if a == on_flag:
+            val = True
+        elif a == off_flag:
+            val = False
+    return val
+
+
+def _append_xla_flag(flag: str):
+    cur = os.environ.get("XLA_FLAGS", "").split()
+    if flag not in cur:
+        cur.append(flag)
+        os.environ["XLA_FLAGS"] = " ".join(cur).strip()
+
+
+def _configure_cpu_xla_flags_from_cli_env():
+    # Must run before importing jax.
+    threads = _cli_value(sys.argv, "--cpu-threads")
+    if threads is None:
+        threads = os.environ.get("JAXQFT_CPU_THREADS")
+    if threads is not None:
+        n = int(threads)
+        if n > 0:
+            _append_xla_flag("--xla_cpu_multi_thread_eigen=true")
+            _append_xla_flag(f"intra_op_parallelism_threads={n}")
+
+    onednn = _cli_bool(sys.argv, "--cpu-onednn", "--no-cpu-onednn")
+    if onednn is None:
+        env = os.environ.get("JAXQFT_CPU_ONEDNN")
+        if env is not None:
+            onednn = env.strip().lower() not in ("0", "false", "no", "off")
+    if onednn is True:
+        _append_xla_flag("--xla_cpu_use_onednn=true")
+    elif onednn is False:
+        _append_xla_flag("--xla_cpu_use_onednn=false")
+
+
+_configure_cpu_xla_flags_from_cli_env()
+
 if platform.system() == "Darwin" and "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
     os.environ["JAX_PLATFORMS"] = "cpu"
 
@@ -102,7 +153,20 @@ def main():
     ap.add_argument("--L", type=int, default=4, help="lattice size per dimension")
     ap.add_argument("--Nd", type=int, default=4, help="spacetime dimensions")
     ap.add_argument("--shape", type=str, default="", help="comma-separated lattice shape, e.g. 16,16,16,16")
+    ap.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=int(os.environ.get("JAXQFT_CPU_THREADS", "0") or 0),
+        help="CPU intra-op thread hint (applied before JAX import via XLA_FLAGS); 0 keeps runtime default",
+    )
+    ap.add_argument(
+        "--cpu-onednn",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="toggle oneDNN CPU backend (applied before JAX import via XLA_FLAGS)",
+    )
     ap.add_argument("--beta", type=float, default=5.8)
+    ap.add_argument("--exp-method", type=str, default="su3", choices=["su3", "expm"])
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--warmup", type=int, default=20)
     ap.add_argument("--meas", type=int, default=50)
@@ -121,7 +185,12 @@ def main():
     ap.add_argument("--warmup-log-every", type=int, default=5)
     ap.add_argument("--layout", type=str, default="BMXYIJ", choices=["BMXYIJ", "BXYMIJ", "auto"])
     ap.add_argument("--layout-bench-iters", type=int, default=3)
-    ap.add_argument("--fast-hmc-jit", action=argparse.BooleanOptionalAction, default=True, help="use jitted scan HMC path in jaxqft.core.update.HMC")
+    ap.add_argument(
+        "--fast-hmc-jit",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="use jitted scan HMC path in jaxqft.core.update.HMC (can be slower on CPU)",
+    )
     ap.add_argument("--jit-force", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 force kernel")
     ap.add_argument("--jit-evolve-q", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 link update (evolve_q)")
     ap.add_argument("--jit-action", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 action kernel")
@@ -135,6 +204,7 @@ def main():
 
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
+    print("XLA_FLAGS:", os.environ.get("XLA_FLAGS", "<unset>"))
 
     ckpt = _load_checkpoint(args.resume) if args.resume else None
 
@@ -146,6 +216,7 @@ def main():
     integrator_name = str(args.integrator)
     nmd = int(args.nmd)
     selected_layout = str(args.layout)
+    exp_method = str(args.exp_method)
 
     if ckpt is not None:
         c = ckpt.get("config", {})
@@ -156,9 +227,10 @@ def main():
         skip = int(c.get("skip", skip))
         integrator_name = str(c.get("integrator", integrator_name))
         selected_layout = str(c.get("layout", "BMXYIJ"))
+        exp_method = str(c.get("exp_method", exp_method))
         nmd = int(ckpt.get("state", {}).get("nmd", nmd))
         print(f"Resuming from {args.resume}")
-        print("  using checkpoint config for shape/beta/batch/layout/integrator/tau/skip")
+        print("  using checkpoint config for shape/beta/batch/layout/exp_method/integrator/tau/skip")
 
     if selected_layout == "auto" and ckpt is None:
         timings = SU3YangMills.benchmark_layout(
@@ -167,6 +239,7 @@ def main():
             batch_size=max(1, batch),
             n_iter=max(1, args.layout_bench_iters),
             seed=args.seed,
+            exp_method=exp_method,
         )
         selected_layout = min(timings, key=timings.get)
         print("Layout benchmark (s/action):", timings)
@@ -178,15 +251,32 @@ def main():
         batch_size=batch,
         layout=selected_layout,
         seed=args.seed,
+        exp_method=exp_method,
     )
     # Optional explicit kernel JITs for single-device performance tuning.
     if args.jit_force:
-        theory.force = jax.jit(theory.force)
+        # Avoid nested jit if model already provides a jitted specialized force.
+        if not bool(getattr(theory, "_force_is_jitted", False)):
+            theory.force = jax.jit(theory.force)
+    else:
+        # For optimized SU3 path, allow disabling the internal jitted force for A/B tests.
+        if bool(getattr(theory, "_use_optimized_force", False)):
+            theory.force = theory.force_optimized_unjitted
     if args.jit_evolve_q:
-        theory.evolve_q = jax.jit(theory.evolve_q)
-        theory.evolveQ = theory.evolve_q
+        # Avoid nested jit if model already provides a jitted specialized drift.
+        if not bool(getattr(theory, "_evolve_q_is_jitted", False)):
+            theory.evolve_q = jax.jit(theory.evolve_q)
+    else:
+        if bool(getattr(theory, "_use_optimized_evolve_q", False)):
+            theory.evolve_q = theory.evolve_q_optimized_unjitted
+    theory.evolveQ = theory.evolve_q
     if args.jit_action:
-        theory.action = jax.jit(theory.action)
+        # Avoid nested jit if model already provides a jitted specialized action.
+        if not bool(getattr(theory, "_action_is_jitted", False)):
+            theory.action = jax.jit(theory.action)
+    else:
+        if bool(getattr(theory, "_use_optimized_action", False)):
+            theory.action = theory.action_optimized_unjitted
     if args.jit_kinetic:
         theory.kinetic = jax.jit(theory.kinetic)
     if args.jit_refresh_key and hasattr(theory, "refresh_p_with_key"):
@@ -225,6 +315,7 @@ def main():
     print("Run config:")
     print(f"  lattice_shape: {lattice_shape}")
     print(f"  beta: {beta}")
+    print(f"  exp_method: {exp_method}")
     print(f"  batch: {batch}")
     print(f"  layout: {selected_layout}")
     print(f"  integrator: {integrator_name} (nmd={nmd}, tau={tau})")
@@ -253,6 +344,7 @@ def main():
     ckpt_config = {
         "lattice_shape": tuple(int(v) for v in lattice_shape),
         "beta": float(beta),
+        "exp_method": str(exp_method),
         "batch": int(batch),
         "layout": selected_layout,
         "integrator": integrator_name,
