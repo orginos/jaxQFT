@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Component timing benchmark for a single SU(3) HMC trajectory.
+"""Component timing benchmark for a single SU(2) HMC trajectory.
 
 This script is designed to identify dominant runtime components on realistic
 lattices (default 8^4). It times one trajectory in synchronized mode so each
@@ -88,7 +88,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
-from jaxqft.models.su3_ym import SU3YangMills
+from jaxqft.models.su2_ym import SU2YangMills
 
 
 def _sync(x):
@@ -286,7 +286,7 @@ def _profile_one_trajectory(q, key, theory, integrator_name: str, nmd: int, tau:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Benchmark one SU3 HMC trajectory by component timing.")
+    ap = argparse.ArgumentParser(description="Benchmark one SU2 HMC trajectory by component timing.")
     ap.add_argument("--L", type=int, default=8, help="lattice size per dimension")
     ap.add_argument("--Nd", type=int, default=4, help="spacetime dimensions")
     ap.add_argument("--shape", type=str, default="", help="comma-separated lattice shape, e.g. 8,8,8,8")
@@ -302,17 +302,17 @@ def main():
         default=None,
         help="toggle oneDNN CPU backend (applied before JAX import via XLA_FLAGS)",
     )
-    ap.add_argument("--beta", type=float, default=5.8)
+    ap.add_argument("--beta", type=float, default=2.5)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--integrator", type=str, default="forcegrad", choices=["minnorm2", "leapfrog", "forcegrad", "minnorm4pf4"])
     ap.add_argument("--nmd", type=int, default=8)
     ap.add_argument("--tau", type=float, default=1.0)
     ap.add_argument("--layout", type=str, default="auto", choices=["BMXYIJ", "BXYMIJ", "auto"])
     ap.add_argument("--layout-bench-iters", type=int, default=3)
-    ap.add_argument("--exp-method", type=str, default="su3", choices=["su3", "expm"])
-    ap.add_argument("--jit-force", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 force kernel")
-    ap.add_argument("--jit-evolve-q", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 evolve_q kernel")
-    ap.add_argument("--jit-action", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 action kernel")
+    ap.add_argument("--exp-method", type=str, default="su2", choices=["su2", "expm"])
+    ap.add_argument("--jit-force", action=argparse.BooleanOptionalAction, default=True, help="jit SU2 force kernel")
+    ap.add_argument("--jit-evolve-q", action=argparse.BooleanOptionalAction, default=True, help="jit SU2 evolve_q kernel")
+    ap.add_argument("--jit-action", action=argparse.BooleanOptionalAction, default=True, help="jit SU2 action kernel")
     ap.add_argument("--jit-kinetic", action=argparse.BooleanOptionalAction, default=True, help="jit kinetic kernel")
     ap.add_argument("--jit-refresh-key", action=argparse.BooleanOptionalAction, default=True, help="jit refresh_p_with_key kernel")
     ap.add_argument("--seed", type=int, default=0)
@@ -341,7 +341,7 @@ def main():
 
     selected_layout = args.layout
     if args.layout == "auto":
-        ta = SU3YangMills.benchmark_layout(
+        ta = SU2YangMills.benchmark_layout(
             lattice_shape=lattice_shape,
             beta=args.beta,
             batch_size=max(1, args.batch),
@@ -350,7 +350,7 @@ def main():
             kernel="action",
             exp_method=args.exp_method,
         )
-        tf = SU3YangMills.benchmark_layout(
+        tf = SU2YangMills.benchmark_layout(
             lattice_shape=lattice_shape,
             beta=args.beta,
             batch_size=max(1, args.batch),
@@ -365,7 +365,7 @@ def main():
             print(f"  {lay}: action={ta[lay]:.6e}, force={tf[lay]:.6e}")
         print("Selected layout:", selected_layout)
 
-    theory = SU3YangMills(
+    theory = SU2YangMills(
         lattice_shape=lattice_shape,
         beta=args.beta,
         batch_size=args.batch,

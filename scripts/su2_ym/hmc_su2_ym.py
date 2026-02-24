@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HMC simulation for pure SU(3) Yang-Mills using jaxqft.
+"""HMC simulation for pure SU(2) Yang-Mills using jaxqft.
 
 Features:
 - Arbitrary lattice shape via --shape.
@@ -90,7 +90,7 @@ if str(ROOT) not in sys.path:
 
 from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
 from jaxqft.core.update import hmc
-from jaxqft.models.su3_ym import SU3YangMills
+from jaxqft.models.su2_ym import SU2YangMills
 from jaxqft.stats import integrated_autocorr_time
 
 
@@ -118,7 +118,7 @@ def _default_target_accept(name: str) -> float:
     return 0.90 if _integrator_order(name) == 4 else 0.68
 
 
-def _build_integrator(name: str, theory: SU3YangMills, nmd: int, tau: float):
+def _build_integrator(name: str, theory: SU2YangMills, nmd: int, tau: float):
     if name == "minnorm2":
         return minnorm2(theory.force, theory.evolveQ, nmd, tau)
     if name == "leapfrog":
@@ -166,8 +166,8 @@ def main():
         default=None,
         help="toggle oneDNN CPU backend (applied before JAX import via XLA_FLAGS)",
     )
-    ap.add_argument("--beta", type=float, default=5.8)
-    ap.add_argument("--exp-method", type=str, default="su3", choices=["su3", "expm"])
+    ap.add_argument("--beta", type=float, default=2.5)
+    ap.add_argument("--exp-method", type=str, default="su2", choices=["su2", "expm"])
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--warmup", type=int, default=20)
     ap.add_argument("--meas", type=int, default=50)
@@ -192,13 +192,13 @@ def main():
         default=False,
         help="use jitted scan HMC path in jaxqft.core.update.HMC (can be slower on CPU)",
     )
-    ap.add_argument("--jit-force", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 force kernel")
-    ap.add_argument("--jit-evolve-q", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 link update (evolve_q)")
-    ap.add_argument("--jit-action", action=argparse.BooleanOptionalAction, default=True, help="jit SU3 action kernel")
+    ap.add_argument("--jit-force", action=argparse.BooleanOptionalAction, default=True, help="jit SU2 force kernel")
+    ap.add_argument("--jit-evolve-q", action=argparse.BooleanOptionalAction, default=True, help="jit SU2 link update (evolve_q)")
+    ap.add_argument("--jit-action", action=argparse.BooleanOptionalAction, default=True, help="jit SU2 action kernel")
     ap.add_argument("--jit-kinetic", action=argparse.BooleanOptionalAction, default=True, help="jit kinetic-energy kernel")
     ap.add_argument("--jit-refresh-key", action=argparse.BooleanOptionalAction, default=True, help="jit refresh_p_with_key kernel used by fast HMC")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--save", type=str, default="su3_hmc_ckpt.pkl", help="checkpoint path")
+    ap.add_argument("--save", type=str, default="su2_hmc_ckpt.pkl", help="checkpoint path")
     ap.add_argument("--resume", type=str, default="", help="resume from checkpoint")
     ap.add_argument("--save-every", type=int, default=0, help="save every N warmup trajectories / measurement steps")
     ap.add_argument(
@@ -242,7 +242,7 @@ def main():
         print("  using checkpoint config for shape/beta/batch/layout/exp_method/integrator/tau/skip")
 
     if selected_layout == "auto" and ckpt is None:
-        timings = SU3YangMills.benchmark_layout(
+        timings = SU2YangMills.benchmark_layout(
             lattice_shape=lattice_shape,
             beta=beta,
             batch_size=max(1, batch),
@@ -254,7 +254,7 @@ def main():
         print("Layout benchmark (s/action):", timings)
         print("Selected layout:", selected_layout)
 
-    theory = SU3YangMills(
+    theory = SU2YangMills(
         lattice_shape=lattice_shape,
         beta=beta,
         batch_size=batch,
@@ -268,7 +268,7 @@ def main():
         if not bool(getattr(theory, "_force_is_jitted", False)):
             theory.force = jax.jit(theory.force)
     else:
-        # For optimized SU3 path, allow disabling the internal jitted force for A/B tests.
+        # For optimized SU2 path, allow disabling the internal jitted force for A/B tests.
         if bool(getattr(theory, "_use_optimized_force", False)):
             theory.force = theory.force_optimized_unjitted
     if args.jit_evolve_q:
