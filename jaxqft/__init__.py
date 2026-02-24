@@ -19,6 +19,7 @@ from .core import (
     RRESPALeapfrog,
     RRESPAMinNorm2,
     HMC,
+    SMD,
     HMCSampler,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "RRESPALeapfrog",
     "RRESPAMinNorm2",
     "HMC",
+    "SMD",
     "HMCSampler",
     "LieGroups",
 ]

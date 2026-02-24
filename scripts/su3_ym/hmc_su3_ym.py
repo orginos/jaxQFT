@@ -89,7 +89,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
-from jaxqft.core.update import hmc
+from jaxqft.core.update import SMD, hmc
 from jaxqft.models.su3_ym import SU3YangMills
 from jaxqft.stats import integrated_autocorr_time
 
@@ -131,9 +131,13 @@ def _build_integrator(name: str, theory: SU3YangMills, nmd: int, tau: float):
 
 
 def _save_checkpoint(path: str, q, theory, chain, state: dict, config: dict):
+    update_p = getattr(chain, "p", None)
     payload = {
         "q": np.asarray(q),
         "theory_key": np.asarray(theory.key),
+        "update_key": np.asarray(chain.key),
+        "update_momentum": (None if update_p is None else np.asarray(update_p)),
+        # Backward compatibility with older HMC-only checkpoints.
         "hmc_key": np.asarray(chain.key),
         "accept_reject": np.asarray(chain.AcceptReject, dtype=np.float32),
         "state": state,
@@ -175,6 +179,25 @@ def main():
     ap.add_argument("--nmd", type=int, default=8)
     ap.add_argument("--tau", type=float, default=1.0)
     ap.add_argument("--integrator", type=str, default="minnorm2", choices=["minnorm2", "leapfrog", "forcegrad", "minnorm4pf4"])
+    ap.add_argument(
+        "--update",
+        type=str,
+        default=None,
+        choices=["hmc", "smd", "ghmc"],
+        help="update algorithm (default: hmc, or checkpoint value on resume)",
+    )
+    ap.add_argument(
+        "--smd-gamma",
+        type=float,
+        default=None,
+        help="SMD/GHMC OU friction gamma (default: 0.3, or checkpoint value on resume)",
+    )
+    ap.add_argument(
+        "--smd-accept-reject",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="SMD/GHMC Metropolis accept/reject (default: true, or checkpoint value on resume)",
+    )
     ap.add_argument("--target-accept", type=float, default=None, help="warmup adaptation target; default depends on integrator order")
     ap.add_argument("--adapt-nmd", action=argparse.BooleanOptionalAction, default=True, help="adapt nmd during warmup")
     ap.add_argument("--adapt-interval", type=int, default=5, help="adapt every this many warmup trajectories")
@@ -226,6 +249,9 @@ def main():
     nmd = int(args.nmd)
     selected_layout = str(args.layout)
     exp_method = str(args.exp_method)
+    update_name = args.update
+    smd_gamma = args.smd_gamma
+    smd_accept_reject = args.smd_accept_reject
 
     if ckpt is not None:
         c = ckpt.get("config", {})
@@ -237,9 +263,26 @@ def main():
         integrator_name = str(c.get("integrator", integrator_name))
         selected_layout = str(c.get("layout", "BMXYIJ"))
         exp_method = str(c.get("exp_method", exp_method))
+        if update_name is None:
+            update_name = str(c.get("update", "hmc"))
+        if smd_gamma is None:
+            smd_gamma = float(c.get("smd_gamma", 0.3))
+        if smd_accept_reject is None:
+            smd_accept_reject = bool(c.get("smd_accept_reject", True))
         nmd = int(ckpt.get("state", {}).get("nmd", nmd))
         print(f"Resuming from {args.resume}")
-        print("  using checkpoint config for shape/beta/batch/layout/exp_method/integrator/tau/skip")
+        print("  using checkpoint config for shape/beta/batch/layout/exp_method/integrator/update/tau/skip")
+    else:
+        if update_name is None:
+            update_name = "hmc"
+        if smd_gamma is None:
+            smd_gamma = 0.3
+        if smd_accept_reject is None:
+            smd_accept_reject = True
+
+    update_name = str(update_name).lower()
+    if update_name == "ghmc":
+        update_name = "smd"
 
     if selected_layout == "auto" and ckpt is None:
         timings = SU3YangMills.benchmark_layout(
@@ -294,7 +337,19 @@ def main():
     q = theory.hotStart(scale=0.2)
 
     I = _build_integrator(integrator_name, theory, nmd, tau)
-    chain = hmc(T=theory, I=I, verbose=False, use_fast_jit=bool(args.fast_hmc_jit))
+    if update_name == "hmc":
+        chain = hmc(T=theory, I=I, verbose=False, use_fast_jit=bool(args.fast_hmc_jit))
+    elif update_name == "smd":
+        chain = SMD(
+            T=theory,
+            I=I,
+            gamma=float(smd_gamma),
+            accept_reject=bool(smd_accept_reject),
+            verbose=False,
+            use_fast_jit=bool(args.fast_hmc_jit),
+        )
+    else:
+        raise ValueError(f"Unknown update algorithm: {update_name}")
 
     warmup_done = 0
     meas_done = 0
@@ -306,7 +361,13 @@ def main():
     if ckpt is not None:
         q = jax.device_put(np.asarray(ckpt["q"]))
         theory.key = jax.device_put(np.asarray(ckpt["theory_key"], dtype=np.uint32))
-        chain.key = jax.device_put(np.asarray(ckpt["hmc_key"], dtype=np.uint32))
+        update_key = ckpt.get("update_key", ckpt.get("hmc_key"))
+        if update_key is None:
+            raise ValueError("Checkpoint does not contain update key")
+        chain.key = jax.device_put(np.asarray(update_key, dtype=np.uint32))
+        if hasattr(chain, "p"):
+            p_arr = ckpt.get("update_momentum", None)
+            chain.p = None if p_arr is None else jax.device_put(np.asarray(p_arr))
         chain.AcceptReject = list(np.asarray(ckpt.get("accept_reject", []), dtype=np.float64))
         s = ckpt.get("state", {})
         warmup_done = int(s.get("warmup_done", 0))
@@ -327,6 +388,10 @@ def main():
     print(f"  exp_method: {exp_method}")
     print(f"  batch: {batch}")
     print(f"  layout: {selected_layout}")
+    if update_name == "smd":
+        print(f"  update: {update_name} (gamma={float(smd_gamma):.6g}, accept_reject={bool(smd_accept_reject)})")
+    else:
+        print(f"  update: {update_name}")
     print(f"  integrator: {integrator_name} (nmd={nmd}, tau={tau})")
     print(f"  warmup/meas/skip: {args.warmup}/{args.meas}/{skip}")
     print(
@@ -356,6 +421,9 @@ def main():
         "exp_method": str(exp_method),
         "batch": int(batch),
         "layout": selected_layout,
+        "update": update_name,
+        "smd_gamma": float(smd_gamma),
+        "smd_accept_reject": bool(smd_accept_reject),
         "integrator": integrator_name,
         "tau": float(tau),
         "skip": int(skip),

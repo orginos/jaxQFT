@@ -18,7 +18,7 @@ from .integrators import (
     simple_evolveP,
     simple_evolve_p,
 )
-from .update import HMC, hmc
+from .update import HMC, SMD, ghmc, hmc, smd
 from .hmc_sampler import HMCSampler, hmc_sampler
 
 __all__ = [
@@ -39,7 +39,10 @@ __all__ = [
     "simple_evolveP",
     "simple_evolve_p",
     "HMC",
+    "SMD",
+    "ghmc",
     "hmc",
+    "smd",
     "HMCSampler",
     "hmc_sampler",
 ]
