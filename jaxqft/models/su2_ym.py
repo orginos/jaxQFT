@@ -431,6 +431,121 @@ def force_action_fd_test(theory: SU2YangMills, eps: float = 1e-5) -> Dict[str, f
     }
 
 
+def action_grad_links_autodiff(theory: SU2YangMills, U: Array) -> Array:
+    """Return entrywise dS/dU via real-imag autodiff on S=sum_batch action(U)."""
+
+    grad_links_fn = getattr(theory, "_autodiff_action_grad_links_fn", None)
+    if grad_links_fn is None:
+        def _action_sum(u_re: Array, u_im: Array) -> Array:
+            u = (u_re + 1j * u_im).astype(theory.dtype)
+            return jnp.sum(theory.action(u))
+
+        grad_re_im = jax.grad(_action_sum, argnums=(0, 1))
+
+        def _grad_links(u: Array) -> Array:
+            g_re, g_im = grad_re_im(jnp.real(u), jnp.imag(u))
+            return (g_re - 1j * g_im).astype(theory.dtype)
+
+        grad_links_fn = _grad_links
+        setattr(theory, "_autodiff_action_grad_links_fn", grad_links_fn)
+    return grad_links_fn(U)
+
+
+def force_from_action_autodiff(theory: SU2YangMills, U: Array) -> Array:
+    """Build Lie force from autodiff matrix gradient:
+    dS/dU_ij = G_ji, X = U G, F = proj_su2(X).
+    """
+
+    dS_dU = action_grad_links_autodiff(theory, U)
+    G = jnp.swapaxes(dS_dU, -1, -2)
+    return project_su2_algebra(U @ G)
+
+
+def force_action_autodiff_test(
+    theory: SU2YangMills,
+    q_scale: float = 0.05,
+    n_trials: int = 1,
+) -> Dict[str, float]:
+    rel_force = []
+    abs_force = []
+    rel_dir = []
+    mean_dir_auto = []
+    mean_dir_force = []
+
+    for _ in range(max(1, int(n_trials))):
+        U = theory.hot_start(scale=q_scale)
+        F = theory.force(U)
+
+        dS_dU = action_grad_links_autodiff(theory, U)
+        F_ad = project_su2_algebra(U @ jnp.swapaxes(dS_dU, -1, -2))
+
+        dF = F_ad - F
+        rel = jnp.linalg.norm(dF) / (jnp.linalg.norm(F) + 1e-12)
+        rel_force.append(float(rel))
+        abs_force.append(float(jnp.max(jnp.abs(dF))))
+
+        H = theory.refresh_p()
+        dU = H @ U
+        dS_auto = jnp.real(jnp.sum(dS_dU * dU, axis=tuple(range(1, dU.ndim))))
+        dS_force = -_algebra_inner(F, H)
+        dS_auto_mean = jnp.mean(dS_auto)
+        dS_force_mean = jnp.mean(dS_force)
+        rdir = jnp.abs(dS_auto_mean - dS_force_mean) / (jnp.abs(dS_auto_mean) + 1e-12)
+        rel_dir.append(float(rdir))
+        mean_dir_auto.append(float(dS_auto_mean))
+        mean_dir_force.append(float(dS_force_mean))
+
+    return {
+        "max_rel_force_diff": float(np.max(rel_force)),
+        "mean_rel_force_diff": float(np.mean(rel_force)),
+        "max_abs_force_diff": float(np.max(abs_force)),
+        "max_rel_directional_diff": float(np.max(rel_dir)),
+        "mean_rel_directional_diff": float(np.mean(rel_dir)),
+        "mean_directional_autodiff": float(np.mean(mean_dir_auto)),
+        "mean_directional_force": float(np.mean(mean_dir_force)),
+    }
+
+
+def force_action_autodiff_timing(
+    theory: SU2YangMills,
+    q_scale: float = 0.05,
+    n_iter: int = 5,
+) -> Dict[str, float]:
+    U = theory.hot_start(scale=q_scale)
+    nit = max(1, int(n_iter))
+    _ = action_grad_links_autodiff(theory, U)
+
+    analytic_force = theory.force
+    if not bool(getattr(theory, "_force_is_jitted", False)):
+        analytic_force = jax.jit(analytic_force)
+    autodiff_force = jax.jit(lambda u: force_from_action_autodiff(theory, u))
+
+    F_ana = analytic_force(U)
+    F_ana.block_until_ready()
+    F_ad = autodiff_force(U)
+    F_ad.block_until_ready()
+    rel = float(jnp.linalg.norm(F_ad - F_ana) / (jnp.linalg.norm(F_ana) + 1e-12))
+
+    t0 = time.perf_counter()
+    for _ in range(nit):
+        analytic_force(U).block_until_ready()
+    t1 = time.perf_counter()
+
+    t2 = time.perf_counter()
+    for _ in range(nit):
+        autodiff_force(U).block_until_ready()
+    t3 = time.perf_counter()
+
+    ana = (t1 - t0) / nit
+    ad = (t3 - t2) / nit
+    return {
+        "analytic_sec_per_call": float(ana),
+        "autodiff_sec_per_call": float(ad),
+        "autodiff_over_analytic": float(ad / (ana + 1e-16)),
+        "rel_force_diff": rel,
+    }
+
+
 def epsilon2_test(
     theory: SU2YangMills,
     tau: float = 1.0,
@@ -698,6 +813,7 @@ def full_selfcheck(
     gauge_omega_scale: float,
     gauge_exp_method: str,
     fd_eps: float,
+    autodiff_trials: int,
 ) -> Dict[str, object]:
     checks = []
 
@@ -748,6 +864,17 @@ def full_selfcheck(
     fd_rel = float(fd["rel_fd_vs_force_minus"])
     checks.append(("fd_force_consistency", fd_rel < 2e-2, f"rel_fd_vs_force={fd_rel:.3e}"))
 
+    ad = force_action_autodiff_test(theory, q_scale=0.05, n_trials=max(1, autodiff_trials))
+    ad_rel = float(ad["max_rel_force_diff"])
+    ad_dir = float(ad["max_rel_directional_diff"])
+    checks.append(
+        (
+            "autodiff_force_consistency",
+            (ad_rel < 2e-2) and (ad_dir < 2e-2),
+            f"max_rel_force={ad_rel:.3e}, max_rel_dir={ad_dir:.3e}",
+        )
+    )
+
     eps2 = epsilon2_test(theory, tau=1.0, nmd_values=(8, 16, 32), integrator_name="minnorm2")
     slope = float(eps2["loglog_slope"])
     checks.append(("eps2_scaling", (slope > 1.5) and (slope < 2.5), f"slope={slope:.3f}"))
@@ -778,6 +905,7 @@ def main():
     ap.add_argument("--gauge-trials", type=int, default=3)
     ap.add_argument("--gauge-omega-scale", type=float, default=0.05)
     ap.add_argument("--gauge-exp-method", type=str, default="expm", choices=["expm", "su2", "auto"])
+    ap.add_argument("--autodiff-trials", type=int, default=1)
     ap.add_argument("--tau", type=float, default=0.25)
     ap.add_argument("--nmd-list", type=str, default="8,16,32,64,128")
     ap.add_argument("--eps-samples", type=int, default=8, help="number of random trajectories per nmd point")
@@ -792,7 +920,7 @@ def main():
         "--tests",
         type=str,
         default="all",
-        help="comma-separated subset of: layout,expo,timing,fd,eps2,eps4,gauge,forcecov,forceimpl,selfcheck,all",
+        help="comma-separated subset of: layout,expo,timing,fd,autodiff,eps2,eps4,gauge,forcecov,forceimpl,selfcheck,all",
     )
     ap.add_argument("--selfcheck", action="store_true", help="run only the selfcheck suite")
     ap.add_argument("--selfcheck-fail", action="store_true", help="return nonzero exit if any selfcheck fails")
@@ -804,7 +932,7 @@ def main():
     else:
         tests = {t.strip().lower() for t in args.tests.split(",") if t.strip()}
         if "all" in tests:
-            tests = {"layout", "expo", "timing", "fd", "eps2", "eps4", "gauge", "forcecov", "forceimpl"}
+            tests = {"layout", "expo", "timing", "fd", "autodiff", "eps2", "eps4", "gauge", "forcecov", "forceimpl"}
 
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
@@ -890,6 +1018,34 @@ def main():
         print("Force/action finite-difference test:")
         print(f"  rel(fd, -<F,H>): {fd['rel_fd_vs_force_minus']:.6e}")
         print(f"  mean fd / -<F,H>: {fd['mean_fd']:.6e} / {fd['mean_force_minus']:.6e}")
+
+    if "autodiff" in tests:
+        ad = force_action_autodiff_test(
+            theory,
+            q_scale=0.05,
+            n_trials=max(1, args.autodiff_trials),
+        )
+        print("Force/action autodiff Lie-derivative test:")
+        print(f"  max rel force diff (autodiff vs analytic): {ad['max_rel_force_diff']:.6e}")
+        print(f"  mean rel force diff (autodiff vs analytic): {ad['mean_rel_force_diff']:.6e}")
+        print(f"  max abs force entry diff: {ad['max_abs_force_diff']:.6e}")
+        print(f"  max rel directional diff dS(auto) vs -<F,H>: {ad['max_rel_directional_diff']:.6e}")
+        print(
+            "  mean directional dS(auto) / -<F,H>:"
+            f" {ad['mean_directional_autodiff']:.6e} / {ad['mean_directional_force']:.6e}"
+        )
+        adt = force_action_autodiff_timing(
+            theory,
+            q_scale=0.05,
+            n_iter=max(1, args.n_iter_timing),
+        )
+        print("Autodiff timing (post-JIT steady-state):")
+        print(
+            "  analytic/autodiff sec per call:"
+            f" {adt['analytic_sec_per_call']:.6e} / {adt['autodiff_sec_per_call']:.6e}"
+        )
+        print(f"  autodiff / analytic time ratio: {adt['autodiff_over_analytic']:.3f}x")
+        print(f"  rel force diff (timed kernels): {adt['rel_force_diff']:.6e}")
 
     if "eps2" in tests:
         nmd_values = _parse_nmd_list(args.nmd_list)
@@ -1000,6 +1156,7 @@ def main():
             gauge_omega_scale=args.gauge_omega_scale,
             gauge_exp_method=gauge_exp_method,
             fd_eps=args.fd_eps,
+            autodiff_trials=args.autodiff_trials,
         )
         print("SU2 full selfcheck:")
         for name, ok, msg in report["checks"]:
