@@ -37,9 +37,21 @@ class HMC:
     def _has_fast_refresh(self) -> bool:
         return hasattr(self.T, "refresh_p_with_key")
 
+    def _needs_trajectory_refresh(self) -> bool:
+        return bool(getattr(self.T, "requires_trajectory_refresh", False))
+
+    def _prepare_trajectory(self, q: jax.Array) -> None:
+        if not self._needs_trajectory_refresh():
+            return
+        fn = getattr(self.T, "prepare_trajectory", None)
+        if not callable(fn):
+            raise AttributeError("Theory declares requires_trajectory_refresh=True but has no prepare_trajectory(q, traj_length)")
+        fn(q, traj_length=float(getattr(self.I, "t", 1.0)))
+
     def _evolve_python(self, q: jax.Array, N: int) -> jax.Array:
         qshape = tuple([q.shape[0]] + [1] * (q.ndim - 1))
         for k in range(int(N)):
+            self._prepare_trajectory(q)
             q0 = q
             p0 = self.T.refreshP()
             H0 = self.T.kinetic(p0) + self.T.action(q0)
@@ -106,7 +118,8 @@ class HMC:
     def evolve(self, q: jax.Array, N: int) -> jax.Array:
         if int(N) <= 0:
             return q
-        if self.use_fast_jit and (not self.verbose) and self._has_fast_refresh():
+        # Fast scan path does not support per-trajectory Python-side internal field refresh.
+        if self.use_fast_jit and (not self.verbose) and self._has_fast_refresh() and (not self._needs_trajectory_refresh()):
             return self._evolve_fast(q, int(N))
         return self._evolve_python(q, int(N))
 
@@ -121,12 +134,12 @@ hmc = HMC
 class SMD:
     """Stochastic Molecular Dynamics / GHMC-style update.
 
-    This follows the Chroma convention:
+    This algorithm does:
     - Ornstein-Uhlenbeck momentum refresh with trajectory length `I.t`
       p <- c1 * p + c2 * eta, c1=exp(-gamma*tau), c2=sqrt(1-c1^2)
     - MD proposal with integrator `I`
     - optional Metropolis accept/reject
-    - on reject, restore post-OU (q,p) state.
+    - on reject, keep q and flip momentum used in MD: p <- -p_ou.
     """
 
     T: object
@@ -164,8 +177,19 @@ class SMD:
     def _has_fast_refresh(self) -> bool:
         return hasattr(self.T, "refresh_p_with_key")
 
+    def _needs_trajectory_refresh(self) -> bool:
+        return bool(getattr(self.T, "requires_trajectory_refresh", False))
+
     def _traj_length(self) -> float:
         return float(getattr(self.I, "t", 1.0))
+
+    def _prepare_trajectory(self, q: jax.Array) -> None:
+        if not self._needs_trajectory_refresh():
+            return
+        fn = getattr(self.T, "prepare_trajectory", None)
+        if not callable(fn):
+            raise AttributeError("Theory declares requires_trajectory_refresh=True but has no prepare_trajectory(q, traj_length)")
+        fn(q, traj_length=self._traj_length())
 
     def _refresh_with_key(self, key: jax.Array) -> jax.Array:
         if hasattr(self.T, "refresh_p_with_key"):
@@ -194,6 +218,7 @@ class SMD:
         do_accept = bool(self.accept_reject and (not warmup))
 
         for k in range(int(N)):
+            self._prepare_trajectory(q)
             eta = self._refresh_with_key(self._split_key())
             p0 = self._ou_refresh(self.p, eta)
             q0 = q
@@ -213,7 +238,7 @@ class SMD:
             self.AcceptReject.extend(np.asarray(ar).tolist())
 
             q = jnp.where(acc_flag.reshape(qshape), q_prop, q0)
-            self.p = jnp.where(acc_flag.reshape(pshape), p_prop, p0)
+            self.p = jnp.where(acc_flag.reshape(pshape), p_prop, -p0)
 
             if self.verbose:
                 print(
@@ -273,7 +298,7 @@ class SMD:
 
                 ar = jnp.where(acc_flag, 1.0, 0.0)
                 q_next = jnp.where(acc_flag.reshape(qshape), q_prop, q_curr)
-                p_next = jnp.where(acc_flag.reshape(pshape), p_prop, p0)
+                p_next = jnp.where(acc_flag.reshape(pshape), p_prop, -p_curr)
                 return (q_next, p_next, key_curr), (ar, dH)
 
             (q_out, p_out, key_out), (ar_hist, dH_hist) = jax.lax.scan(
@@ -301,7 +326,8 @@ class SMD:
     def evolve(self, q: jax.Array, N: int, warmup: bool = False) -> jax.Array:
         if int(N) <= 0:
             return q
-        if self.use_fast_jit and (not self.verbose) and self._has_fast_refresh():
+        # Fast scan path does not support per-trajectory Python-side internal field refresh.
+        if self.use_fast_jit and (not self.verbose) and self._has_fast_refresh() and (not self._needs_trajectory_refresh()):
             return self._evolve_fast(q, int(N), bool(warmup))
         return self._evolve_python(q, int(N), bool(warmup))
 

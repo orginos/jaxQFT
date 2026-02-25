@@ -20,6 +20,7 @@ from .integrators import (
 )
 from .update import HMC, SMD, ghmc, hmc, smd
 from .hmc_sampler import HMCSampler, hmc_sampler
+from .hamiltonian import Monomial, HamiltonianModel
 
 __all__ = [
     "Integrator",
@@ -45,4 +46,6 @@ __all__ = [
     "smd",
     "HMCSampler",
     "hmc_sampler",
+    "Monomial",
+    "HamiltonianModel",
 ]

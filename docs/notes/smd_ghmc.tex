@@ -1,0 +1,80 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage[a4paper,margin=1in]{geometry}
+\title{SMD/GHMC Update: Implementation Notes}
+\author{jaxQFT}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+This note describes the implemented SMD/GHMC update in
+\texttt{jaxqft.core.update.SMD}.
+
+\section{State and Hamiltonian}
+Let $q$ be links/fields and $p$ the conjugate momentum. Define
+\begin{equation}
+H(q,p) = S(q) + T(p).
+\end{equation}
+
+\section{OU Momentum Refresh}
+For trajectory length $\tau$ and friction $\gamma$:
+\begin{equation}
+p_{\mathrm{ou}} = c_1 p + c_2 \eta,
+\qquad c_1 = e^{-\gamma\tau},
+\qquad c_2 = \sqrt{1-c_1^2},
+\end{equation}
+with Gaussian noise $\eta$ of unit variance in the algebra/momentum space.
+
+\section{MD Proposal}
+Using reversible symplectic integrator $\Phi_\tau$:
+\begin{equation}
+(p', q') = \Phi_\tau(p_{\mathrm{ou}}, q).
+\end{equation}
+
+\section{Metropolis Step}
+Compute
+\begin{equation}
+\Delta H = H(q',p') - H(q,p_{\mathrm{ou}}).
+\end{equation}
+Accept with probability $\min(1,e^{-\Delta H})$.
+
+\paragraph{Accepted:}
+\begin{equation}
+(q_{\mathrm{next}}, p_{\mathrm{next}}) = (q', p').
+\end{equation}
+
+\paragraph{Rejected:}
+\begin{equation}
+(q_{\mathrm{next}}, p_{\mathrm{next}}) = (q, -p_{\mathrm{ou}}).
+\end{equation}
+Then the next trajectory applies the OU refresh to this flipped momentum.
+
+\section{Warmup / Accept-Reject Control}
+When accept-reject is disabled (or in warmup mode), proposals are always accepted and no rejection branch is used.
+
+\section{Internal Field Refresh}
+If a theory declares
+\begin{equation}
+\texttt{requires\_trajectory\_refresh} = \texttt{True},
+\end{equation}
+then updates call
+\texttt{prepare\_trajectory(q, traj\_length)} once per trajectory before momentum refresh.
+This is used by monomial-based fermion theories for pseudofermion refresh.
+
+\section{Implementation Status}
+Current code path:
+\begin{itemize}
+  \item Python loop path: \texttt{SMD.\_evolve\_python}
+  \item JIT scan path: \texttt{SMD.\_evolve\_fast}
+\end{itemize}
+Both branches use momentum flip on rejection.
+
+\section{References}
+\begin{itemize}
+  \item M. L\"uscher, ``Stochastic locality and master-field simulations of very large lattices,'' arXiv:1911.04533, see Sec.~3 (SMD algorithm with momentum reversal on rejection). \\
+  \texttt{https://arxiv.org/abs/1911.04533}
+\end{itemize}
+
+\end{document}

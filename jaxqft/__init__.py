@@ -21,6 +21,8 @@ from .core import (
     HMC,
     SMD,
     HMCSampler,
+    Monomial,
+    HamiltonianModel,
 )
 
 
@@ -41,5 +43,7 @@ __all__ = [
     "HMC",
     "SMD",
     "HMCSampler",
+    "Monomial",
+    "HamiltonianModel",
     "LieGroups",
 ]

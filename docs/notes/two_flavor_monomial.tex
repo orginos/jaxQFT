@@ -1,0 +1,84 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage[a4paper,margin=1in]{geometry}
+\title{SU(3) Wilson Nf=2 Monomial: Implementation Notes}
+\author{jaxQFT}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+This note documents the current two-flavor Wilson pseudofermion monomial used in
+\texttt{jaxqft.models.su3\_wilson\_nf2}.
+
+\section{Gauge Convention}
+The link gauge transformation is
+\begin{equation}
+U_\mu(x) \to U_\mu^{\Omega}(x)=\Omega^\dagger(x)\,U_\mu(x)\,\Omega(x+\hat\mu).
+\end{equation}
+With this convention, fermions transform as
+\begin{equation}
+\psi(x) \to \psi^{\Omega}(x)=\Omega^\dagger(x)\psi(x).
+\end{equation}
+
+\section{Wilson--Dirac Operator}
+The implemented operator on a spin-color field is
+\begin{equation}
+(D\psi)(x)=\left(m+rN_d\right)\psi(x)
+-\frac{1}{2}\sum_\mu\left[(r+\gamma_\mu)U_\mu(x)\psi(x+\hat\mu)
++(r-\gamma_\mu)U_\mu^\dagger(x-\hat\mu)\psi(x-\hat\mu)\right].
+\end{equation}
+The code also provides $D^\dagger$ and the normal operator $D^\dagger D$.
+
+\section{Nf=2 Pseudofermion Monomial}
+For two degenerate Wilson flavors, the pseudofermion action is represented as
+\begin{equation}
+S_{\mathrm{pf}}[U,\phi] = \phi^\dagger\,(D^\dagger D)^{-1}\,\phi,
+\end{equation}
+with pseudofermion field generated from a Gaussian field $\eta$ as
+\begin{equation}
+\phi = D^\dagger \eta.
+\end{equation}
+The linear solve currently uses conjugate gradient (CG) on the normal equation
+$D^\dagger D x = \phi$.
+For invertible $D$, this implies
+\begin{equation}
+S_{\mathrm{pf}} = \phi^\dagger (D^\dagger D)^{-1}\phi
+= \eta^\dagger D (D^\dagger D)^{-1} D^\dagger \eta
+= \eta^\dagger \eta,
+\end{equation}
+which is used as a direct implementation check.
+
+\section{Refresh Policy}
+The pseudofermion monomial supports:
+\begin{itemize}
+  \item \texttt{heatbath}: independent redraw of $\eta$,
+  \item \texttt{ou}: OU rotation
+  $\eta \leftarrow c_1\eta + c_2\zeta$,
+  $c_1=e^{-\gamma\tau}$,
+  $c_2=\sqrt{1-c_1^2}$.
+\end{itemize}
+If OU mode is used and pseudofermion $\gamma$ is not explicitly set,
+it defaults to the SMD/GHMC friction $\gamma$.
+For SMD/GHMC production runs, the recommended/default policy is OU refresh.
+
+\section{Current Correctness Tests}
+Implemented in the module CLI:
+\begin{itemize}
+  \item Gauge covariance of $D$ and $D^\dagger D$,
+  \item Gauge covariance of $\phi=D^\dagger\eta$,
+  \item Gauge invariance of $S_{\mathrm{pf}}$ under transformed $(U,\phi)$,
+  \item Identity check $S_{\mathrm{pf}} \approx \eta^\dagger\eta$ for refreshed fields,
+  \item $\gamma_5$-Hermiticity check (even dimensions),
+  \item Free-field stencil consistency check for the implemented $D$ convention.
+\end{itemize}
+
+\section{Known Gaps}
+\begin{itemize}
+  \item Fermion force is currently autodiff-based (correctness-first).
+  \item No even-odd preconditioning yet.
+  \item No Hasenbusch/RHMC monomial factorization yet.
+\end{itemize}
+
+\end{document}

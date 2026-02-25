@@ -21,6 +21,20 @@ Last updated: 2026-02-24
 - Update algorithms:
   - `HMC` and `SMD` (`GHMC` alias) in `jaxqft/core/update.py`.
   - Production scripts support `--update {hmc,smd,ghmc}` with default `hmc`.
+  - SMD rejection branch flips post-OU momentum (`p <- -p_ou`) per Lüscher SMD convention.
+  - If a theory sets `requires_trajectory_refresh=True`, updates call `prepare_trajectory(q, traj_length)` internally once per trajectory.
+  - Fast-scan update path is disabled automatically for such theories.
+- Monomial Hamiltonian infrastructure:
+  - `jaxqft/core/hamiltonian.py` with `Monomial` protocol and `HamiltonianModel`.
+  - Initial SU3 Wilson Nf=2 monomial composition implemented in `jaxqft/models/su3_wilson_nf2.py`.
+    - Gauge monomial uses optimized pure-gauge SU3 action/force.
+    - Pseudofermion monomial owns pseudofermion field state and computes action/force.
+    - Theory exposes `prepare_trajectory(U, traj_length)` for stochastic monomial refresh.
+    - Pseudofermion monomial supports refresh modes:
+      - `heatbath` (independent redraw)
+      - `ou` (OU rotation with `c1=exp(-gamma*traj_length)` on underlying Gaussian field)
+      - if pseudofermion gamma is omitted and refresh mode is `ou`, it defaults to SMD/GHMC `gamma`
+  - `SU3WilsonNf2` sets `requires_trajectory_refresh=True` when stochastic monomials are present.
 - Integrators:
   - 2nd-order (`leapfrog`, `minnorm2`) and 4th-order (`forcegrad`, `minnorm4pf4`) in `jaxqft/core/integrators.py`.
 - Diagnostics/tests in model CLIs:
@@ -56,6 +70,8 @@ Last updated: 2026-02-24
 ## Quick Commands
 - SU3 production:
   - `python scripts/su3_ym/hmc_su3_ym.py --shape 8,8,8,8 --integrator forcegrad --nmd 7 --tau 1.0`
+- SU3 Wilson Nf=2 production:
+  - `python scripts/su3_wilson_nf2/hmc_su3_wilson_nf2.py --shape 4,4,4,8 --integrator minnorm2 --nmd 8 --tau 1.0 --mass 0.05 --beta 5.8`
 - SU3 benchmark:
   - `python scripts/su3_ym/bench_hmc_su3.py --shape 16,16,16,16 --integrator forcegrad --nmd 12 --tau 1.0`
 - SU2/U1 selfcheck:
@@ -63,12 +79,20 @@ Last updated: 2026-02-24
   - `python -m jaxqft.models.u1_ym --selfcheck --selfcheck-fail`
 - Autodiff force check (example):
   - `python -m jaxqft.models.su3_ym --tests autodiff --shape 4,4,4,8 --n-iter-timing 10`
+- SU3 Wilson monomial check:
+  - `python -m jaxqft.models.su3_wilson_nf2 --tests hamiltonian --shape 4,4,4,8`
+- SU3 Wilson pseudofermion refresh diagnostics:
+  - `python -m jaxqft.models.su3_wilson_nf2 --tests pfrefresh --pf-refresh heatbath --shape 4,4,4,8`
+  - `python -m jaxqft.models.su3_wilson_nf2 --tests pfrefresh --pf-refresh ou --smd-gamma 0.3 --traj-length 1.0 --shape 4,4,4,8`
+  - `python -m jaxqft.models.su3_wilson_nf2 --tests pfid --shape 4,4,4,8`
 
 ## Priority Backlog
-1. Multi-device/domain decomposition across spacetime dimensions (not batch-only).
-2. More kernel-level optimization for dominant drift/force paths per backend.
-3. Tighten Wilson-fermion validation and production-grade solver workflow.
-4. Keep benchmark baselines per model/lattice/backend in versioned docs.
+1. Add nested integrator schedules over monomial timescales (Sexton-Weingarten style).
+2. Add Hasenbusch-preconditioned monomials for SU3 Wilson Nf=2.
+3. Add RHMC monomials for odd-flavor support.
+4. Add backend abstraction for fermion operators/solvers (`jax` default, `quda` optional later).
+5. Multi-device/domain decomposition across spacetime dimensions (not batch-only).
+6. Keep benchmark baselines per model/lattice/backend in versioned docs.
 
 ## Session Resume Protocol
 1. Read `AGENTS.md` and this `HANDOFF.md`.
