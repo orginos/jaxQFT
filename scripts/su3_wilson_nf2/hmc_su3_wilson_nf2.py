@@ -187,6 +187,11 @@ def main():
     ap.add_argument("--r", type=float, default=1.0, help="Wilson r parameter")
     ap.add_argument("--cg-tol", type=float, default=1e-8)
     ap.add_argument("--cg-maxiter", type=int, default=500)
+    ap.add_argument("--solver-kind", type=str, default="cg", choices=["cg", "bicgstab", "gmres"])
+    ap.add_argument("--solver-form", type=str, default="normal", choices=["normal", "split", "eo_split"])
+    ap.add_argument("--preconditioner", type=str, default="none", choices=["none", "jacobi"])
+    ap.add_argument("--gmres-restart", type=int, default=32)
+    ap.add_argument("--gmres-solve-method", type=str, default="batched")
     ap.add_argument("--exp-method", type=str, default="su3", choices=["su3", "expm"])
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--layout", type=str, default="BMXYIJ", choices=["BMXYIJ", "BXYMIJ", "auto"])
@@ -195,6 +200,12 @@ def main():
     # Monomial controls.
     ap.add_argument("--include-gauge-monomial", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--include-fermion-monomial", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument(
+        "--fermion-monomial-kind",
+        type=str,
+        default="unpreconditioned",
+        choices=["unpreconditioned", "eo_preconditioned"],
+    )
     ap.add_argument("--gauge-timescale", type=int, default=0)
     ap.add_argument("--fermion-timescale", type=int, default=1)
     ap.add_argument("--pf-refresh", type=str, default="auto", choices=["auto", "heatbath", "ou"])
@@ -281,6 +292,11 @@ def main():
     wilson_r = float(args.r)
     cg_tol = float(args.cg_tol)
     cg_maxiter = int(args.cg_maxiter)
+    solver_kind = str(args.solver_kind)
+    solver_form = str(args.solver_form)
+    preconditioner = str(args.preconditioner)
+    gmres_restart = int(args.gmres_restart)
+    gmres_solve_method = str(args.gmres_solve_method)
     batch = int(args.batch)
     tau = float(args.tau)
     skip = int(args.skip)
@@ -293,6 +309,7 @@ def main():
     smd_accept_reject = args.smd_accept_reject
     include_gauge_monomial = bool(args.include_gauge_monomial)
     include_fermion_monomial = bool(args.include_fermion_monomial)
+    fermion_monomial_kind = str(args.fermion_monomial_kind)
     gauge_timescale = int(args.gauge_timescale)
     fermion_timescale = int(args.fermion_timescale)
     pf_refresh = str(args.pf_refresh)
@@ -306,6 +323,11 @@ def main():
         wilson_r = float(c.get("wilson_r", wilson_r))
         cg_tol = float(c.get("cg_tol", cg_tol))
         cg_maxiter = int(c.get("cg_maxiter", cg_maxiter))
+        solver_kind = str(c.get("solver_kind", solver_kind))
+        solver_form = str(c.get("solver_form", solver_form))
+        preconditioner = str(c.get("preconditioner", preconditioner))
+        gmres_restart = int(c.get("gmres_restart", gmres_restart))
+        gmres_solve_method = str(c.get("gmres_solve_method", gmres_solve_method))
         batch = int(c.get("batch", batch))
         tau = float(c.get("tau", tau))
         skip = int(c.get("skip", skip))
@@ -314,6 +336,7 @@ def main():
         exp_method = str(c.get("exp_method", exp_method))
         include_gauge_monomial = bool(c.get("include_gauge_monomial", include_gauge_monomial))
         include_fermion_monomial = bool(c.get("include_fermion_monomial", include_fermion_monomial))
+        fermion_monomial_kind = str(c.get("fermion_monomial_kind", fermion_monomial_kind))
         gauge_timescale = int(c.get("gauge_timescale", gauge_timescale))
         fermion_timescale = int(c.get("fermion_timescale", fermion_timescale))
         pf_refresh = str(c.get("pf_refresh", pf_refresh))
@@ -373,8 +396,14 @@ def main():
         wilson_r=wilson_r,
         cg_tol=cg_tol,
         cg_maxiter=cg_maxiter,
+        solver_kind=solver_kind,
+        solver_form=solver_form,
+        preconditioner_kind=preconditioner,
+        gmres_restart=gmres_restart,
+        gmres_solve_method=gmres_solve_method,
         include_gauge_monomial=include_gauge_monomial,
         include_fermion_monomial=include_fermion_monomial,
+        fermion_monomial_kind=fermion_monomial_kind,
         gauge_timescale=gauge_timescale,
         fermion_timescale=fermion_timescale,
         pseudofermion_refresh=pf_refresh,
@@ -442,7 +471,17 @@ def main():
     print(f"  lattice_shape: {lattice_shape}")
     print(f"  beta: {beta}")
     print(f"  mass/r: {mass} / {wilson_r}")
-    print(f"  cg tol/maxiter: {cg_tol} / {cg_maxiter}")
+    solver_line = (
+        "  solver:"
+        f" kind={solver_kind}"
+        f" form={solver_form}"
+        f" preconditioner={preconditioner}"
+        f" tol={cg_tol}"
+        f" maxiter={cg_maxiter}"
+    )
+    if solver_kind == "gmres":
+        solver_line += f" gmres_restart={gmres_restart} gmres_solve_method={gmres_solve_method}"
+    print(solver_line)
     print(f"  exp_method: {exp_method}")
     print(f"  batch: {batch}")
     print(f"  layout: {selected_layout}")
@@ -452,6 +491,7 @@ def main():
         print(f"  update: {update_name}")
     print(f"  integrator: {integrator_name} (nmd={nmd}, tau={tau})")
     print(f"  monomials: {', '.join(theory.hamiltonian.monomial_names())}")
+    print(f"  fermion monomial kind: {fermion_monomial_kind}")
     print(
         "  pseudofermions:"
         f" refresh={pf_refresh}"
@@ -486,6 +526,11 @@ def main():
         "wilson_r": float(wilson_r),
         "cg_tol": float(cg_tol),
         "cg_maxiter": int(cg_maxiter),
+        "solver_kind": str(solver_kind),
+        "solver_form": str(solver_form),
+        "preconditioner": str(preconditioner),
+        "gmres_restart": int(gmres_restart),
+        "gmres_solve_method": str(gmres_solve_method),
         "exp_method": str(exp_method),
         "batch": int(batch),
         "layout": selected_layout,
@@ -497,6 +542,7 @@ def main():
         "skip": int(skip),
         "include_gauge_monomial": bool(include_gauge_monomial),
         "include_fermion_monomial": bool(include_fermion_monomial),
+        "fermion_monomial_kind": str(fermion_monomial_kind),
         "gauge_timescale": int(gauge_timescale),
         "fermion_timescale": int(fermion_timescale),
         "pf_refresh": str(pf_refresh),

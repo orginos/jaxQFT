@@ -26,10 +26,40 @@ With this convention, fermions transform as
 The implemented operator on a spin-color field is
 \begin{equation}
 (D\psi)(x)=\left(m+rN_d\right)\psi(x)
--\frac{1}{2}\sum_\mu\left[(r+\gamma_\mu)U_\mu(x)\psi(x+\hat\mu)
-+(r-\gamma_\mu)U_\mu^\dagger(x-\hat\mu)\psi(x-\hat\mu)\right].
+-\frac{1}{2}\sum_\mu\left[(r-\gamma_\mu)U_\mu(x)\psi(x+\hat\mu)
++(r+\gamma_\mu)U_\mu^\dagger(x-\hat\mu)\psi(x-\hat\mu)\right].
 \end{equation}
 The code also provides $D^\dagger$ and the normal operator $D^\dagger D$.
+This is the same sign placement as Chroma's Wilson dslash
+\texttt{chi = U (1 - isign gamma) psi(x+mu) + U\^dag (1 + isign gamma) psi(x-mu)}
+for \texttt{isign=PLUS} (see
+\texttt{../chroma/lib/actions/ferm/linop/lwldslash\_base\_w.h} and
+\texttt{../chroma/lib/actions/ferm/linop/lwldslash\_w.h}).
+Implementation is now explicitly split into reusable blocks
+\begin{equation}
+D = D_{\mathrm{diag}} + D_{\mathrm{slash}},
+\end{equation}
+where for Wilson
+\begin{equation}
+D_{\mathrm{diag}}=(m+rN_d)I
+\end{equation}
+and $D_{\mathrm{slash}}$ is the nearest-neighbor hopping stencil.
+In checkerboard parity language, $D_{\mathrm{slash}}$ couples only opposite parities
+($K_{oe}$ and $K_{eo}$), while $D_{\mathrm{diag}}$ is on-site (parity-preserving).
+This decomposition is the intended extension point for Clover and exponentiated-Clover operators:
+reuse the same optimized $D_{\mathrm{slash}}$ and replace/augment the diagonal block.
+
+With checkerboard decomposition ($x_e$ even, $x_o$ odd), the off-diagonal blocks are
+\begin{align}
+(K_{oe}\psi_e)(x_o)
+&=
+-\frac{1}{2}\sum_\mu\left[(r-\gamma_\mu)U_\mu(x_o)\psi_e(x_o+\hat\mu)
++(r+\gamma_\mu)U_\mu^\dagger(x_o-\hat\mu)\psi_e(x_o-\hat\mu)\right],\\
+(K_{eo}\psi_o)(x_e)
+&=
+-\frac{1}{2}\sum_\mu\left[(r-\gamma_\mu)U_\mu(x_e)\psi_o(x_e+\hat\mu)
++(r+\gamma_\mu)U_\mu^\dagger(x_e-\hat\mu)\psi_o(x_e-\hat\mu)\right].
+\end{align}
 
 \section{Nf=2 Pseudofermion Monomial}
 For two degenerate Wilson flavors, the pseudofermion action is represented as
@@ -49,6 +79,205 @@ S_{\mathrm{pf}} = \phi^\dagger (D^\dagger D)^{-1}\phi
 = \eta^\dagger \eta,
 \end{equation}
 which is used as a direct implementation check.
+
+\section{Analytic Pseudofermion Force}
+Define
+\begin{equation}
+M(U)=D^\dagger(U)D(U), \qquad
+X = M^{-1}\phi, \qquad
+Y = D X.
+\end{equation}
+Then
+\begin{equation}
+S_{\mathrm{pf}} = \phi^\dagger X,
+\end{equation}
+and for a link variation
+\begin{equation}
+\delta S_{\mathrm{pf}}
+= - X^\dagger (\delta M) X
+= -2\,\mathrm{Re}\!\left[Y^\dagger (\delta D) X\right].
+\end{equation}
+
+For left Lie variation of a single link,
+\begin{equation}
+U_\mu(x;\epsilon)=e^{\epsilon H_\mu(x)}U_\mu(x),
+\qquad
+H_\mu(x)\in \mathfrak{su}(3),
+\end{equation}
+we use
+\begin{equation}
+\delta U_\mu(x)=H_\mu(x)U_\mu(x),\qquad
+\delta U_\mu^\dagger(x)=-U_\mu^\dagger(x)H_\mu(x).
+\end{equation}
+With
+\begin{equation}
+P_\mu^\pm = r I \pm \gamma_\mu,
+\end{equation}
+the two contributions coupled to $H_\mu(x)$ are
+\begin{align}
+C_1(x,\mu)_{ac}
+&=
+\sum_{s,t}
+Y^\dagger_{a s}(x)\,
+P^-_{\mu,st}\,
+\left[U_\mu(x)X(x+\hat\mu)\right]_{tc},\\
+C_2(x,\mu)_{dc}
+&=
+\sum_{s,t,a}
+Y^\dagger_{a s}(x+\hat\mu)\,
+P^+_{\mu,st}\,
+U^\dagger_{\mu,ad}(x)\,
+X_{tc}(x).
+\end{align}
+The link-local unprojected force matrix is
+\begin{equation}
+K_\mu(x)=\left(C_1(x,\mu)-C_2(x,\mu)\right)^T,
+\end{equation}
+and the algebra force is obtained by anti-Hermitian traceless projection
+\begin{equation}
+F_\mu(x)=\mathcal{P}_{\mathfrak{su}(3)}\!\left(K_\mu(x)\right).
+\end{equation}
+The HMC/SMD momentum update uses the convention
+\begin{equation}
+\delta S_{\mathrm{pf}} = -\langle F, H\rangle,\qquad
+\langle A,B\rangle = -\mathrm{Re}\,\mathrm{Tr}(AB).
+\end{equation}
+
+In code (\texttt{SU3WilsonNf2.pseudofermion\_force\_from\_solution}):
+\begin{itemize}
+  \item solve $X=(D^\dagger D)^{-1}\phi$ via CG,
+  \item compute $Y=DX$,
+  \item build $C_1,C_2$ with tensor contractions,
+  \item apply $F=\mathcal{P}_{\mathfrak{su}(3)}((C_1-C_2)^T)$.
+\end{itemize}
+
+\section{Linear Solver Modes}
+The implementation is matrix-free: $D$, $D^\dagger$, and $D^\dagger D$ are applied as stencil operators
+directly on fields; no global sparse matrix is explicitly assembled.
+
+Two inversion forms are supported:
+\begin{itemize}
+  \item \texttt{solver\_form=normal}: solve one system $(D^\dagger D)X=\phi$,
+  \item \texttt{solver\_form=split}: solve $D^\dagger Y=\phi$ then $D X=Y$.
+\end{itemize}
+Action evaluation in split mode uses the one-solve identity
+\begin{equation}
+\phi^\dagger (D^\dagger D)^{-1}\phi = \chi^\dagger\chi,\qquad D^\dagger\chi=\phi.
+\end{equation}
+So split action uses only the $D^\dagger$ solve, while split force still needs both solves.
+
+The implemented convention is $(D^\dagger D)$ with pseudofermion refresh
+$\phi=D^\dagger\eta$ (matching the standard two-flavor Chroma monomial convention).
+An alternative $(DD^\dagger)$ convention is possible, but then refresh must be
+$\phi=D\eta$ and all force/action formulas must be changed consistently.
+
+For \texttt{normal}, the default solver is CG.
+For \texttt{split}, a non-Hermitian solver is required (currently BiCGStab).
+
+Force diagnostics report solver timing split (solve vs force-kernel), residuals of
+$(D^\dagger D)X-\phi$, and best-effort solver iteration info when available from the backend.
+
+\section{Even-Odd (EO) Preconditioning Block}
+Let
+\begin{equation}
+m_0 = m + r N_d,\qquad D = m_0 I + K,
+\end{equation}
+where $K$ is the hopping part (parity-flipping). With even/odd site ordering:
+\begin{equation}
+D =
+\begin{pmatrix}
+m_0 I_e & K_{eo}\\
+K_{oe}  & m_0 I_o
+\end{pmatrix}.
+\end{equation}
+For Wilson without clover term, diagonal blocks are local constants $m_0 I$.
+The Schur complement operators are
+\begin{align}
+S_e &= m_0 I_e - \frac{1}{m_0} K_{eo}K_{oe},\\
+S_o &= m_0 I_o - \frac{1}{m_0} K_{oe}K_{eo},
+\end{align}
+and normalized forms
+\begin{equation}
+\hat S_e = I_e - \frac{1}{m_0^2}K_{eo}K_{oe},\qquad
+\hat S_o = I_o - \frac{1}{m_0^2}K_{oe}K_{eo}.
+\end{equation}
+
+Current code provides EO Schur matvecs (full-lattice storage with parity masks):
+\begin{itemize}
+  \item \texttt{apply\_eo\_schur\_even(U, psi\_even, normalized)},
+  \item \texttt{apply\_eo\_schur\_odd(U, psi\_odd, normalized)}.
+\end{itemize}
+These are implemented using
+\begin{equation}
+K\psi = D\psi - m_0\psi
+\end{equation}
+and parity projections.
+The module test \texttt{--tests eo} checks the EO Schur matvec against a block-reference construction from full-$D$ applications and reports timing.
+
+For EO-preconditioned \emph{solves}, the implementation now uses compact even-checkerboard vectors
+(site index length $V/2$) as solver unknowns. This avoids solving in a full masked space and avoids odd-subspace identity augmentation in the EO-preconditioned path.
+
+The Schur matvec now uses checkerboard-native compact nearest-neighbor kernels:
+\begin{itemize}
+  \item compact $K_{oe}$ and $K_{eo}$ gather from precomputed parity neighbor maps,
+  \item no full-field parity projection/unprojection inside Krylov matvec application.
+\end{itemize}
+This is the key path used in EO-preconditioned solves.
+
+EO is integrated in the split solve path as
+\texttt{solver\_form=eo\_split}:
+\begin{itemize}
+  \item solve $D^\dagger Y=\phi$ with EO-Schur reduction,
+  \item solve $D X=Y$ with EO-Schur reduction.
+\end{itemize}
+The pseudofermion action in this mode still uses the one-solve split identity
+$S_{\mathrm{pf}}=\chi^\dagger\chi$ with $D^\dagger\chi=\phi$, and the analytic force uses the same $(X,Y)$ as in the unpreconditioned split formula.
+
+\subsection{EO-Preconditioned Monomial}
+In addition to the unpreconditioned two-flavor monomial, code now includes an explicit
+EO-preconditioned pseudofermion monomial on the even checkerboard Schur operator
+$\hat S_e$:
+\begin{equation}
+S_{\mathrm{pf}}^{\mathrm{eo}}[U,\phi_e]
+=
+\phi_e^\dagger \left(\hat S_e^\dagger \hat S_e\right)^{-1}\phi_e,
+\qquad
+\phi_e = \hat S_e^\dagger \eta_e.
+\end{equation}
+Here $\eta_e$ is even-parity Gaussian noise and odd components are projected out.
+For Wilson without clover, omitted diagonal-block determinant factors are gauge-independent constants.
+
+Solve count clarification:
+\begin{itemize}
+  \item Unpreconditioned monomial with \texttt{solver\_form=eo\_split}: still requires two solves per inversion target ($D^\dagger$ then $D$), each accelerated by EO reduction.
+  \item EO-preconditioned monomial split action uses one solve of $\hat S_e^\dagger \chi_e=\phi_e$ via
+  $S_{\mathrm{pf}}^{\mathrm{eo}}=\chi_e^\dagger\chi_e$.
+\end{itemize}
+
+EO-preconditioned analytic force is now implemented from the Schur form
+\begin{equation}
+\hat M = I - \alpha K_{eo}K_{oe},\qquad \alpha=\frac{1}{m_0^2},
+\end{equation}
+with
+\begin{equation}
+S_{\mathrm{pf}}^{\mathrm{eo}} = \phi_e^\dagger (\hat M^\dagger \hat M)^{-1}\phi_e,
+\qquad
+X_e=(\hat M^\dagger \hat M)^{-1}\phi_e,\quad
+Y_e=\hat M X_e.
+\end{equation}
+Using
+\begin{equation}
+\delta \hat M = -\alpha\left(\delta K_{eo}K_{oe}+K_{eo}\delta K_{oe}\right),
+\end{equation}
+the variation is
+\begin{equation}
+\delta S_{\mathrm{pf}}^{\mathrm{eo}}
+=
+2\alpha\,\mathrm{Re}\!\left[Y_e^\dagger (\delta K_{eo})(K_{oe}X_e)\right]
++
+2\alpha\,\mathrm{Re}\!\left[(K_{eo}^\dagger Y_e)^\dagger (\delta K_{oe})X_e\right].
+\end{equation}
+In code this is mapped to two calls of the standard Wilson dslash-force kernel and summed.
 
 \section{Refresh Policy}
 The pseudofermion monomial supports:
@@ -71,13 +300,16 @@ Implemented in the module CLI:
   \item Gauge invariance of $S_{\mathrm{pf}}$ under transformed $(U,\phi)$,
   \item Identity check $S_{\mathrm{pf}} \approx \eta^\dagger\eta$ for refreshed fields,
   \item $\gamma_5$-Hermiticity check (even dimensions),
-  \item Free-field stencil consistency check for the implemented $D$ convention.
+  \item Free-field stencil consistency check for the implemented $D$ convention,
+  \item Analytic-vs-autodiff force comparison with timing split (inversion vs force kernel),
+  \item EO-preconditioned force directional check (\texttt{eopforce}) including:
+  forward/central finite-difference slopes, direct autodiff directional derivative, $-\langle F,H\rangle$ (autodiff and analytic force), and timing,
+  \item Solver diagnostics in force tests: post-solve residual and best-effort solver iteration info.
 \end{itemize}
 
 \section{Known Gaps}
 \begin{itemize}
-  \item Fermion force is currently autodiff-based (correctness-first).
-  \item No even-odd preconditioning yet.
+  \item Unpreconditioned \texttt{solver\_form=eo\_split} still solves in full-lattice masked fields (EO reduction is used, but unknown vectors are not checkerboard-compressed there).
   \item No Hasenbusch/RHMC monomial factorization yet.
 \end{itemize}
 

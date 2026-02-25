@@ -1,0 +1,93 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage[a4paper,margin=1in]{geometry}
+\title{Gamma-Matrix Conventions in jaxQFT}
+\author{jaxQFT}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+This note documents the Euclidean gamma-matrix representation used in
+\texttt{jaxqft/fermions/gamma.py} and how it is used in Wilson-type operators.
+
+\section{Euclidean Clifford Algebra}
+The implementation uses Hermitian Euclidean gamma matrices satisfying
+\begin{equation}
+\{\gamma_\mu,\gamma_\nu\} = 2\delta_{\mu\nu} I.
+\end{equation}
+For even dimensions, the chirality matrix is
+\begin{equation}
+\gamma_5 = i^{d/2}\prod_{\mu=0}^{d-1}\gamma_\mu.
+\end{equation}
+
+\section{Base Pauli Matrices}
+\begin{equation}
+\sigma_1=
+\begin{pmatrix}
+0 & 1\\
+1 & 0
+\end{pmatrix},\quad
+\sigma_2=
+\begin{pmatrix}
+0 & -i\\
+i & 0
+\end{pmatrix},\quad
+\sigma_3=
+\begin{pmatrix}
+1 & 0\\
+0 & -1
+\end{pmatrix}.
+\end{equation}
+
+\section{2D Representation}
+For $d=2$, jaxQFT uses
+\begin{equation}
+\gamma_0=\sigma_1,\qquad
+\gamma_1=\sigma_2.
+\end{equation}
+
+\section{4D Representation}
+For $d=4$, jaxQFT uses the tensor-product representation
+\begin{equation}
+\gamma_0=\sigma_1\otimes\sigma_1,\quad
+\gamma_1=\sigma_1\otimes\sigma_2,\quad
+\gamma_2=\sigma_2\otimes I_2,\quad
+\gamma_3=\sigma_3\otimes I_2.
+\end{equation}
+This is one valid Euclidean representation; physical operator identities are representation-independent.
+
+\section{General d-Dimensional Construction}
+The code builds gamma matrices recursively:
+\begin{itemize}
+  \item Start at $d=2$ with $(\sigma_1,\sigma_2)$.
+  \item To extend from $2k$ to $2k+2$:
+  \begin{align}
+  \gamma'_\mu &= \sigma_1\otimes\gamma_\mu,\qquad \mu=0,\dots,2k-1,\\
+  \gamma'_{2k} &= \sigma_2\otimes I,\qquad
+  \gamma'_{2k+1} = \sigma_3\otimes I.
+  \end{align}
+  \item For odd $d=2k+1$, append
+  \begin{equation}
+  \gamma_{2k} = i^k\prod_{\mu=0}^{2k-1}\gamma_\mu.
+  \end{equation}
+\end{itemize}
+
+\section{Wilson Dslash Convention}
+In jaxQFT (aligned with Chroma Wilson dslash),
+\begin{equation}
+D' \psi(x) =
+\sum_\mu \left[
+U_\mu(x)\,(1-\mathrm{isign}\,\gamma_\mu)\,\psi(x+\hat\mu)
++
+U^\dagger_\mu(x-\hat\mu)\,(1+\mathrm{isign}\,\gamma_\mu)\,\psi(x-\hat\mu)
+\right].
+\end{equation}
+So for the undaggered branch (\texttt{isign=PLUS} in Chroma),
+the forward hop uses $(1-\gamma_\mu)$ and backward uses $(1+\gamma_\mu)$.
+
+Changing representation by $\gamma_\mu\to-\gamma_\mu$ swaps these projector labels.
+This is convention-equivalent provided all formulas are changed consistently.
+
+\end{document}
