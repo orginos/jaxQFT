@@ -80,7 +80,11 @@ Use this template for issue updates, commit notes, or handoff snippets that will
 
 ## Fermion Roadmap (Current)
 1. SU3 Wilson Nf=2 refactor to monomial-based Hamiltonian model.
-2. Add nested-timescale schedule object for monomial groups.
-3. Add Hasenbusch monomials.
-4. Add RHMC monomials.
-5. Add optional QUDA backend under a solver/operator interface (keep JAX-native default).
+2. Performance optimization until we get performace close to 7.3s/traj (Nf=2 EO prec. kappa=0.11 beta=5.7 8^3x16)
+   Algorithm CG inverter, Force Gradient Integrator NMD=20 with a single time scale.
+   Fermion force 0.093s Gauge force 0.013s)   CG iterations ~ 13
+3. Add nested-timescale schedule object for monomial groups.
+4. Add Hasenbusch monomials.
+5. Add RHMC monomials.
+6. Add optional QUDA backend under a solver/operator interface (keep JAX-native default).
+
