@@ -79,9 +79,30 @@ Last updated: 2026-02-25
   - `jaxqft/fermions/gamma.py`, `jaxqft/fermions/wilson.py`.
   - Wilson hop convention aligned with Chroma dslash (`forward: r-\gamma_\mu`, `backward: r+\gamma_\mu` for undaggered branch).
   - `WilsonDiracOperator` now exposes explicit `apply_diag` + `apply_dslash` decomposition.
+  - Wilson color multiply now has specialized small-Nc kernels:
+    - SU3 (`3x3`) and SU2 (`2x2`) paths in `WilsonDiracOperator.color_mul_left`
+    - fallback remains generic `einsum` for other Nc
+  - SU3 Wilson matvec throughput improved substantially after small-Nc specialization.
+  - `WilsonDiracOperator` now includes FLOP estimators for Wilson matvecs:
+    - `flops_per_site_dslash(...)`
+    - `flops_per_site_matvec(...)`
+    - `flops_per_matvec_call(...)`
+  - Wilson model `--tests perf` now reports:
+    - FLOPs/site for `D` (sparse and dense gamma paths)
+    - timing (sec/call) for `D` and `D^\dagger D`
+    - achieved GFLOP/s for `D` and `D^\dagger D`
   - In `SU3WilsonNf2`, parity-coupling helpers `K_oe/K_eo` and daggered variants are explicit and used in EO Schur operators.
   - Wilson Nf=2 theory wrappers for SU3/SU2/U1:
     - `su3_wilson_nf2.py`, `su2_wilson_nf2.py`, `u1_wilson_nf2.py`.
+  - `su2_wilson_nf2.py` now mirrors SU3/U1 Wilson architecture and CLI harness:
+    - monomial composition via `HamiltonianModel` with `gauge` + fermion monomials
+    - fermion monomial kinds: `unpreconditioned`, `eo_preconditioned`
+    - pseudofermion refresh modes: `heatbath`, `ou`
+    - pseudofermion force modes: `autodiff`, `analytic`
+    - solver modularity: `cg`, `bicgstab`, `gmres`; forms `normal`, `split`, `eo_split`
+    - EO Schur operators and EO-preconditioned action/force path
+    - SU3-parity CLI test set available for SU2:
+      `gamma,adjoint,normal,perf,eo,hamiltonian,pfrefresh,pfid,gauge,conventions,forcecmp,eopforce`
   - Wilson SU3/U1 now default to JIT-wrapped Dirac kernels and solver paths for runtime use:
     - `jit_dirac_kernels=True` (default)
     - `jit_solvers=True` (default)
@@ -128,6 +149,10 @@ Last updated: 2026-02-25
   - `python scripts/su3_ym/hmc_su3_ym.py --shape 8,8,8,8 --integrator forcegrad --nmd 7 --tau 1.0`
 - SU3 Wilson Nf=2 production:
   - `python scripts/su3_wilson_nf2/hmc_su3_wilson_nf2.py --shape 4,4,4,8 --integrator minnorm2 --nmd 8 --tau 1.0 --mass 0.05 --beta 5.8`
+- SU2 Wilson Nf=2 full harness checks:
+  - `python -m jaxqft.models.su2_wilson_nf2 --tests all --shape 4,4,4,8`
+  - `python -m jaxqft.models.su2_wilson_nf2 --tests forcecmp --shape 4,4,4,8 --pf-force-mode analytic`
+  - `python -m jaxqft.models.su2_wilson_nf2 --tests eopforce --shape 4,4,4,8 --fermion-monomial-kind eo_preconditioned --pf-force-mode analytic`
 - SU3 benchmark:
   - `python scripts/su3_ym/bench_hmc_su3.py --shape 16,16,16,16 --integrator forcegrad --nmd 12 --tau 1.0`
 - SU2/U1 selfcheck:
@@ -141,6 +166,9 @@ Last updated: 2026-02-25
   - `python -m jaxqft.models.su3_wilson_nf2 --tests forcecmp --shape 4,4,4,8 --pf-force-mode analytic --force-compare-trials 2 --force-compare-iters 2`
   - `python -m jaxqft.models.su3_wilson_nf2 --tests forcecmp --shape 4,4,4,8 --solver-kind bicgstab --solver-form split --pf-force-mode analytic`
   - `python -m jaxqft.models.su3_wilson_nf2 --tests eopforce --shape 4,4,4,8 --fermion-monomial-kind eo_preconditioned --solver-kind cg --solver-form normal --pf-fd-eps 5e-4 --pf-fd-trials 2`
+  - EO-preconditioned fixed-iteration solve benchmark:
+    - `python -m jaxqft.models.su3_wilson_nf2 --tests eoperf --shape 8,8,8,16 --solver-kind cg --solver-form normal --eop-perf-maxiter 86 --eop-perf-tol 0.0 --eop-perf-repeat 4 --eop-perf-warmup 1`
+    - optional half-spinor toggle: `--no-eo-use-half-spinor` (or benchmark both via default `--eop-perf-compare-halfspinor`)
 - SU3 Wilson pseudofermion refresh diagnostics:
   - `python -m jaxqft.models.su3_wilson_nf2 --tests pfrefresh --pf-refresh heatbath --shape 4,4,4,8`
   - `python -m jaxqft.models.su3_wilson_nf2 --tests pfrefresh --pf-refresh ou --smd-gamma 0.3 --traj-length 1.0 --shape 4,4,4,8`
@@ -152,7 +180,8 @@ Last updated: 2026-02-25
   - `python -m jaxqft.models.u1_wilson_nf2 --tests eopforce --shape 8,8 --fermion-monomial-kind eo_preconditioned --pf-force-mode analytic`
  - Cross-model Wilson benchmark matrix:
    - `python scripts/wilson/bench_wilson_matrix.py --kernel-iters 20 --solve-iters 3`
-   - includes U1/SU3 eager-vs-jit and SU2 manual eager-vs-jit wrappers
+   - includes U1/SU2/SU3 eager-vs-jit with solver variants
+   - reports per-row `D/N` timing, solver timing, `solve/N` operator-apply equivalent, and `D/N` GFLOP/s
    - optional raw output: `--json-out wilson_matrix.json`
 
 ### JIT Regime Note
@@ -163,9 +192,36 @@ Last updated: 2026-02-25
   - SU3 `4^3x8` D kernel optimized/reference ratio ~`2.7e-1`.
 - Re-evaluate performance decisions in this JIT regime before pruning kernel variants.
 
+### SU3 Wilson vs Chroma Snapshot (CPU, weak field, 20 threads)
+- Chroma reference files:
+  - `/Users/kostas/Work/qcd_codes/chromaform/runs/test_perf/unprec_wilson.out`
+  - `/Users/kostas/Work/qcd_codes/chromaform/runs/test_perf/prec_wilson.out`
+- Matched JAX command baseline:
+  - `JAX_PLATFORMS=cpu XLA_FLAGS='--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=20 --xla_cpu_use_onednn=true' python -m jaxqft.models.su3_wilson_nf2 --tests perf --shape 8,8,8,16 --mass 0.05 --n-iter-timing 10`
+- Current measured points:
+  - SU3 `D` matvec (optimized): ~`0.85 ms` per call on `8^3x16`
+  - SU3 `DdagD` matvec (optimized): ~`1.64 ms` per call on `8^3x16` after split-normal path update
+  - Fixed-iteration CG unpreconditioned (`243` iters, `tol=0`): ~`1.44-1.46 s` total (`~5.93-6.00 ms/iter`)
+  - Fixed-iteration CG EO-preconditioned Schur-normal (`86` iters, `tol=0`):
+    - with EO half-spinor compact kernel: ~`0.40 s` total (`~4.63 ms/iter`)
+    - without EO half-spinor compact kernel: ~`0.74 s` total (`~8.65 ms/iter`)
+- Relative to the provided Chroma logs:
+  - unpreconditioned iteration time is currently faster in JAX
+  - EO-preconditioned iteration time is currently near parity/slightly slower in JAX
+ - Important implementation note:
+  - `SU3WilsonNf2.apply_normal` now uses split calls `Ddag(D(psi))` by default (with jitted `D`/`Ddag` kernels),
+    and `apply_normal` is no longer separately jitted as one monolithic kernel.
+  - This removed a major normal-kernel overhead while preserving solver behavior/accuracy.
+  - `SU3WilsonNf2` now supports EO compact half-spinor acceleration:
+    - dataclass/CLI flag: `eo_use_half_spinor` / `--eo-use-half-spinor` (default `True`)
+    - this path is used only in compact EO Schur dslash kernels (`_apply_dslash_parity_compact_one`)
+    - for `8^3x16`, this gave ~`1.87x` speedup for EO-preconditioned solve wall-time at fixed 86 iterations.
+
 ### SU2 Wilson Status
-- `su2_wilson_nf2.py` is still a minimal module and is not yet feature-parity with SU3/U1 Wilson modules.
-- Missing parity items include monomial composition, EO-preconditioned fermion monomial, and full CLI harness (`forcecmp/eopforce/pfrefresh/...`).
+- SU2 Wilson Nf=2 is feature-parity with SU3/U1 Wilson module architecture.
+- Validated on CPU in both monomial modes:
+  - unpreconditioned: `--tests all --fermion-monomial-kind unpreconditioned`
+  - EO-preconditioned: `--tests all --fermion-monomial-kind eo_preconditioned --pf-force-mode analytic`
 
 ## Priority Backlog
 1. Add nested integrator schedules over monomial timescales (Sexton-Weingarten style).

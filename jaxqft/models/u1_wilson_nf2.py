@@ -1089,18 +1089,44 @@ def test_perf(th: U1WilsonNf2, n_iter: int = 10) -> Dict[str, float]:
     n_active_t = (t5 - t4) / max(1, n_iter)
     d_other_t = (t9 - t8) / max(1, n_iter)
     n_other_t = (t11 - t10) / max(1, n_iter)
+
+    vol = int(np.prod(th.lattice_shape))
+    bsz = int(th.batch_size)
+    nc = 1
+    flops_site_sparse = int(th.dirac.flops_per_site_matvec(nc=nc, use_sparse_gamma=True, include_diagonal=True))
+    flops_site_dense = int(th.dirac.flops_per_site_matvec(nc=nc, use_sparse_gamma=False, include_diagonal=True))
+    flops_d_sparse = int(flops_site_sparse * vol * bsz)
+    flops_d_dense = int(flops_site_dense * vol * bsz)
+    flops_n_sparse = int(2 * flops_d_sparse)
+    flops_n_dense = int(2 * flops_d_dense)
+
+    def _gflops(flops: int, seconds: float) -> float:
+        return float(flops) / (float(seconds) * 1e9 + 1e-30)
+
     return {
         "active_kernel": 0.0 if active == "reference" else 1.0,
         "other_kernel": 0.0 if other == "reference" else 1.0,
         "sparse_enabled": float(1.0 if th.dirac.sparse_gamma_available else 0.0),
+        "flops_per_site_D_sparse": float(flops_site_sparse),
+        "flops_per_site_D_dense": float(flops_site_dense),
+        "flops_per_call_D_sparse": float(flops_d_sparse),
+        "flops_per_call_D_dense": float(flops_d_dense),
+        "flops_per_call_N_sparse": float(flops_n_sparse),
+        "flops_per_call_N_dense": float(flops_n_dense),
         "D_sparse_sec_per_call": d_active_t,
         "D_dense_sec_per_call": (t3 - t2) / max(1, n_iter),
         "N_sparse_sec_per_call": n_active_t,
         "N_dense_sec_per_call": (t7 - t6) / max(1, n_iter),
+        "D_sparse_gflops": _gflops(flops_d_sparse, d_active_t),
+        "D_dense_gflops": _gflops(flops_d_dense, (t3 - t2) / max(1, n_iter)),
+        "N_sparse_gflops": _gflops(flops_n_sparse, n_active_t),
+        "N_dense_gflops": _gflops(flops_n_dense, (t7 - t6) / max(1, n_iter)),
         "rel_D_sparse_vs_dense": rel_d,
         "rel_N_sparse_vs_dense": rel_n,
         "D_other_kernel_sec_per_call": d_other_t,
         "N_other_kernel_sec_per_call": n_other_t,
+        "D_other_kernel_gflops": _gflops(flops_d_sparse, d_other_t),
+        "N_other_kernel_gflops": _gflops(flops_n_sparse, n_other_t),
         "D_active_over_other": d_active_t / (d_other_t + 1e-16),
         "N_active_over_other": n_active_t / (n_other_t + 1e-16),
         "rel_D_active_vs_other_kernel": rel_d_kernel,
@@ -1141,6 +1167,8 @@ def test_eo_operator(th: U1WilsonNf2, n_iter: int = 10) -> Dict[str, float]:
         th.apply_eo_schur_even(U, xe, normalized=False).block_until_ready()
     t1 = time.perf_counter()
 
+    # Warm normal operator on even-field shape so timing excludes compilation.
+    th.apply_normal(U, xe).block_until_ready()
     t2 = time.perf_counter()
     for _ in range(max(1, n_iter)):
         th.apply_normal(U, xe).block_until_ready()
@@ -1800,8 +1828,11 @@ def main():
         p = test_perf(th, n_iter=max(1, args.n_iter_timing))
         print("Performance test (sparse gamma vs dense gamma):")
         print(f"  sparse gamma available: {bool(int(p['sparse_enabled']))}")
+        print(f"  D FLOPs/site sparse/dense: {p['flops_per_site_D_sparse']:.0f} / {p['flops_per_site_D_dense']:.0f}")
         print(f"  D      sec/call sparse/dense: {p['D_sparse_sec_per_call']:.6e} / {p['D_dense_sec_per_call']:.6e}")
         print(f"  DdagD  sec/call sparse/dense: {p['N_sparse_sec_per_call']:.6e} / {p['N_dense_sec_per_call']:.6e}")
+        print(f"  D      GFLOP/s sparse/dense:  {p['D_sparse_gflops']:.6e} / {p['D_dense_gflops']:.6e}")
+        print(f"  DdagD  GFLOP/s sparse/dense:  {p['N_sparse_gflops']:.6e} / {p['N_dense_gflops']:.6e}")
         print(f"  rel diff D (sparse,dense): {p['rel_D_sparse_vs_dense']:.6e}")
         print(f"  rel diff DdagD (sparse,dense): {p['rel_N_sparse_vs_dense']:.6e}")
         active_name = "optimized" if bool(int(p["active_kernel"])) else "reference"
@@ -1810,6 +1841,8 @@ def main():
         print(f"  active/other kernels: {active_name} / {other_name}")
         print(f"  D      sec/call active/other: {p['D_sparse_sec_per_call']:.6e} / {p['D_other_kernel_sec_per_call']:.6e}")
         print(f"  DdagD  sec/call active/other: {p['N_sparse_sec_per_call']:.6e} / {p['N_other_kernel_sec_per_call']:.6e}")
+        print(f"  D      GFLOP/s active/other:  {p['D_sparse_gflops']:.6e} / {p['D_other_kernel_gflops']:.6e}")
+        print(f"  DdagD  GFLOP/s active/other:  {p['N_sparse_gflops']:.6e} / {p['N_other_kernel_gflops']:.6e}")
         print(f"  D      active/other ratio: {p['D_active_over_other']:.6e}")
         print(f"  DdagD  active/other ratio: {p['N_active_over_other']:.6e}")
         print(f"  rel diff D (active,other): {p['rel_D_active_vs_other_kernel']:.6e}")

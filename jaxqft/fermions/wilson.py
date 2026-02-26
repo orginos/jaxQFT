@@ -108,6 +108,22 @@ class WilsonDiracOperator:
         # U: [...,Nc,Nc] or [...] (scalar U(1)), psi: [...,Ns,Nc] -> [...,Ns,Nc]
         if U.ndim == psi.ndim - 2:
             return U[..., None, None] * psi
+        # Specialized small-Nc paths are substantially faster than generic einsum
+        # on CPU (and often GPU) for Wilson matvec hot loops.
+        if U.shape[-2:] == (3, 3):
+            p0 = psi[..., 0]
+            p1 = psi[..., 1]
+            p2 = psi[..., 2]
+            o0 = U[..., 0, 0, None] * p0 + U[..., 0, 1, None] * p1 + U[..., 0, 2, None] * p2
+            o1 = U[..., 1, 0, None] * p0 + U[..., 1, 1, None] * p1 + U[..., 1, 2, None] * p2
+            o2 = U[..., 2, 0, None] * p0 + U[..., 2, 1, None] * p1 + U[..., 2, 2, None] * p2
+            return jnp.stack((o0, o1, o2), axis=-1)
+        if U.shape[-2:] == (2, 2):
+            p0 = psi[..., 0]
+            p1 = psi[..., 1]
+            o0 = U[..., 0, 0, None] * p0 + U[..., 0, 1, None] * p1
+            o1 = U[..., 1, 0, None] * p0 + U[..., 1, 1, None] * p1
+            return jnp.stack((o0, o1), axis=-1)
         return jnp.einsum("...ab,...sb->...sa", U, psi)
 
     @property
@@ -329,3 +345,93 @@ class WilsonDiracOperator:
             rel = jnp.linalg.norm(gs - gd) / (jnp.linalg.norm(gd) + 1e-12)
             errs.append(float(rel))
         return {"sparse_available": 1.0, "max_rel_error": float(max(errs))}
+
+    def flops_per_site_dslash(
+        self,
+        nc: int,
+        use_sparse_gamma: bool = True,
+        complex_mul_flops: int = 6,
+        complex_add_flops: int = 2,
+        real_complex_mul_flops: int = 2,
+    ) -> int:
+        """Estimate floating-point operations per site for Wilson dslash.
+
+        This counts arithmetic implied by the current implementation:
+        color left-multiply, spin projection, and dslash accumulation.
+        Site rolls/shifts and memory traffic are not counted as FLOPs.
+        """
+        nc = int(nc)
+        ns = int(self.Ns)
+        nd = int(self.Nd)
+
+        if nc < 1:
+            raise ValueError("nc must be >= 1")
+
+        # Complex Nc x Nc matrix times Nc complex vector, repeated for each spin row.
+        # Per spin row: nc outputs, each output has nc complex mul and (nc-1) complex adds.
+        color_mul = ns * nc * (complex_mul_flops * nc + complex_add_flops * (nc - 1))
+
+        if bool(use_sparse_gamma):
+            # One complex phase multiply per spin/color entry.
+            gamma_apply = ns * nc * complex_mul_flops
+        else:
+            # Dense Ns x Ns gamma multiply per color block.
+            gamma_apply = nc * ns * (complex_mul_flops * ns + complex_add_flops * (ns - 1))
+
+        # spin_project = r*psi + coeff*gamma_apply(psi)
+        # One real-complex multiply for r*psi, one for coeff*gamma, then one complex add.
+        spin_project = gamma_apply + ns * nc * (2 * real_complex_mul_flops + complex_add_flops)
+
+        # For each direction: forward + backward projected hops + out accumulation.
+        # out += -0.5 * (fwd + bwd)
+        out_accum = ns * nc * (2 * complex_add_flops + real_complex_mul_flops)
+        per_dir = 2 * (color_mul + spin_project) + out_accum
+        return int(nd * per_dir)
+
+    def flops_per_site_matvec(
+        self,
+        nc: int,
+        use_sparse_gamma: bool = True,
+        include_diagonal: bool = True,
+        complex_mul_flops: int = 6,
+        complex_add_flops: int = 2,
+        real_complex_mul_flops: int = 2,
+    ) -> int:
+        """Estimate floating-point operations per site for full Wilson D matvec."""
+        dslash = self.flops_per_site_dslash(
+            nc=nc,
+            use_sparse_gamma=use_sparse_gamma,
+            complex_mul_flops=complex_mul_flops,
+            complex_add_flops=complex_add_flops,
+            real_complex_mul_flops=real_complex_mul_flops,
+        )
+        if not bool(include_diagonal):
+            return int(dslash)
+
+        ns = int(self.Ns)
+        nc = int(nc)
+        # apply_diag (scalar*psi) + add to dslash output.
+        diag = ns * nc * (real_complex_mul_flops + complex_add_flops)
+        return int(dslash + diag)
+
+    def flops_per_matvec_call(
+        self,
+        nc: int,
+        volume: int,
+        batch: int = 1,
+        use_sparse_gamma: bool = True,
+        include_diagonal: bool = True,
+        complex_mul_flops: int = 6,
+        complex_add_flops: int = 2,
+        real_complex_mul_flops: int = 2,
+    ) -> int:
+        """Estimate total FLOPs for one Wilson D call over full lattice+batch."""
+        per_site = self.flops_per_site_matvec(
+            nc=nc,
+            use_sparse_gamma=use_sparse_gamma,
+            include_diagonal=include_diagonal,
+            complex_mul_flops=complex_mul_flops,
+            complex_add_flops=complex_add_flops,
+            real_complex_mul_flops=real_complex_mul_flops,
+        )
+        return int(per_site * int(volume) * int(batch))

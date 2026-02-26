@@ -307,6 +307,7 @@ class SU3WilsonNf2(SU3YangMills):
     gmres_restart: int = 32
     gmres_solve_method: str = "batched"
     dirac_kernel: str = "optimized"  # {optimized, reference}
+    eo_use_half_spinor: bool = True
     include_gauge_monomial: bool = True
     include_fermion_monomial: bool = True
     fermion_monomial_kind: str = "unpreconditioned"  # {unpreconditioned, eo_preconditioned}
@@ -352,6 +353,18 @@ class SU3WilsonNf2(SU3YangMills):
         if self.pseudofermion_gamma is None:
             self.pseudofermion_gamma = float(self.smd_gamma) if mode == "ou" else 0.3
         self.dirac = WilsonDiracOperator(ndim=self.Nd, mass=self.mass, wilson_r=self.wilson_r, dtype=self.dtype)
+        self.dirac_eo = self.dirac
+        if bool(self.eo_use_half_spinor):
+            d_hs = WilsonDiracOperator(
+                ndim=self.Nd,
+                mass=self.mass,
+                wilson_r=self.wilson_r,
+                dtype=self.dtype,
+                gamma=self.dirac.gamma,
+                use_half_spinor=True,
+            )
+            if bool(d_hs.half_spinor_available):
+                self.dirac_eo = d_hs
         self._m0 = float(self.mass + self.wilson_r * self.Nd)
         self._mask_even, self._mask_odd = self._build_parity_masks()
         self._n_sites = int(np.prod(self.lattice_shape))
@@ -391,18 +404,14 @@ class SU3WilsonNf2(SU3YangMills):
         if bool(self.jit_dirac_kernels):
             _apply_D = self.apply_D
             _apply_Ddag = self.apply_Ddag
-            _apply_normal = self.apply_normal
             _apply_D_dense = self.apply_D_dense
             _apply_Ddag_dense = self.apply_Ddag_dense
-            _apply_normal_dense = self.apply_normal_dense
             _apply_offdiag = self.apply_offdiag
             _apply_offdiag_dagger = self.apply_offdiag_dagger
             self.apply_D = jax.jit(lambda U, psi: _apply_D(U, psi))
             self.apply_Ddag = jax.jit(lambda U, psi: _apply_Ddag(U, psi))
-            self.apply_normal = jax.jit(lambda U, psi: _apply_normal(U, psi))
             self.apply_D_dense = jax.jit(lambda U, psi: _apply_D_dense(U, psi))
             self.apply_Ddag_dense = jax.jit(lambda U, psi: _apply_Ddag_dense(U, psi))
-            self.apply_normal_dense = jax.jit(lambda U, psi: _apply_normal_dense(U, psi))
             self.apply_offdiag = jax.jit(lambda U, psi: _apply_offdiag(U, psi))
             self.apply_offdiag_dagger = jax.jit(lambda U, psi: _apply_offdiag_dagger(U, psi))
 
@@ -579,6 +588,7 @@ class SU3WilsonNf2(SU3YangMills):
             raise ValueError(f"Unknown compact target block: {target_block}")
 
         out = jnp.zeros_like(psi_src_compact)
+        op = self.dirac_eo
         for mu in range(self.Nd):
             U_mu = self._take_mu(Ub[None, ...], mu)[0].reshape((self._n_sites, 3, 3))
             U_fwd = jnp.take(U_mu, target, axis=0)
@@ -586,10 +596,8 @@ class SU3WilsonNf2(SU3YangMills):
 
             psi_fwd = jnp.take(psi_src_compact, plus[mu], axis=0)
             psi_bwd = jnp.take(psi_src_compact, minus[mu], axis=0)
-            fwd = self.dirac.color_mul_left(U_fwd, psi_fwd)
-            bkw = self.dirac.color_mul_left(U_bwd, psi_bwd)
-            fwd = self.dirac.spin_project(fwd, mu, coeff=float(+sign), use_sparse=True)
-            bkw = self.dirac.spin_project(bkw, mu, coeff=float(-sign), use_sparse=True)
+            fwd = op.projected_hop(U_fwd, psi_fwd, mu=mu, coeff=float(+sign), use_sparse=True)
+            bkw = op.projected_hop(U_bwd, psi_bwd, mu=mu, coeff=float(-sign), use_sparse=True)
             out = out - 0.5 * (fwd + bkw)
         return out
 
@@ -692,7 +700,8 @@ class SU3WilsonNf2(SU3YangMills):
         return self._project_even(self.apply_offdiag_dagger(U, xo))
 
     def apply_normal(self, U: Array, psi: Array) -> Array:
-        return self.apply_normal_with_kernel(U, psi, kernel=self.dirac_kernel, use_sparse_gamma=True)
+        # Use split kernels for normal operator to preserve the fast D and D^dagger paths.
+        return self.apply_Ddag(U, self.apply_D(U, psi))
 
     def apply_normal_with_kernel(self, U: Array, psi: Array, kernel: str, use_sparse_gamma: bool = True) -> Array:
         return self.dirac.apply_normal(
@@ -748,7 +757,7 @@ class SU3WilsonNf2(SU3YangMills):
         )
 
     def apply_normal_dense(self, U: Array, psi: Array) -> Array:
-        return self.apply_normal_with_kernel(U, psi, kernel=self.dirac_kernel, use_sparse_gamma=False)
+        return self.apply_Ddag_dense(U, self.apply_D_dense(U, psi))
 
     def random_fermion(self) -> Array:
         k1 = self._split_key()
@@ -1273,18 +1282,44 @@ def test_perf(th: SU3WilsonNf2, n_iter: int = 10) -> Dict[str, float]:
     n_active_t = (t5 - t4) / max(1, n_iter)
     d_other_t = (t9 - t8) / max(1, n_iter)
     n_other_t = (t11 - t10) / max(1, n_iter)
+
+    vol = int(np.prod(th.lattice_shape))
+    bsz = int(th.batch_size)
+    nc = 3
+    flops_site_sparse = int(th.dirac.flops_per_site_matvec(nc=nc, use_sparse_gamma=True, include_diagonal=True))
+    flops_site_dense = int(th.dirac.flops_per_site_matvec(nc=nc, use_sparse_gamma=False, include_diagonal=True))
+    flops_d_sparse = int(flops_site_sparse * vol * bsz)
+    flops_d_dense = int(flops_site_dense * vol * bsz)
+    flops_n_sparse = int(2 * flops_d_sparse)
+    flops_n_dense = int(2 * flops_d_dense)
+
+    def _gflops(flops: int, seconds: float) -> float:
+        return float(flops) / (float(seconds) * 1e9 + 1e-30)
+
     return {
         "active_kernel": 0.0 if active == "reference" else 1.0,
         "other_kernel": 0.0 if other == "reference" else 1.0,
         "sparse_enabled": float(1.0 if th.dirac.sparse_gamma_available else 0.0),
+        "flops_per_site_D_sparse": float(flops_site_sparse),
+        "flops_per_site_D_dense": float(flops_site_dense),
+        "flops_per_call_D_sparse": float(flops_d_sparse),
+        "flops_per_call_D_dense": float(flops_d_dense),
+        "flops_per_call_N_sparse": float(flops_n_sparse),
+        "flops_per_call_N_dense": float(flops_n_dense),
         "D_sparse_sec_per_call": d_active_t,
         "D_dense_sec_per_call": (t3 - t2) / max(1, n_iter),
         "N_sparse_sec_per_call": n_active_t,
         "N_dense_sec_per_call": (t7 - t6) / max(1, n_iter),
+        "D_sparse_gflops": _gflops(flops_d_sparse, d_active_t),
+        "D_dense_gflops": _gflops(flops_d_dense, (t3 - t2) / max(1, n_iter)),
+        "N_sparse_gflops": _gflops(flops_n_sparse, n_active_t),
+        "N_dense_gflops": _gflops(flops_n_dense, (t7 - t6) / max(1, n_iter)),
         "rel_D_sparse_vs_dense": rel_d,
         "rel_N_sparse_vs_dense": rel_n,
         "D_other_kernel_sec_per_call": d_other_t,
         "N_other_kernel_sec_per_call": n_other_t,
+        "D_other_kernel_gflops": _gflops(flops_d_sparse, d_other_t),
+        "N_other_kernel_gflops": _gflops(flops_n_sparse, n_other_t),
         "D_active_over_other": d_active_t / (d_other_t + 1e-16),
         "N_active_over_other": n_active_t / (n_other_t + 1e-16),
         "rel_D_active_vs_other_kernel": rel_d_kernel,
@@ -1347,6 +1382,8 @@ def test_eo_operator(th: SU3WilsonNf2, n_iter: int = 10) -> Dict[str, float]:
         )(Uin, xin)
     )
     eo_compact_apply(U, xe_c).block_until_ready()
+    # Warm normal operator on even-field shape so timing excludes compilation.
+    th.apply_normal(U, xe).block_until_ready()
 
     t0 = time.perf_counter()
     for _ in range(max(1, n_iter)):
@@ -1841,6 +1878,139 @@ def test_eop_force_fd(
     return out
 
 
+def test_eop_solver_perf(
+    th: SU3WilsonNf2,
+    q_scale: float = 0.05,
+    maxiter: int = 86,
+    tol: float = 0.0,
+    repeat: int = 4,
+    warmup: int = 1,
+    compare_halfspinor: bool = True,
+) -> Dict[str, float]:
+    if str(th.solver_kind) != "cg":
+        return {"enabled": 0.0, "reason_non_cg": 1.0}
+
+    maxiter = max(1, int(maxiter))
+    repeat = max(1, int(repeat))
+    warmup = max(0, int(warmup))
+
+    # Build one weak-field gauge configuration and one fixed even-source rhs
+    # and reuse them across both half-spinor modes for fair comparison.
+    base = SU3WilsonNf2(
+        lattice_shape=th.lattice_shape,
+        beta=th.beta,
+        batch_size=th.batch_size,
+        layout=th.layout,
+        exp_method=th.exp_method,
+        mass=th.mass,
+        wilson_r=th.wilson_r,
+        cg_tol=float(tol),
+        cg_maxiter=maxiter,
+        solver_kind="cg",
+        solver_form="normal",
+        preconditioner_kind=th.preconditioner_kind,
+        gmres_restart=th.gmres_restart,
+        gmres_solve_method=th.gmres_solve_method,
+        dirac_kernel=th.dirac_kernel,
+        eo_use_half_spinor=True,
+        include_gauge_monomial=False,
+        include_fermion_monomial=True,
+        fermion_monomial_kind="eo_preconditioned",
+        gauge_timescale=th.gauge_timescale,
+        fermion_timescale=th.fermion_timescale,
+        pseudofermion_refresh=th.pseudofermion_refresh,
+        pseudofermion_gamma=th.pseudofermion_gamma,
+        pseudofermion_force_mode=th.pseudofermion_force_mode,
+        smd_gamma=th.smd_gamma,
+        auto_refresh_pseudofermions=th.auto_refresh_pseudofermions,
+        jit_dirac_kernels=th.jit_dirac_kernels,
+        jit_solvers=th.jit_solvers,
+    )
+    U = base.hot_start(scale=q_scale)
+    rhs = base._project_even(base.random_fermion())
+
+    def _run_variant(use_hs: bool) -> Dict[str, float]:
+        b = SU3WilsonNf2(
+            lattice_shape=th.lattice_shape,
+            beta=th.beta,
+            batch_size=th.batch_size,
+            layout=th.layout,
+            exp_method=th.exp_method,
+            mass=th.mass,
+            wilson_r=th.wilson_r,
+            cg_tol=float(tol),
+            cg_maxiter=maxiter,
+            solver_kind="cg",
+            solver_form="normal",
+            preconditioner_kind=th.preconditioner_kind,
+            gmres_restart=th.gmres_restart,
+            gmres_solve_method=th.gmres_solve_method,
+            dirac_kernel=th.dirac_kernel,
+            eo_use_half_spinor=bool(use_hs),
+            include_gauge_monomial=False,
+            include_fermion_monomial=True,
+            fermion_monomial_kind="eo_preconditioned",
+            gauge_timescale=th.gauge_timescale,
+            fermion_timescale=th.fermion_timescale,
+            pseudofermion_refresh=th.pseudofermion_refresh,
+            pseudofermion_gamma=th.pseudofermion_gamma,
+            pseudofermion_force_mode=th.pseudofermion_force_mode,
+            smd_gamma=th.smd_gamma,
+            auto_refresh_pseudofermions=th.auto_refresh_pseudofermions,
+            jit_dirac_kernels=th.jit_dirac_kernels,
+            jit_solvers=th.jit_solvers,
+        )
+        # Warmup
+        for _ in range(warmup):
+            b.solve_eop_even_normal(U, rhs).block_until_ready()
+        # Timing
+        ts = []
+        for _ in range(repeat):
+            t0 = time.perf_counter()
+            b.solve_eop_even_normal(U, rhs).block_until_ready()
+            t1 = time.perf_counter()
+            ts.append(t1 - t0)
+        sec = float(np.mean(ts))
+        return {
+            "sec_per_solve": sec,
+            "sec_per_iter": sec / float(maxiter),
+            "halfspinor_available": float(bool(getattr(b, "dirac_eo", b.dirac).half_spinor_available)),
+        }
+
+    on = _run_variant(True)
+    if bool(compare_halfspinor):
+        off = _run_variant(False)
+    else:
+        off = {"sec_per_solve": float("nan"), "sec_per_iter": float("nan"), "halfspinor_available": float("nan")}
+
+    out = {
+        "enabled": 1.0,
+        "solver_kind_cg": 1.0,
+        "maxiter": float(maxiter),
+        "tol": float(tol),
+        "repeat": float(repeat),
+        "warmup": float(warmup),
+        "compare_halfspinor": 1.0 if bool(compare_halfspinor) else 0.0,
+        "sec_per_solve_hs_on": float(on["sec_per_solve"]),
+        "sec_per_iter_hs_on": float(on["sec_per_iter"]),
+        "halfspinor_available_hs_on": float(on["halfspinor_available"]),
+    }
+    out.update(
+        {
+            "sec_per_solve_hs_off": float(off["sec_per_solve"]),
+            "sec_per_iter_hs_off": float(off["sec_per_iter"]),
+            "halfspinor_available_hs_off": float(off["halfspinor_available"]),
+            "hs_on_over_off": float(on["sec_per_solve"] / (off["sec_per_solve"] + 1e-16))
+            if bool(compare_halfspinor)
+            else float("nan"),
+            "hs_off_over_on": float(off["sec_per_solve"] / (on["sec_per_solve"] + 1e-16))
+            if bool(compare_halfspinor)
+            else float("nan"),
+        }
+    )
+    return out
+
+
 def main():
     if platform.system() == "Darwin" and "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
         os.environ["JAX_PLATFORMS"] = "cpu"
@@ -1858,6 +2028,7 @@ def main():
     ap.add_argument("--gmres-restart", type=int, default=32)
     ap.add_argument("--gmres-solve-method", type=str, default="batched")
     ap.add_argument("--dirac-kernel", type=str, default="optimized", choices=["optimized", "reference"])
+    ap.add_argument("--eo-use-half-spinor", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--layout", type=str, default="BM...IJ")
     ap.add_argument("--exp-method", type=str, default="su3", choices=["expm", "su3"])
@@ -1896,6 +2067,12 @@ def main():
     ap.add_argument("--pf-fd-trials", type=int, default=2)
     ap.add_argument("--pf-fd-eps", type=float, default=5e-4)
     ap.add_argument("--pf-fd-iters", type=int, default=2, help="timing iterations for EO-preconditioned force checks")
+    ap.add_argument("--eop-perf-maxiter", type=int, default=86, help="fixed CG iterations for EO performance test")
+    ap.add_argument("--eop-perf-tol", type=float, default=0.0, help="CG tolerance for EO performance test")
+    ap.add_argument("--eop-perf-repeat", type=int, default=4, help="number of timed solves for EO performance test")
+    ap.add_argument("--eop-perf-warmup", type=int, default=1, help="number of untimed warmup solves for EO performance test")
+    ap.add_argument("--eop-perf-qscale", type=float, default=0.05, help="weak-field scale for EO performance test")
+    ap.add_argument("--eop-perf-compare-halfspinor", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--auto-refresh-pseudofermions", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--jit-dirac-kernels", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--jit-solvers", action=argparse.BooleanOptionalAction, default=True)
@@ -1904,7 +2081,7 @@ def main():
         "--tests",
         type=str,
         default="all",
-        help="comma-separated: gamma,adjoint,normal,perf,eo,hamiltonian,pfrefresh,pfid,gauge,conventions,forcecmp,eopforce,all",
+        help="comma-separated: gamma,adjoint,normal,perf,eo,eoperf,hamiltonian,pfrefresh,pfid,gauge,conventions,forcecmp,eopforce,all",
     )
     args = ap.parse_args()
 
@@ -1933,6 +2110,7 @@ def main():
         gmres_restart=int(args.gmres_restart),
         gmres_solve_method=str(args.gmres_solve_method),
         dirac_kernel=str(args.dirac_kernel),
+        eo_use_half_spinor=bool(args.eo_use_half_spinor),
         include_gauge_monomial=bool(args.include_gauge_monomial),
         include_fermion_monomial=bool(args.include_fermion_monomial),
         fermion_monomial_kind=str(args.fermion_monomial_kind),
@@ -1957,6 +2135,11 @@ def main():
     print(f"  fermion monomial kind: {th.fermion_monomial_kind}")
     print(f"  monomial timescales: gauge={th.gauge_timescale}, fermion={th.fermion_timescale}")
     print(f"  dirac kernel: {th.dirac_kernel}")
+    print(
+        "  eo compact half-spinor:"
+        f" requested={bool(th.eo_use_half_spinor)}"
+        f" available={bool(getattr(th, 'dirac_eo', th.dirac).half_spinor_available)}"
+    )
     solver_line = (
         "  solver:"
         f" kind={th.solver_kind}"
@@ -1999,8 +2182,11 @@ def main():
         p = test_perf(th, n_iter=max(1, args.n_iter_timing))
         print("Performance test (sparse gamma vs dense gamma):")
         print(f"  sparse gamma available: {bool(int(p['sparse_enabled']))}")
+        print(f"  D FLOPs/site sparse/dense: {p['flops_per_site_D_sparse']:.0f} / {p['flops_per_site_D_dense']:.0f}")
         print(f"  D      sec/call sparse/dense: {p['D_sparse_sec_per_call']:.6e} / {p['D_dense_sec_per_call']:.6e}")
         print(f"  DdagD  sec/call sparse/dense: {p['N_sparse_sec_per_call']:.6e} / {p['N_dense_sec_per_call']:.6e}")
+        print(f"  D      GFLOP/s sparse/dense:  {p['D_sparse_gflops']:.6e} / {p['D_dense_gflops']:.6e}")
+        print(f"  DdagD  GFLOP/s sparse/dense:  {p['N_sparse_gflops']:.6e} / {p['N_dense_gflops']:.6e}")
         print(f"  rel diff D (sparse,dense): {p['rel_D_sparse_vs_dense']:.6e}")
         print(f"  rel diff DdagD (sparse,dense): {p['rel_N_sparse_vs_dense']:.6e}")
         active_name = "optimized" if bool(int(p["active_kernel"])) else "reference"
@@ -2009,6 +2195,8 @@ def main():
         print(f"  active/other kernels: {active_name} / {other_name}")
         print(f"  D      sec/call active/other: {p['D_sparse_sec_per_call']:.6e} / {p['D_other_kernel_sec_per_call']:.6e}")
         print(f"  DdagD  sec/call active/other: {p['N_sparse_sec_per_call']:.6e} / {p['N_other_kernel_sec_per_call']:.6e}")
+        print(f"  D      GFLOP/s active/other:  {p['D_sparse_gflops']:.6e} / {p['D_other_kernel_gflops']:.6e}")
+        print(f"  DdagD  GFLOP/s active/other:  {p['N_sparse_gflops']:.6e} / {p['N_other_kernel_gflops']:.6e}")
         print(f"  D      active/other ratio: {p['D_active_over_other']:.6e}")
         print(f"  DdagD  active/other ratio: {p['N_active_over_other']:.6e}")
         print(f"  rel diff D (active,other): {p['rel_D_active_vs_other_kernel']:.6e}")
@@ -2175,6 +2363,41 @@ def main():
                     f" {ef['max_rel_force_autodiff_vs_analytic']:.6e} / {ef['mean_rel_force_autodiff_vs_analytic']:.6e}"
                 )
                 print(f"  analytic force sec/call:     {ef['analytic_force_sec_per_call']:.6e}")
+
+    if "eoperf" in tests:
+        ep = test_eop_solver_perf(
+            th,
+            q_scale=float(args.eop_perf_qscale),
+            maxiter=int(args.eop_perf_maxiter),
+            tol=float(args.eop_perf_tol),
+            repeat=int(args.eop_perf_repeat),
+            warmup=int(args.eop_perf_warmup),
+            compare_halfspinor=bool(args.eop_perf_compare_halfspinor),
+        )
+        if not bool(int(ep.get("enabled", 0.0))):
+            if bool(int(ep.get("reason_non_cg", 0.0))):
+                print("EO-preconditioned solve performance: skipped (requires solver-kind=cg)")
+            else:
+                print("EO-preconditioned solve performance: skipped")
+        else:
+            print("EO-preconditioned solve performance:")
+            print(f"  fixed CG maxiter/tol:        {int(ep['maxiter'])} / {ep['tol']:.3e}")
+            print(f"  warmup/repeat:               {int(ep['warmup'])} / {int(ep['repeat'])}")
+            print(
+                "  half-spinor ON available:"
+                f" {bool(int(ep['halfspinor_available_hs_on']))}"
+                f"  sec/solve={ep['sec_per_solve_hs_on']:.6e}"
+                f"  sec/iter={ep['sec_per_iter_hs_on']:.6e}"
+            )
+            if bool(int(ep["compare_halfspinor"])):
+                print(
+                    "  half-spinor OFF available:"
+                    f" {bool(int(ep['halfspinor_available_hs_off']))}"
+                    f"  sec/solve={ep['sec_per_solve_hs_off']:.6e}"
+                    f"  sec/iter={ep['sec_per_iter_hs_off']:.6e}"
+                )
+                print(f"  hs ON/OFF solve ratio:       {ep['hs_on_over_off']:.6e}")
+                print(f"  hs OFF/ON solve ratio:       {ep['hs_off_over_on']:.6e}")
 
 
 if __name__ == "__main__":
