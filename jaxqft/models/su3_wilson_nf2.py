@@ -24,6 +24,7 @@ except Exception:
     gmres = None
 
 from jaxqft.core import HamiltonianModel
+from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
 from jaxqft.fermions import WilsonDiracOperator, check_gamma_algebra, gamma5
 from jaxqft.models.su3_ym import (
     SU3YangMills,
@@ -112,12 +113,17 @@ class WilsonNf2PseudofermionMonomial:
     force_mode: str = "autodiff"
     eta: Optional[Array] = field(default=None, init=False, repr=False)
     phi: Optional[Array] = field(default=None, init=False, repr=False)
+    _solve_guess: Optional[Array] = field(default=None, init=False, repr=False)
     _grad_links_ad_fn: Optional[object] = field(default=None, init=False, repr=False)
     _force_ad_fn: Optional[object] = field(default=None, init=False, repr=False)
 
     def clear(self) -> None:
         self.eta = None
         self.phi = None
+        self._solve_guess = None
+
+    def clear_solver_guess(self) -> None:
+        self._solve_guess = None
 
     def refresh(self, q: Array, traj_length: float = 1.0) -> None:
         mode = str(self.refresh_mode).lower()
@@ -136,12 +142,27 @@ class WilsonNf2PseudofermionMonomial:
         # Nf=2 pseudofermion refresh convention:
         # phi = D^\dagger eta, with S_pf = phi^\dagger (D^\dagger D)^{-1} phi.
         self.phi = self.model.apply_Ddag(q, self.eta)
+        self._solve_guess = None
 
     def action(self, q: Array) -> Array:
         if self.phi is None:
             self.refresh(q, traj_length=1.0)
         assert self.phi is not None
-        return self.model.pseudofermion_action(q, self.phi)
+        phi = self.phi
+        if self.model.solver_form == "normal":
+            if self._solve_guess is not None and self._solve_guess.shape == phi.shape:
+                x = self.model.solve_normal_with_guess(q, phi, self._solve_guess)
+            else:
+                x = self.model.solve_normal(q, phi)
+            self._solve_guess = x
+            return jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(phi, x))
+        if self.model.solver_form in ("split", "eo_split"):
+            if self.model.solver_form == "eo_split":
+                chi = self.model.solve_dagger_eo(q, phi)
+            else:
+                chi = self.model.solve_dagger(q, phi)
+            return jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(chi, chi))
+        raise ValueError(f"Unknown solver_form: {self.model.solver_form}")
 
     def _build_grad_links_ad_fn(self):
         def _pf_action_sum(u_re: Array, u_im: Array, phi: Array) -> Array:
@@ -181,7 +202,11 @@ class WilsonNf2PseudofermionMonomial:
             # Reuse Y from the first split solve: D^\dagger Y = phi, D X = Y.
             x, y = self.model.solve_split_with_intermediate(q, phi)
         else:
-            x = self.model.solve_pseudofermion(q, phi)
+            if self._solve_guess is not None and self._solve_guess.shape == phi.shape:
+                x = self.model.solve_normal_with_guess(q, phi, self._solve_guess)
+            else:
+                x = self.model.solve_normal(q, phi)
+            self._solve_guess = x
             y = self.model.apply_D(q, x)
         return self.model.pseudofermion_force_from_solution(q, x, y)
 
@@ -210,12 +235,17 @@ class WilsonNf2EOPreconditionedMonomial:
     force_mode: str = "autodiff"
     eta: Optional[Array] = field(default=None, init=False, repr=False)
     phi: Optional[Array] = field(default=None, init=False, repr=False)
+    _eop_solve_guess: Optional[Array] = field(default=None, init=False, repr=False)
     _grad_links_ad_fn: Optional[object] = field(default=None, init=False, repr=False)
     _force_ad_fn: Optional[object] = field(default=None, init=False, repr=False)
 
     def clear(self) -> None:
         self.eta = None
         self.phi = None
+        self._eop_solve_guess = None
+
+    def clear_solver_guess(self) -> None:
+        self._eop_solve_guess = None
 
     def refresh(self, q: Array, traj_length: float = 1.0) -> None:
         mode = str(self.refresh_mode).lower()
@@ -235,12 +265,24 @@ class WilsonNf2EOPreconditionedMonomial:
         self.eta = self.model._project_even(eta)
         self.phi = self.model.apply_eo_schur_even_dagger(q, self.eta, normalized=True)
         self.phi = self.model._project_even(self.phi)
+        self._eop_solve_guess = None
 
     def action(self, q: Array) -> Array:
         if self.phi is None:
             self.refresh(q, traj_length=1.0)
         assert self.phi is not None
-        return self.model.eop_pseudofermion_action(q, self.phi)
+        phi = self.phi
+        if self.model.solver_form == "normal":
+            if self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
+                x = self.model.solve_eop_even_normal_with_guess(q, phi, self._eop_solve_guess)
+            else:
+                x = self.model.solve_eop_even_normal(q, phi)
+            self._eop_solve_guess = x
+            return jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(phi, x))
+        if self.model.solver_form in ("split", "eo_split"):
+            chi = self.model.solve_eop_even_dagger(q, phi)
+            return jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(chi, chi))
+        raise ValueError(f"Unknown solver_form: {self.model.solver_form}")
 
     def _build_grad_links_ad_fn(self):
         def _pf_action_sum(u_re: Array, u_im: Array, phi: Array) -> Array:
@@ -279,7 +321,11 @@ class WilsonNf2EOPreconditionedMonomial:
         if self.model.solver_form in ("split", "eo_split"):
             x_e, y_e = self.model.solve_eop_even_split_with_intermediate(q, phi)
         else:
-            x_e = self.model.solve_eop_even_normal(q, phi)
+            if self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
+                x_e = self.model.solve_eop_even_normal_with_guess(q, phi, self._eop_solve_guess)
+            else:
+                x_e = self.model.solve_eop_even_normal(q, phi)
+            self._eop_solve_guess = x_e
             y_e = self.model.apply_eo_schur_even(q, x_e, normalized=True)
         return self.model.eop_pseudofermion_force_from_solution(q, x_e, y_e)
 
@@ -306,6 +352,7 @@ class SU3WilsonNf2(SU3YangMills):
     preconditioner_kind: str = "none"  # {none, jacobi}
     gmres_restart: int = 32
     gmres_solve_method: str = "batched"
+    fermion_bc: Optional[Tuple[complex, ...]] = None  # boundary phases per direction, e.g. (1,1,1,-1)
     dirac_kernel: str = "optimized"  # {optimized, reference}
     eo_use_half_spinor: bool = True
     include_gauge_monomial: bool = True
@@ -352,6 +399,8 @@ class SU3WilsonNf2(SU3YangMills):
         mode = str(self.pseudofermion_refresh).lower()
         if self.pseudofermion_gamma is None:
             self.pseudofermion_gamma = float(self.smd_gamma) if mode == "ou" else 0.3
+        self.fermion_bc = self._normalize_fermion_bc(self.fermion_bc)
+        self._fermion_bc_link_factor, self._fermion_bc_active = self._build_fermion_bc_link_factor()
         self.dirac = WilsonDiracOperator(ndim=self.Nd, mass=self.mass, wilson_r=self.wilson_r, dtype=self.dtype)
         self.dirac_eo = self.dirac
         if bool(self.eo_use_half_spinor):
@@ -400,6 +449,56 @@ class SU3WilsonNf2(SU3YangMills):
         self.requires_trajectory_refresh = any(bool(getattr(m, "stochastic", False)) for m in self.hamiltonian.monomials)
         self._configure_jit_paths()
 
+    def _normalize_fermion_bc(self, bc: Optional[Tuple[complex, ...]]) -> Tuple[complex, ...]:
+        if bc is None:
+            vals = [1.0 + 0.0j] * self.Nd
+        elif isinstance(bc, str):
+            toks = [v.strip() for v in bc.split(",") if v.strip()]
+            vals = []
+            for t in toks:
+                tj = t.replace("I", "j").replace("i", "j")
+                vals.append(complex(tj))
+        else:
+            vals = [complex(v) for v in bc]
+        if len(vals) != self.Nd:
+            raise ValueError(f"fermion_bc must have Nd={self.Nd} entries; got {len(vals)}")
+        return tuple(vals)
+
+    def _build_fermion_bc_link_factor(self) -> Tuple[Array, bool]:
+        phases = np.asarray(self.fermion_bc, dtype=np.complex64)
+        active = bool(np.any(np.abs(phases - (1.0 + 0.0j)) > 1e-12))
+        if self.layout == "BMXYIJ":
+            fac = np.ones((self.Nd, *self.lattice_shape, 1, 1), dtype=np.complex64)
+            for mu in range(self.Nd):
+                p = phases[mu]
+                if np.abs(p - (1.0 + 0.0j)) <= 1e-12:
+                    continue
+                sl = [slice(None)] * (self.Nd + 3)
+                sl[0] = mu
+                sl[1 + mu] = int(self.lattice_shape[mu]) - 1
+                fac[tuple(sl)] *= p
+        else:
+            fac = np.ones((*self.lattice_shape, self.Nd, 1, 1), dtype=np.complex64)
+            for mu in range(self.Nd):
+                p = phases[mu]
+                if np.abs(p - (1.0 + 0.0j)) <= 1e-12:
+                    continue
+                sl = [slice(None)] * (self.Nd + 3)
+                sl[mu] = int(self.lattice_shape[mu]) - 1
+                sl[self.Nd] = mu
+                fac[tuple(sl)] *= p
+        return jnp.asarray(fac, dtype=self.dtype), active
+
+    def _links_with_fermion_bc(self, U: Array) -> Array:
+        if not bool(self._fermion_bc_active):
+            return U
+        fac = self._fermion_bc_link_factor.astype(U.dtype)
+        if U.ndim == self.Nd + 4:
+            return U * fac[None, ...]
+        if U.ndim == self.Nd + 3:
+            return U * fac
+        raise ValueError(f"Unexpected link tensor rank for fermion BC application: ndim={U.ndim}")
+
     def _configure_jit_paths(self) -> None:
         if bool(self.jit_dirac_kernels):
             _apply_D = self.apply_D
@@ -423,7 +522,9 @@ class SU3WilsonNf2(SU3YangMills):
             _solve_eop_even_direct = self.solve_eop_even_direct
             _solve_eop_even_dagger = self.solve_eop_even_dagger
             _solve_eop_even_normal = self.solve_eop_even_normal
+            _solve_eop_even_normal_with_guess = self.solve_eop_even_normal_with_guess
             _solve_normal = self.solve_normal
+            _solve_normal_with_guess = self.solve_normal_with_guess
             _solve_split_with_intermediate = self.solve_split_with_intermediate
             _solve_split = self.solve_split
             _solve_pseudofermion = self.solve_pseudofermion
@@ -438,7 +539,11 @@ class SU3WilsonNf2(SU3YangMills):
             self.solve_eop_even_direct = jax.jit(lambda U, rhs: _solve_eop_even_direct(U, rhs))
             self.solve_eop_even_dagger = jax.jit(lambda U, rhs: _solve_eop_even_dagger(U, rhs))
             self.solve_eop_even_normal = jax.jit(lambda U, rhs: _solve_eop_even_normal(U, rhs))
+            self.solve_eop_even_normal_with_guess = jax.jit(
+                lambda U, rhs, x0: _solve_eop_even_normal_with_guess(U, rhs, x0)
+            )
             self.solve_normal = jax.jit(lambda U, rhs: _solve_normal(U, rhs))
+            self.solve_normal_with_guess = jax.jit(lambda U, rhs, x0: _solve_normal_with_guess(U, rhs, x0))
             self.solve_split_with_intermediate = jax.jit(lambda U, phi: _solve_split_with_intermediate(U, phi))
             self.solve_split = jax.jit(lambda U, phi: _solve_split(U, phi))
             self.solve_pseudofermion = jax.jit(lambda U, phi: _solve_pseudofermion(U, phi))
@@ -626,117 +731,166 @@ class SU3WilsonNf2(SU3YangMills):
     def _roll_site(self, x: Array, shift: int, direction: int) -> Array:
         return jnp.roll(x, shift=shift, axis=1 + direction)
 
+    def _apply_D_links_with_kernel(self, U_links: Array, psi: Array, kernel: str, use_sparse_gamma: bool = True) -> Array:
+        return self.dirac.apply(
+            U_links,
+            psi,
+            take_mu=self._take_mu,
+            roll_site=self._roll_site,
+            dagger=_dagger,
+            sign=-1,
+            use_sparse_gamma=use_sparse_gamma,
+            kernel=kernel,
+        )
+
+    def _apply_Ddag_links_with_kernel(self, U_links: Array, psi: Array, kernel: str, use_sparse_gamma: bool = True) -> Array:
+        return self.dirac.apply(
+            U_links,
+            psi,
+            take_mu=self._take_mu,
+            roll_site=self._roll_site,
+            dagger=_dagger,
+            sign=+1,
+            use_sparse_gamma=use_sparse_gamma,
+            kernel=kernel,
+        )
+
+    def _apply_offdiag_links_with_kernel(
+        self,
+        U_links: Array,
+        psi: Array,
+        sign: int,
+        kernel: str,
+        use_sparse_gamma: bool = True,
+    ) -> Array:
+        return self.dirac.apply_dslash(
+            U_links,
+            psi,
+            take_mu=self._take_mu,
+            roll_site=self._roll_site,
+            dagger=_dagger,
+            sign=sign,
+            use_sparse_gamma=use_sparse_gamma,
+            kernel=kernel,
+        )
+
     def apply_D(self, U: Array, psi: Array) -> Array:
         return self.apply_D_with_kernel(U, psi, kernel=self.dirac_kernel, use_sparse_gamma=True)
 
     def apply_D_with_kernel(self, U: Array, psi: Array, kernel: str, use_sparse_gamma: bool = True) -> Array:
-        return self.dirac.apply(
-            U,
-            psi,
-            take_mu=self._take_mu,
-            roll_site=self._roll_site,
-            dagger=_dagger,
-            sign=-1,
-            use_sparse_gamma=use_sparse_gamma,
-            kernel=kernel,
-        )
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_D_links_with_kernel(U_links, psi, kernel=kernel, use_sparse_gamma=use_sparse_gamma)
 
     def apply_Ddag(self, U: Array, psi: Array) -> Array:
-        return self.dirac.apply(
-            U,
-            psi,
-            take_mu=self._take_mu,
-            roll_site=self._roll_site,
-            dagger=_dagger,
-            sign=+1,
-            use_sparse_gamma=True,
-            kernel=self.dirac_kernel,
-        )
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_Ddag_links_with_kernel(U_links, psi, kernel=self.dirac_kernel, use_sparse_gamma=True)
 
     def apply_offdiag(self, U: Array, psi: Array) -> Array:
         # K: nearest-neighbor Dslash part (Wilson off-diagonal block).
-        return self.dirac.apply_dslash(
-            U,
-            psi,
-            take_mu=self._take_mu,
-            roll_site=self._roll_site,
-            dagger=_dagger,
-            sign=-1,
-            use_sparse_gamma=True,
-            kernel=self.dirac_kernel,
-        )
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_offdiag_links_with_kernel(U_links, psi, sign=-1, kernel=self.dirac_kernel, use_sparse_gamma=True)
 
     def apply_offdiag_dagger(self, U: Array, psi: Array) -> Array:
         # K^\dagger: nearest-neighbor Dslash part for D^\dagger.
-        return self.dirac.apply_dslash(
-            U,
-            psi,
-            take_mu=self._take_mu,
-            roll_site=self._roll_site,
-            dagger=_dagger,
-            sign=+1,
-            use_sparse_gamma=True,
-            kernel=self.dirac_kernel,
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_offdiag_links_with_kernel(U_links, psi, sign=+1, kernel=self.dirac_kernel, use_sparse_gamma=True)
+
+    def _apply_K_oe_from_links(self, U_links: Array, psi_even: Array) -> Array:
+        xe = self._project_even(psi_even)
+        return self._project_odd(
+            self._apply_offdiag_links_with_kernel(U_links, xe, sign=-1, kernel=self.dirac_kernel, use_sparse_gamma=True)
+        )
+
+    def _apply_K_eo_from_links(self, U_links: Array, psi_odd: Array) -> Array:
+        xo = self._project_odd(psi_odd)
+        return self._project_even(
+            self._apply_offdiag_links_with_kernel(U_links, xo, sign=-1, kernel=self.dirac_kernel, use_sparse_gamma=True)
+        )
+
+    def _apply_Kdag_oe_from_links(self, U_links: Array, psi_even: Array) -> Array:
+        xe = self._project_even(psi_even)
+        return self._project_odd(
+            self._apply_offdiag_links_with_kernel(U_links, xe, sign=+1, kernel=self.dirac_kernel, use_sparse_gamma=True)
+        )
+
+    def _apply_Kdag_eo_from_links(self, U_links: Array, psi_odd: Array) -> Array:
+        xo = self._project_odd(psi_odd)
+        return self._project_even(
+            self._apply_offdiag_links_with_kernel(U_links, xo, sign=+1, kernel=self.dirac_kernel, use_sparse_gamma=True)
         )
 
     def apply_K_oe(self, U: Array, psi_even: Array) -> Array:
         """K_oe: even -> odd nearest-neighbor hopping block."""
-        xe = self._project_even(psi_even)
-        return self._project_odd(self.apply_offdiag(U, xe))
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_K_oe_from_links(U_links, psi_even)
 
     def apply_K_eo(self, U: Array, psi_odd: Array) -> Array:
         """K_eo: odd -> even nearest-neighbor hopping block."""
-        xo = self._project_odd(psi_odd)
-        return self._project_even(self.apply_offdiag(U, xo))
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_K_eo_from_links(U_links, psi_odd)
 
     def apply_Kdag_oe(self, U: Array, psi_even: Array) -> Array:
         """K^\\dagger_oe: even -> odd nearest-neighbor hopping block."""
-        xe = self._project_even(psi_even)
-        return self._project_odd(self.apply_offdiag_dagger(U, xe))
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_Kdag_oe_from_links(U_links, psi_even)
 
     def apply_Kdag_eo(self, U: Array, psi_odd: Array) -> Array:
         """K^\\dagger_eo: odd -> even nearest-neighbor hopping block."""
-        xo = self._project_odd(psi_odd)
-        return self._project_even(self.apply_offdiag_dagger(U, xo))
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_Kdag_eo_from_links(U_links, psi_odd)
 
     def apply_normal(self, U: Array, psi: Array) -> Array:
         # Use split kernels for normal operator to preserve the fast D and D^dagger paths.
-        return self.apply_Ddag(U, self.apply_D(U, psi))
+        U_links = self._links_with_fermion_bc(U)
+        dpsi = self._apply_D_links_with_kernel(U_links, psi, kernel=self.dirac_kernel, use_sparse_gamma=True)
+        return self._apply_Ddag_links_with_kernel(U_links, dpsi, kernel=self.dirac_kernel, use_sparse_gamma=True)
 
     def apply_normal_with_kernel(self, U: Array, psi: Array, kernel: str, use_sparse_gamma: bool = True) -> Array:
-        return self.dirac.apply_normal(
-            U,
-            psi,
-            take_mu=self._take_mu,
-            roll_site=self._roll_site,
-            dagger=_dagger,
-            use_sparse_gamma=use_sparse_gamma,
-            kernel=kernel,
-        )
+        U_links = self._links_with_fermion_bc(U)
+        dpsi = self._apply_D_links_with_kernel(U_links, psi, kernel=kernel, use_sparse_gamma=use_sparse_gamma)
+        return self._apply_Ddag_links_with_kernel(U_links, dpsi, kernel=kernel, use_sparse_gamma=use_sparse_gamma)
 
     def apply_eo_schur_even(self, U: Array, psi_even: Array, normalized: bool = False) -> Array:
         # Schur complement on even sites:
         # S_e = m0 I - (1/m0) K_eo K_oe, with K = D - m0 I.
+        U_links = self._links_with_fermion_bc(U)
         xe = self._project_even(psi_even)
-        y_odd = self.apply_K_oe(U, xe)
-        z_even = self.apply_K_eo(U, y_odd)
+        y_odd = self._apply_K_oe_from_links(U_links, xe)
+        z_even = self._apply_K_eo_from_links(U_links, y_odd)
         if normalized:
             return xe - (1.0 / (self._m0 * self._m0)) * z_even
         return self._m0 * xe - (1.0 / self._m0) * z_even
 
+    def apply_eo_schur_even_compact(
+        self,
+        U: Array,
+        psi_even: Array,
+        daggered: bool = False,
+        normalized: bool = True,
+    ) -> Array:
+        U_links = self._links_with_fermion_bc(U)
+        xe = self._pack_even_sites(self._project_even(psi_even))
+        yc = jax.vmap(
+            lambda Ub, xcb: self._apply_eo_schur_even_compact_one(Ub, xcb, daggered=daggered, normalized=normalized),
+            in_axes=(0, 0),
+        )(U_links, xe)
+        return self._unpack_even_sites(yc)
+
     def apply_eo_schur_even_dagger(self, U: Array, psi_even: Array, normalized: bool = False) -> Array:
         # S_e^\dagger = m0 I - (1/m0) K_eo^\dagger K_oe^\dagger.
+        U_links = self._links_with_fermion_bc(U)
         xe = self._project_even(psi_even)
-        y_odd = self.apply_Kdag_oe(U, xe)
-        z_even = self.apply_Kdag_eo(U, y_odd)
+        y_odd = self._apply_Kdag_oe_from_links(U_links, xe)
+        z_even = self._apply_Kdag_eo_from_links(U_links, y_odd)
         if normalized:
             return xe - (1.0 / (self._m0 * self._m0)) * z_even
         return self._m0 * xe - (1.0 / self._m0) * z_even
 
     def apply_eo_schur_odd(self, U: Array, psi_odd: Array, normalized: bool = False) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         xo = self._project_odd(psi_odd)
-        y_even = self.apply_K_eo(U, xo)
-        z_odd = self.apply_K_oe(U, y_even)
+        y_even = self._apply_K_eo_from_links(U_links, xo)
+        z_odd = self._apply_K_oe_from_links(U_links, y_even)
         if normalized:
             return xo - (1.0 / (self._m0 * self._m0)) * z_odd
         return self._m0 * xo - (1.0 / self._m0) * z_odd
@@ -745,19 +899,13 @@ class SU3WilsonNf2(SU3YangMills):
         return self.apply_D_with_kernel(U, psi, kernel=self.dirac_kernel, use_sparse_gamma=False)
 
     def apply_Ddag_dense(self, U: Array, psi: Array) -> Array:
-        return self.dirac.apply(
-            U,
-            psi,
-            take_mu=self._take_mu,
-            roll_site=self._roll_site,
-            dagger=_dagger,
-            sign=+1,
-            use_sparse_gamma=False,
-            kernel=self.dirac_kernel,
-        )
+        U_links = self._links_with_fermion_bc(U)
+        return self._apply_Ddag_links_with_kernel(U_links, psi, kernel=self.dirac_kernel, use_sparse_gamma=False)
 
     def apply_normal_dense(self, U: Array, psi: Array) -> Array:
-        return self.apply_Ddag_dense(U, self.apply_D_dense(U, psi))
+        U_links = self._links_with_fermion_bc(U)
+        dpsi = self._apply_D_links_with_kernel(U_links, psi, kernel=self.dirac_kernel, use_sparse_gamma=False)
+        return self._apply_Ddag_links_with_kernel(U_links, dpsi, kernel=self.dirac_kernel, use_sparse_gamma=False)
 
     def random_fermion(self) -> Array:
         k1 = self._split_key()
@@ -832,11 +980,13 @@ class SU3WilsonNf2(SU3YangMills):
             return lambda x: (inv * x).astype(self.dtype)
         raise ValueError(f"Unknown preconditioner_kind: {kind}")
 
-    def _solve_linear(self, A, b, operator_tag: str = "normal"):
+    def _solve_linear(self, A, b, operator_tag: str = "normal", x0: Optional[Array] = None):
         solver = self._solver_fn()
         kwargs = {"tol": self.cg_tol, "maxiter": self.cg_maxiter}
         if self._supports_kwarg(solver, "atol"):
             kwargs["atol"] = 0.0
+        if x0 is not None and self._supports_kwarg(solver, "x0"):
+            kwargs["x0"] = x0
         if self.solver_kind == "gmres":
             if self._supports_kwarg(solver, "restart"):
                 kwargs["restart"] = int(self.gmres_restart)
@@ -860,9 +1010,12 @@ class SU3WilsonNf2(SU3YangMills):
 
     def solve_direct(self, U: Array, rhs: Array) -> Array:
         def solve_one(Ub, pb):
+            Ub_f = self._links_with_fermion_bc(Ub)
+            Ub_f_b = Ub_f[None, ...]
+
             def A(x):
                 xb = x[None, ...]
-                yb = self.apply_D(Ub[None, ...], xb)
+                yb = self._apply_D_links_with_kernel(Ub_f_b, xb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                 return yb[0]
 
             xb, _ = self._solve_linear(A, pb, operator_tag="direct")
@@ -872,9 +1025,12 @@ class SU3WilsonNf2(SU3YangMills):
 
     def solve_dagger(self, U: Array, rhs: Array) -> Array:
         def solve_one(Ub, pb):
+            Ub_f = self._links_with_fermion_bc(Ub)
+            Ub_f_b = Ub_f[None, ...]
+
             def A_dag(x):
                 xb = x[None, ...]
-                yb = self.apply_Ddag(Ub[None, ...], xb)
+                yb = self._apply_Ddag_links_with_kernel(Ub_f_b, xb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                 return yb[0]
 
             yb, _ = self._solve_linear(A_dag, pb, operator_tag="dagger")
@@ -883,17 +1039,19 @@ class SU3WilsonNf2(SU3YangMills):
         return jax.vmap(solve_one, in_axes=(0, 0))(U, rhs)
 
     def _solve_eo_one(self, Ub: Array, pb: Array, which: str) -> Array:
+        Ub_f = self._links_with_fermion_bc(Ub)
+        Ub_f_b = Ub_f[None, ...]
         if which == "direct":
             def K(v):
                 vb = v[None, ...]
-                yb = self.apply_D(Ub[None, ...], vb)
+                yb = self._apply_D_links_with_kernel(Ub_f_b, vb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                 return yb[0] - self._m0 * v
 
             operator_tag = "eo_direct"
         elif which == "dagger":
             def K(v):
                 vb = v[None, ...]
-                yb = self.apply_Ddag(Ub[None, ...], vb)
+                yb = self._apply_Ddag_links_with_kernel(Ub_f_b, vb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                 return yb[0] - self._m0 * v
 
             operator_tag = "eo_dagger"
@@ -925,10 +1083,11 @@ class SU3WilsonNf2(SU3YangMills):
 
     def solve_eop_even_direct(self, U: Array, rhs: Array) -> Array:
         def solve_one(Ub, pb):
+            Ub_f = self._links_with_fermion_bc(Ub)
             pb = self._pack_even_sites(self._project_even(pb))
 
             def A(x):
-                return self._apply_eo_schur_even_compact_one(Ub, x, daggered=False, normalized=True)
+                return self._apply_eo_schur_even_compact_one(Ub_f, x, daggered=False, normalized=True)
 
             xb, _ = self._solve_linear(A, pb, operator_tag="eop_direct")
             return self._unpack_even_sites(xb)
@@ -937,29 +1096,40 @@ class SU3WilsonNf2(SU3YangMills):
 
     def solve_eop_even_dagger(self, U: Array, rhs: Array) -> Array:
         def solve_one(Ub, pb):
+            Ub_f = self._links_with_fermion_bc(Ub)
             pb = self._pack_even_sites(self._project_even(pb))
 
             def A(x):
-                return self._apply_eo_schur_even_compact_one(Ub, x, daggered=True, normalized=True)
+                return self._apply_eo_schur_even_compact_one(Ub_f, x, daggered=True, normalized=True)
 
             xb, _ = self._solve_linear(A, pb, operator_tag="eop_dagger")
             return self._unpack_even_sites(xb)
 
         return jax.vmap(solve_one, in_axes=(0, 0))(U, rhs)
 
-    def solve_eop_even_normal(self, U: Array, rhs: Array) -> Array:
-        def solve_one(Ub, pb):
+    def _solve_eop_even_normal_impl(self, U: Array, rhs: Array, x0: Optional[Array]) -> Array:
+        def solve_one(Ub, pb, x0b):
+            Ub_f = self._links_with_fermion_bc(Ub)
             pb = self._pack_even_sites(self._project_even(pb))
+            x0c = None if x0b is None else self._pack_even_sites(self._project_even(x0b))
 
             def A(x):
-                y = self._apply_eo_schur_even_compact_one(Ub, x, daggered=False, normalized=True)
-                z = self._apply_eo_schur_even_compact_one(Ub, y, daggered=True, normalized=True)
+                y = self._apply_eo_schur_even_compact_one(Ub_f, x, daggered=False, normalized=True)
+                z = self._apply_eo_schur_even_compact_one(Ub_f, y, daggered=True, normalized=True)
                 return z
 
-            xb, _ = self._solve_linear(A, pb, operator_tag="eop_normal")
+            xb, _ = self._solve_linear(A, pb, operator_tag="eop_normal", x0=x0c)
             return self._unpack_even_sites(xb)
 
-        return jax.vmap(solve_one, in_axes=(0, 0))(U, rhs)
+        if x0 is None:
+            return jax.vmap(lambda Ub, pb: solve_one(Ub, pb, None), in_axes=(0, 0))(U, rhs)
+        return jax.vmap(solve_one, in_axes=(0, 0, 0))(U, rhs, x0)
+
+    def solve_eop_even_normal(self, U: Array, rhs: Array) -> Array:
+        return self._solve_eop_even_normal_impl(U, rhs, x0=None)
+
+    def solve_eop_even_normal_with_guess(self, U: Array, rhs: Array, x0: Array) -> Array:
+        return self._solve_eop_even_normal_impl(U, rhs, x0=x0)
 
     def solve_eop_even_split_with_intermediate(self, U: Array, phi: Array) -> Tuple[Array, Array]:
         y = self.solve_eop_even_dagger(U, phi)
@@ -977,17 +1147,29 @@ class SU3WilsonNf2(SU3YangMills):
             return self.solve_eop_even_split(U, phi)
         raise ValueError(f"Unknown solver_form: {self.solver_form}")
 
-    def solve_normal(self, U: Array, phi: Array) -> Array:
-        def solve_one(Ub, pb):
+    def _solve_normal_impl(self, U: Array, phi: Array, x0: Optional[Array]) -> Array:
+        def solve_one(Ub, pb, x0b):
+            Ub_f = self._links_with_fermion_bc(Ub)
+            Ub_f_b = Ub_f[None, ...]
+
             def A(x):
                 xb = x[None, ...]
-                yb = self.apply_normal(Ub[None, ...], xb)
+                dxb = self._apply_D_links_with_kernel(Ub_f_b, xb, kernel=self.dirac_kernel, use_sparse_gamma=True)
+                yb = self._apply_Ddag_links_with_kernel(Ub_f_b, dxb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                 return yb[0]
 
-            xb, _ = self._solve_linear(A, pb, operator_tag="normal")
+            xb, _ = self._solve_linear(A, pb, operator_tag="normal", x0=x0b)
             return xb
 
-        return jax.vmap(solve_one, in_axes=(0, 0))(U, phi)
+        if x0 is None:
+            return jax.vmap(lambda Ub, pb: solve_one(Ub, pb, None), in_axes=(0, 0))(U, phi)
+        return jax.vmap(solve_one, in_axes=(0, 0, 0))(U, phi, x0)
+
+    def solve_normal(self, U: Array, phi: Array) -> Array:
+        return self._solve_normal_impl(U, phi, x0=None)
+
+    def solve_normal_with_guess(self, U: Array, phi: Array, x0: Array) -> Array:
+        return self._solve_normal_impl(U, phi, x0=x0)
 
     def solve_split_with_intermediate(self, U: Array, phi: Array) -> Tuple[Array, Array]:
         if self.solver_form == "eo_split":
@@ -1031,12 +1213,15 @@ class SU3WilsonNf2(SU3YangMills):
 
         for b in range(int(U.shape[0])):
             Ub = U[b]
+            Ub_f = self._links_with_fermion_bc(Ub)
+            Ub_f_b = Ub_f[None, ...]
             pb = phi[b]
 
             if self.solver_form == "normal":
                 def A(x):
                     xb = x[None, ...]
-                    yb = self.apply_normal(Ub[None, ...], xb)
+                    dxb = self._apply_D_links_with_kernel(Ub_f_b, xb, kernel=self.dirac_kernel, use_sparse_gamma=True)
+                    yb = self._apply_Ddag_links_with_kernel(Ub_f_b, dxb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                     return yb[0]
 
                 _, info = self._solve_linear(A, pb, operator_tag="normal")
@@ -1045,28 +1230,28 @@ class SU3WilsonNf2(SU3YangMills):
                 if self.solver_form == "eo_split":
                     def A_dag(x):
                         xb = x[None, ...]
-                        yb = self.apply_Ddag(Ub[None, ...], xb)
+                        yb = self._apply_Ddag_links_with_kernel(Ub_f_b, xb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                         return yb[0]
 
                     yb, info1 = self._solve_linear(A_dag, pb, operator_tag="eo_dagger")
 
                     def A(x):
                         xb = x[None, ...]
-                        yb2 = self.apply_D(Ub[None, ...], xb)
+                        yb2 = self._apply_D_links_with_kernel(Ub_f_b, xb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                         return yb2[0]
 
                     _, info2 = self._solve_linear(A, yb, operator_tag="eo_direct")
                 else:
                     def A_dag(x):
                         xb = x[None, ...]
-                        yb = self.apply_Ddag(Ub[None, ...], xb)
+                        yb = self._apply_Ddag_links_with_kernel(Ub_f_b, xb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                         return yb[0]
 
                     yb, info1 = self._solve_linear(A_dag, pb, operator_tag="dagger")
 
                     def A(x):
                         xb = x[None, ...]
-                        yb2 = self.apply_D(Ub[None, ...], xb)
+                        yb2 = self._apply_D_links_with_kernel(Ub_f_b, xb, kernel=self.dirac_kernel, use_sparse_gamma=True)
                         return yb2[0]
 
                     _, info2 = self._solve_linear(A, yb, operator_tag="direct")
@@ -1109,9 +1294,10 @@ class SU3WilsonNf2(SU3YangMills):
         }
 
     def pseudofermion_force_from_solution(self, U: Array, X: Array, Y: Array) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         links_force = []
         for mu in range(self.Nd):
-            U_mu = self._take_mu(U, mu)
+            U_mu = self._take_mu(U_links, mu)
             X_xpmu = self._roll_site(X, -1, mu)
             Y_xpmu = self._roll_site(Y, -1, mu)
             UX = self.dirac.color_mul_left(U_mu, X_xpmu)
@@ -1142,8 +1328,9 @@ class SU3WilsonNf2(SU3YangMills):
         using Y_term = -alpha * (...) to match signs.
         """
         alpha = 1.0 / (self._m0 * self._m0)
-        k_oe_x = self.apply_K_oe(U, X_e)            # odd
-        kdag_oe_y = self.apply_Kdag_oe(U, Y_e)      # odd
+        U_links = self._links_with_fermion_bc(U)
+        k_oe_x = self._apply_K_oe_from_links(U_links, X_e)            # odd
+        kdag_oe_y = self._apply_Kdag_oe_from_links(U_links, Y_e)      # odd
 
         f1 = self.pseudofermion_force_from_solution(U, k_oe_x, -alpha * Y_e)
         f2 = self.pseudofermion_force_from_solution(U, X_e, -alpha * kdag_oe_y)
@@ -1178,6 +1365,35 @@ def _parse_shape(s: str) -> Tuple[int, ...]:
     if not vals:
         raise ValueError("shape must contain at least one dimension")
     return tuple(vals)
+
+
+def _parse_fermion_bc(s: str, nd: int) -> Tuple[complex, ...]:
+    txt = str(s).strip().lower()
+    if txt in ("", "periodic", "p"):
+        return tuple([1.0 + 0.0j] * int(nd))
+    if txt in ("antiperiodic-t", "anti-t", "ap-t", "apt", "chroma"):
+        vals = [1.0 + 0.0j] * int(nd)
+        vals[-1] = -1.0 + 0.0j
+        return tuple(vals)
+    toks = [v.strip() for v in str(s).split(",") if v.strip()]
+    vals = []
+    for t in toks:
+        tj = t.replace("I", "j").replace("i", "j")
+        vals.append(complex(tj))
+    if len(vals) != int(nd):
+        raise ValueError(f"fermion_bc must have Nd={nd} entries; got {len(vals)}")
+    return tuple(vals)
+
+
+def _format_fermion_bc(vals: Tuple[complex, ...]) -> str:
+    out = []
+    for z in vals:
+        zc = complex(z)
+        if abs(zc.imag) < 1e-12:
+            out.append(f"{zc.real:.12g}")
+        else:
+            out.append(f"({zc.real:.12g}{zc.imag:+.12g}j)")
+    return ",".join(out)
 
 
 def _gauge_transform_fermion(psi: Array, Omega: Array) -> Array:
@@ -1544,6 +1760,18 @@ def test_dirac_conventions(th: SU3WilsonNf2) -> Dict[str, float]:
     for mu in range(th.Nd):
         psi_xpmu = th._roll_site(psi0, -1, mu)
         psi_xmmu = th._roll_site(psi0, +1, mu)
+        bc_mu = complex(th.fermion_bc[mu])
+        if abs(bc_mu - (1.0 + 0.0j)) > 1e-12:
+            fwd_mask = np.ones((1, *th.lattice_shape, 1, 1), dtype=np.complex64)
+            bwd_mask = np.ones((1, *th.lattice_shape, 1, 1), dtype=np.complex64)
+            fwd_sl = [slice(None)] * (th.Nd + 3)
+            bwd_sl = [slice(None)] * (th.Nd + 3)
+            fwd_sl[1 + mu] = int(th.lattice_shape[mu]) - 1
+            bwd_sl[1 + mu] = 0
+            fwd_mask[tuple(fwd_sl)] *= bc_mu
+            bwd_mask[tuple(bwd_sl)] *= np.conj(bc_mu)
+            psi_xpmu = psi_xpmu * jnp.asarray(fwd_mask, dtype=psi_xpmu.dtype)
+            psi_xmmu = psi_xmmu * jnp.asarray(bwd_mask, dtype=psi_xmmu.dtype)
         # Matches apply(..., sign=-1) in Chroma convention:
         # forward coeff=-1, backward coeff=+1.
         fwd = th.dirac.spin_project(psi_xpmu, mu, coeff=-1, use_sparse=False)
@@ -1636,6 +1864,12 @@ def test_pseudofermion_force_compare(
         x.block_until_ready()
         F_an = th.pseudofermion_force_from_solution(U, x, y)
         F_an.block_until_ready()
+        # Warm analytic force path so timing excludes one-time compilation
+        # of optional warm-start solve kernels.
+        try:
+            m.force_analytic(U, phi).block_until_ready()
+        except Exception:
+            pass
 
         rs = th.normal_residual_stats(U, phi, x)
         res_rel.append(rs["mean_rel_residual"])
@@ -1797,13 +2031,33 @@ def test_eop_force_fd(
         m.refresh(U, traj_length=1.0)
         assert m.phi is not None
         phi = m.phi
+        # In standalone timing checks, disable chronological-guess reuse between
+        # calls so timings are not artificially boosted by repeated same-field solves.
+        def _clear_guess():
+            if hasattr(m, "clear_solver_guess"):
+                m.clear_solver_guess()
+
+        def _action_nochrono(Uin):
+            _clear_guess()
+            return m.action(Uin)
+
+        def _force_analytic_nochrono():
+            _clear_guess()
+            return m.force_analytic(U, phi)
+
+        # Warm analytic force path so timing excludes one-time compilation only.
+        try:
+            _force_analytic_nochrono().block_until_ready()
+            _force_analytic_nochrono().block_until_ready()
+        except Exception:
+            pass
         H = th.refresh_p()
         Up = th.evolve_q(float(eps), H, U)
         Um = th.evolve_q(-float(eps), H, U)
         t0 = time.perf_counter()
-        Sm = m.action(U)
-        Sp = m.action(Up)
-        Smn = m.action(Um)
+        Sm = _action_nochrono(U)
+        Sp = _action_nochrono(Up)
+        Smn = _action_nochrono(Um)
         (Sm + Sp + Smn).block_until_ready()
         t1 = time.perf_counter()
         dS_dU = m.action_grad_links_autodiff(U, phi)
@@ -1821,9 +2075,9 @@ def test_eop_force_fd(
         try:
             tn0 = time.perf_counter()
             for _ in range(nit):
-                m.force_analytic(U, phi).block_until_ready()
+                _force_analytic_nochrono().block_until_ready()
             tn1 = time.perf_counter()
-            F_an = m.force_analytic(U, phi)
+            F_an = _force_analytic_nochrono()
             F_an.block_until_ready()
             has_an = True
         except Exception:
@@ -2011,6 +2265,135 @@ def test_eop_solver_perf(
     return out
 
 
+def _parse_int_list(s: str) -> Tuple[int, ...]:
+    vals = [int(v.strip()) for v in str(s).split(",") if v.strip()]
+    if not vals:
+        raise ValueError("Expected a comma-separated list of integers.")
+    return tuple(vals)
+
+
+def _parse_str_list(s: str) -> Tuple[str, ...]:
+    vals = [str(v.strip()) for v in str(s).split(",") if v.strip()]
+    if not vals:
+        raise ValueError("Expected a comma-separated list of names.")
+    return tuple(vals)
+
+
+def _build_integrator(name: str, th: SU3WilsonNf2, nmd: int, tau: float):
+    if name == "leapfrog":
+        return leapfrog(th.force, th.evolveQ, int(nmd), float(tau))
+    if name == "minnorm2":
+        return minnorm2(th.force, th.evolveQ, int(nmd), float(tau))
+    if name == "forcegrad":
+        return force_gradient(th.force, th.evolveQ, int(nmd), float(tau))
+    if name == "minnorm4pf4":
+        return minnorm4pf4(th.force, th.evolveQ, int(nmd), float(tau))
+    raise ValueError(f"Unknown integrator for epsilon test: {name}")
+
+
+def test_epsilon2(
+    th: SU3WilsonNf2,
+    integrator: str = "leapfrog",
+    tau: float = 1.0,
+    nmd_list: Tuple[int, ...] = (8, 12, 16, 24, 32),
+    n_samples: int = 8,
+    q_scale: float = 0.05,
+) -> Dict[str, object]:
+    nmds = [int(n) for n in nmd_list if int(n) > 0]
+    if not nmds:
+        raise ValueError("nmd_list must contain at least one positive integer")
+
+    eps = np.asarray([float(tau) / float(n) for n in nmds], dtype=np.float64)
+    means = []
+    stds = []
+
+    ns = max(1, int(n_samples))
+
+    def _snapshot_pf_state() -> Dict[str, Optional[Array]]:
+        m = th.fermion_monomial
+        if m is None:
+            return {}
+        out = {}
+        for k in ("eta", "phi", "_solve_guess", "_eop_solve_guess"):
+            if hasattr(m, k):
+                v = getattr(m, k)
+                out[k] = None if v is None else jnp.array(v)
+        return out
+
+    def _restore_pf_state(state: Dict[str, Optional[Array]]) -> None:
+        m = th.fermion_monomial
+        if m is None:
+            return
+        for k, v in state.items():
+            setattr(m, k, None if v is None else jnp.array(v))
+
+    samples = []
+    for _ in range(ns):
+        U0 = th.hot_start(scale=float(q_scale))
+        if bool(getattr(th, "requires_trajectory_refresh", False)):
+            th.prepare_trajectory(U0, traj_length=float(tau))
+        p0 = th.refresh_p()
+        samples.append((jnp.array(U0), jnp.array(p0), _snapshot_pf_state()))
+
+    for nmd in nmds:
+        I = _build_integrator(str(integrator), th, int(nmd), float(tau))
+        vals = []
+        for U0, p0, pf_state in samples:
+            _restore_pf_state(pf_state)
+            H0 = th.kinetic(p0) + th.action(U0)
+            p1, U1 = I.integrate(p0, U0)
+            H1 = th.kinetic(p1) + th.action(U1)
+            dH = np.asarray(jax.device_get(jnp.abs(H1 - H0)), dtype=np.float64).reshape(-1)
+            vals.extend(dH.tolist())
+        v = np.asarray(vals, dtype=np.float64)
+        means.append(float(np.mean(v)))
+        stds.append(float(np.std(v, ddof=1)) if v.size > 1 else 0.0)
+
+    means_arr = np.asarray(means, dtype=np.float64)
+    floor = max(1e-16, float(np.max(means_arr)) * 1e-8)
+    mask = means_arr > floor
+    if int(np.sum(mask)) >= 2:
+        slope, intercept = np.polyfit(np.log(eps[mask]), np.log(means_arr[mask]), 1)
+        fit_n = int(np.sum(mask))
+    else:
+        slope = float("nan")
+        intercept = float("nan")
+        fit_n = int(np.sum(mask))
+
+    return {
+        "integrator": str(integrator),
+        "nmd": nmds,
+        "eps": eps.tolist(),
+        "mean_abs_dh": means,
+        "std_abs_dh": stds,
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "fit_points": int(fit_n),
+        "fit_floor": float(floor),
+    }
+
+
+def test_epsilon4(
+    th: SU3WilsonNf2,
+    integrators: Tuple[str, ...] = ("forcegrad", "minnorm4pf4"),
+    tau: float = 1.0,
+    nmd_list: Tuple[int, ...] = (4, 6, 8, 12, 16),
+    n_samples: int = 8,
+    q_scale: float = 0.05,
+) -> Dict[str, object]:
+    out = {}
+    for name in integrators:
+        out[str(name)] = test_epsilon2(
+            th,
+            integrator=str(name),
+            tau=float(tau),
+            nmd_list=tuple(int(v) for v in nmd_list),
+            n_samples=int(n_samples),
+            q_scale=float(q_scale),
+        )
+    return out
+
+
 def main():
     if platform.system() == "Darwin" and "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
         os.environ["JAX_PLATFORMS"] = "cpu"
@@ -2032,6 +2415,12 @@ def main():
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--layout", type=str, default="BM...IJ")
     ap.add_argument("--exp-method", type=str, default="su3", choices=["expm", "su3"])
+    ap.add_argument(
+        "--fermion-bc",
+        type=str,
+        default="periodic",
+        help="fermion boundary phases per direction (comma list), e.g. 1,1,1,-1 or aliases: periodic, antiperiodic-t",
+    )
     ap.add_argument("--include-gauge-monomial", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--include-fermion-monomial", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument(
@@ -2073,6 +2462,16 @@ def main():
     ap.add_argument("--eop-perf-warmup", type=int, default=1, help="number of untimed warmup solves for EO performance test")
     ap.add_argument("--eop-perf-qscale", type=float, default=0.05, help="weak-field scale for EO performance test")
     ap.add_argument("--eop-perf-compare-halfspinor", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--eps2-integrator", type=str, default="leapfrog", choices=["leapfrog", "minnorm2"])
+    ap.add_argument("--eps2-tau", type=float, default=1.0)
+    ap.add_argument("--eps2-nmd-list", type=str, default="8,12,16,24,32")
+    ap.add_argument("--eps2-samples", type=int, default=8)
+    ap.add_argument("--eps2-qscale", type=float, default=0.05)
+    ap.add_argument("--eps4-integrators", type=str, default="forcegrad,minnorm4pf4")
+    ap.add_argument("--eps4-tau", type=float, default=1.0)
+    ap.add_argument("--eps4-nmd-list", type=str, default="4,6,8,12,16")
+    ap.add_argument("--eps4-samples", type=int, default=8)
+    ap.add_argument("--eps4-qscale", type=float, default=0.05)
     ap.add_argument("--auto-refresh-pseudofermions", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--jit-dirac-kernels", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--jit-solvers", action=argparse.BooleanOptionalAction, default=True)
@@ -2081,15 +2480,16 @@ def main():
         "--tests",
         type=str,
         default="all",
-        help="comma-separated: gamma,adjoint,normal,perf,eo,eoperf,hamiltonian,pfrefresh,pfid,gauge,conventions,forcecmp,eopforce,all",
+        help="comma-separated: gamma,adjoint,normal,perf,eo,eoperf,eps2,eps4,hamiltonian,pfrefresh,pfid,gauge,conventions,forcecmp,eopforce,all",
     )
     args = ap.parse_args()
 
     tests = {t.strip().lower() for t in args.tests.split(",") if t.strip()}
     if "all" in tests:
-        tests = {"gamma", "adjoint", "normal", "perf", "eo", "hamiltonian", "pfrefresh", "pfid", "gauge", "conventions", "forcecmp", "eopforce"}
+        tests = {"gamma", "adjoint", "normal", "perf", "eo", "eoperf", "eps2", "eps4", "hamiltonian", "pfrefresh", "pfid", "gauge", "conventions", "forcecmp", "eopforce"}
 
     shape = _parse_shape(args.shape)
+    fermion_bc = _parse_fermion_bc(args.fermion_bc, len(shape))
     pf_gamma = args.pf_gamma
     if pf_gamma is None:
         pf_gamma = float(args.smd_gamma) if str(args.pf_refresh).lower() == "ou" else 0.3
@@ -2100,6 +2500,7 @@ def main():
         batch_size=args.batch,
         layout=args.layout,
         exp_method=args.exp_method,
+        fermion_bc=fermion_bc,
         mass=args.mass,
         wilson_r=args.r,
         cg_tol=float(args.solver_tol),
@@ -2131,6 +2532,7 @@ def main():
     print(f"  Nd: {th.Nd}")
     print(f"  spin_dim: {th.Ns}")
     print(f"  fermion_shape: {th.fermion_shape()}")
+    print(f"  fermion_bc: {_format_fermion_bc(tuple(th.fermion_bc))}")
     print(f"  monomials: {', '.join(th.hamiltonian.monomial_names())}")
     print(f"  fermion monomial kind: {th.fermion_monomial_kind}")
     print(f"  monomial timescales: gauge={th.gauge_timescale}, fermion={th.fermion_timescale}")
@@ -2216,6 +2618,44 @@ def main():
         print(f"  sec/call normal-even matvec:{e['normal_even_sec_per_call']:.6e}")
         print(f"  EO/normal timing ratio:     {e['eo_over_normal_even']:.6e}")
         print(f"  EO-compact/full ratio:      {e['eo_compact_over_full_even']:.6e}")
+
+    if "eps2" in tests:
+        eps2 = test_epsilon2(
+            th,
+            integrator=str(args.eps2_integrator),
+            tau=float(args.eps2_tau),
+            nmd_list=_parse_int_list(args.eps2_nmd_list),
+            n_samples=int(args.eps2_samples),
+            q_scale=float(args.eps2_qscale),
+        )
+        print("epsilon^2 test (Wilson theory):")
+        print(f"  integrator: {eps2['integrator']}")
+        print(f"  nmd: {eps2['nmd']}")
+        print(f"  eps: {[f'{x:.3e}' for x in eps2['eps']]}")
+        print(f"  mean |dH|: {[f'{x:.3e}' for x in eps2['mean_abs_dh']]}")
+        print(f"  std  |dH|: {[f'{x:.3e}' for x in eps2['std_abs_dh']]}")
+        print(f"  log-log slope (expected ~2): {float(eps2['slope']):.4f}")
+        print(f"  fit points used: {int(eps2['fit_points'])} (floor={float(eps2['fit_floor']):.3e})")
+
+    if "eps4" in tests:
+        eps4 = test_epsilon4(
+            th,
+            integrators=_parse_str_list(args.eps4_integrators),
+            tau=float(args.eps4_tau),
+            nmd_list=_parse_int_list(args.eps4_nmd_list),
+            n_samples=int(args.eps4_samples),
+            q_scale=float(args.eps4_qscale),
+        )
+        print("epsilon^4 test (Wilson theory):")
+        for name in _parse_str_list(args.eps4_integrators):
+            e = eps4[str(name)]
+            print(f"  integrator: {e['integrator']}")
+            print(f"    nmd: {e['nmd']}")
+            print(f"    eps: {[f'{x:.3e}' for x in e['eps']]}")
+            print(f"    mean |dH|: {[f'{x:.3e}' for x in e['mean_abs_dh']]}")
+            print(f"    std  |dH|: {[f'{x:.3e}' for x in e['std_abs_dh']]}")
+            print(f"    log-log slope (expected ~4): {float(e['slope']):.4f}")
+            print(f"    fit points used: {int(e['fit_points'])} (floor={float(e['fit_floor']):.3e})")
 
     if "hamiltonian" in tests:
         h = test_hamiltonian_monomials(th)
@@ -2350,7 +2790,7 @@ def main():
                 "  max/mean rel(fd_c,-<F_ad,H>):"
                 f" {ef['max_rel_fd_central_vs_dir_autodiff_force']:.6e} / {ef['mean_rel_fd_central_vs_dir_autodiff_force']:.6e}"
             )
-            print(f"  action sec/call:             {ef['action_sec_per_call']:.6e}")
+            print(f"  action sec/call (no-chrono): {ef['action_sec_per_call']:.6e}")
             print(f"  autodiff force sec/call:     {ef['autodiff_force_sec_per_call']:.6e}")
             if bool(int(ef.get("analytic_available", 0.0))):
                 print(f"  mean -<F_an,H>:              {ef['mean_dir_analytic_force']:.6e}")
@@ -2362,7 +2802,7 @@ def main():
                     "  max/mean rel(F_ad,F_an):"
                     f" {ef['max_rel_force_autodiff_vs_analytic']:.6e} / {ef['mean_rel_force_autodiff_vs_analytic']:.6e}"
                 )
-                print(f"  analytic force sec/call:     {ef['analytic_force_sec_per_call']:.6e}")
+                print(f"  analytic force sec/call (no-chrono): {ef['analytic_force_sec_per_call']:.6e}")
 
     if "eoperf" in tests:
         ep = test_eop_solver_perf(

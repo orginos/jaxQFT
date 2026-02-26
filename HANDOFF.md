@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-02-25
+Last updated: 2026-02-26
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -24,6 +24,14 @@ Last updated: 2026-02-25
   - SMD rejection branch flips post-OU momentum (`p <- -p_ou`) per Lüscher SMD convention.
   - If a theory sets `requires_trajectory_refresh=True`, updates call `prepare_trajectory(q, traj_length)` internally once per trajectory.
   - Fast-scan update path is disabled automatically for such theories.
+- Unified production control (new):
+  - `scripts/mcmc/mcmc.py` is a control-file-driven MCMC entry point (current theory target: `su3_wilson_nf2`).
+  - Supports phased run control:
+    - `warmup_no_ar` (HMC-only, accept/reject disabled)
+    - `warmup_ar` (Metropolis enabled, optional `nmd` adaptation)
+    - `measure`
+  - Separates restart checkpoints from saved gauge-field configurations.
+  - TOML template generation: `--write-template`.
 - Monomial Hamiltonian infrastructure:
   - `jaxqft/core/hamiltonian.py` with `Monomial` protocol and `HamiltonianModel`.
   - Initial SU3 Wilson Nf=2 monomial composition implemented in `jaxqft/models/su3_wilson_nf2.py`.
@@ -48,6 +56,10 @@ Last updated: 2026-02-25
       - action defined on even Schur operator, with refresh `phi_e = S_e^\dagger eta_e`
       - EO-preconditioned solves now use compact even-checkerboard unknown vectors internally (no odd-subspace identity augmentation)
       - compact checkerboard-native `K_oe/K_eo` kernels added for EO Schur matvec (precomputed parity-neighbor maps)
+      - chronological warm-start for iterative solves:
+        - cached previous solution used as `x0` for subsequent CG calls in the same pseudofermion trajectory
+        - cache is reset on pseudofermion refresh/clear
+        - enabled for both unpreconditioned normal solves and EO-preconditioned normal Schur solves
       - force supports both `autodiff` and `analytic` modes
       - analytic EO-preconditioned force implemented from Schur variation using two mapped dslash-force terms
     - CLI test `forcecmp` compares analytic vs autodiff force, checks Lie-directional consistency, and reports:
@@ -63,6 +75,7 @@ Last updated: 2026-02-25
       - direct autodiff directional derivative
       - `-<F,H>` from autodiff force and analytic force
       - action/force timing (autodiff and analytic)
+      - standalone `eopforce` timings now disable chrono-guess reuse between timed calls (no same-field last-solution timing inflation)
     - Theory exposes `prepare_trajectory(U, traj_length)` for stochastic monomial refresh.
     - Pseudofermion monomial supports refresh modes:
       - `heatbath` (independent redraw)
@@ -73,11 +86,22 @@ Last updated: 2026-02-25
   - 2nd-order (`leapfrog`, `minnorm2`) and 4th-order (`forcegrad`, `minnorm4pf4`) in `jaxqft/core/integrators.py`.
 - Diagnostics/tests in model CLIs:
   - `layout`, `timing`, `fd`, `autodiff`, `eps2`, `eps4`, `gauge`, `forcecov`, `forceimpl`, `selfcheck`.
+- Inline measurement infrastructure:
+  - `jaxqft/core/measurements.py`
+  - `MeasurementContext` provides per-step data handoff between ordered measurements.
+  - Measurement registry/execution helpers:
+    - `build_inline_measurements(...)`
+    - `run_inline_measurements(...)`
+  - Current built-in measurement: `plaquette`.
 - Autocorrelation/statistics:
   - `jaxqft/stats/autocorr.py` with IPS, Sokal, and Gamma methods.
 - Fermion building blocks:
   - `jaxqft/fermions/gamma.py`, `jaxqft/fermions/wilson.py`.
   - Wilson hop convention aligned with Chroma dslash (`forward: r-\gamma_\mu`, `backward: r+\gamma_\mu` for undaggered branch).
+  - Fermion boundary phases are now supported in SU3 Wilson Nf=2 via `fermion_bc` (e.g. `1,1,1,-1`):
+    - implemented as a precomputed link-factor tensor
+    - applied to links once per operator/solve input gauge field (no boundary-branching inside hot dslash loops)
+    - wired consistently through `D`, `D^\dagger`, Schur operators, and pseudofermion force kernels
   - `WilsonDiracOperator` now exposes explicit `apply_diag` + `apply_dslash` decomposition.
   - Wilson color multiply now has specialized small-Nc kernels:
     - SU3 (`3x3`) and SU2 (`2x2`) paths in `WilsonDiracOperator.color_mul_left`
@@ -147,8 +171,25 @@ Last updated: 2026-02-25
 ## Quick Commands
 - SU3 production:
   - `python scripts/su3_ym/hmc_su3_ym.py --shape 8,8,8,8 --integrator forcegrad --nmd 7 --tau 1.0`
+- Unified control-file MCMC driver:
+  - `python scripts/mcmc/mcmc.py --write-template control.toml`
+  - `python scripts/mcmc/mcmc.py --config control.toml`
 - SU3 Wilson Nf=2 production:
   - `python scripts/su3_wilson_nf2/hmc_su3_wilson_nf2.py --shape 4,4,4,8 --integrator minnorm2 --nmd 8 --tau 1.0 --mass 0.05 --beta 5.8`
+  - Chroma-like fermion APBC in time:
+    - `--fermion-bc 1,1,1,-1` (or alias `--fermion-bc antiperiodic-t`)
+  - two-stage warmup is supported in HMC:
+    - `--warmup-no-ar <N0>`: initial trajectories with Metropolis disabled
+    - `--warmup <N1>`: subsequent warmup trajectories with Metropolis enabled (and optional `nmd` adaptation)
+    - measurement then runs with standard Metropolis as before
+  - defaults now target production throughput:
+    - `fermion_monomial_kind=eo_preconditioned`
+    - `pf_force_mode=analytic`
+  - explicit monomial timing profile (force/action):
+    - `--profile-monomials` enables per-monomial timing output (default off for performance runs)
+  - explicit HMC loop timing profile:
+    - `--profile-hmc-components` reports per-trajectory timing for `refresh`, `kinetic`, `action`, `integrate`, and residual `other`
+    - `--profile-hmc-every N` controls per-trajectory print frequency
 - SU2 Wilson Nf=2 full harness checks:
   - `python -m jaxqft.models.su2_wilson_nf2 --tests all --shape 4,4,4,8`
   - `python -m jaxqft.models.su2_wilson_nf2 --tests forcecmp --shape 4,4,4,8 --pf-force-mode analytic`
@@ -205,9 +246,17 @@ Last updated: 2026-02-25
   - Fixed-iteration CG EO-preconditioned Schur-normal (`86` iters, `tol=0`):
     - with EO half-spinor compact kernel: ~`0.40 s` total (`~4.63 ms/iter`)
     - without EO half-spinor compact kernel: ~`0.74 s` total (`~8.65 ms/iter`)
+  - Chroma `hmc.out` (provided run, early weak-field phase):
+    - first `wilson_two_flav` force call: `0.667797 s`
+    - calls `2..11` mean: `0.524933 s`
+  - JAX EO-preconditioned analytic force (matched `8^3x16`, `beta=5.7`, `mass=0.05`, `cg tol=1e-7`):
+    - `python -m jaxqft.models.su3_wilson_nf2 --tests eopforce --shape 8,8,8,16 --beta 5.7 --mass 0.05 --fermion-monomial-kind eo_preconditioned --solver-kind cg --solver-form normal --solver-tol 1e-7 --solver-maxiter 1000 --pf-force-mode analytic --pf-fd-trials 1 --pf-fd-iters 4`
+    - steady analytic force timing: ~`6.82e-02 s/call` (after warm-start path is active)
+  - One-trajectory matched-leapfrog probe (`tau=0.5`, `nmd=25`) gave:
+    - force time ~`0.375 s/call` averaged over force calls in-trajectory
 - Relative to the provided Chroma logs:
   - unpreconditioned iteration time is currently faster in JAX
-  - EO-preconditioned iteration time is currently near parity/slightly slower in JAX
+  - EO-preconditioned force path is now faster than the early Chroma weak-field force-time window
  - Important implementation note:
   - `SU3WilsonNf2.apply_normal` now uses split calls `Ddag(D(psi))` by default (with jitted `D`/`Ddag` kernels),
     and `apply_normal` is no longer separately jitted as one monolithic kernel.

@@ -18,6 +18,7 @@ import platform
 import sys
 import time
 from pathlib import Path
+from typing import Dict
 
 
 def _cli_value(argv, flag: str):
@@ -100,6 +101,8 @@ from jaxqft.stats import integrated_autocorr_time
 
 def avg_and_err(x):
     x = np.asarray(x, dtype=np.float64)
+    if x.size == 0:
+        return float("nan"), float("nan")
     if x.size < 2:
         return float(x.mean()), float("nan")
     return float(x.mean()), float(x.std(ddof=1) / np.sqrt(x.size - 1))
@@ -110,6 +113,35 @@ def _parse_shape(s: str):
     if not vals:
         raise ValueError("shape must contain at least one dimension")
     return tuple(vals)
+
+
+def _parse_fermion_bc(s: str, nd: int):
+    txt = str(s).strip().lower()
+    if txt in ("", "periodic", "p"):
+        return tuple([1.0 + 0.0j] * int(nd))
+    if txt in ("antiperiodic-t", "anti-t", "ap-t", "apt", "chroma"):
+        vals = [1.0 + 0.0j] * int(nd)
+        vals[-1] = -1.0 + 0.0j
+        return tuple(vals)
+    toks = [v.strip() for v in str(s).split(",") if v.strip()]
+    vals = []
+    for t in toks:
+        tj = t.replace("I", "j").replace("i", "j")
+        vals.append(complex(tj))
+    if len(vals) != int(nd):
+        raise ValueError(f"fermion_bc must have Nd={nd} entries; got {len(vals)}")
+    return tuple(vals)
+
+
+def _format_fermion_bc(vals):
+    out = []
+    for z in vals:
+        zc = complex(z)
+        if abs(zc.imag) < 1e-12:
+            out.append(f"{zc.real:.12g}")
+        else:
+            out.append(f"({zc.real:.12g}{zc.imag:+.12g}j)")
+    return ",".join(out)
 
 
 def _integrator_order(name: str) -> int:
@@ -163,6 +195,251 @@ def _run_one_trajectory(q, chain, warmup: bool):
     return chain.evolve(q, 1)
 
 
+def _run_one_trajectory_hmc_no_ar(q, chain):
+    """One HMC-like trajectory without Metropolis accept/reject.
+
+    This is used for an optional initial thermalization stage to match
+    workflows where accept/reject is disabled early in warmup.
+    """
+    if isinstance(chain, SMD):
+        return chain.evolve(q, 1, warmup=True)
+    # HMC path: refresh momentum, integrate, always accept proposal.
+    if hasattr(chain, "_prepare_trajectory"):
+        chain._prepare_trajectory(q)
+    p0 = chain.T.refreshP()
+    p1, q1 = chain.I.integrate(p0, q)
+    q1 = jax.block_until_ready(q1)
+    _ = p1
+    return q1
+
+
+def _install_monomial_profiler(theory: SU3WilsonNf2):
+    stats: Dict[str, Dict[str, float]] = {}
+
+    def _mk_rec(name: str) -> Dict[str, float]:
+        return stats.setdefault(
+            name,
+            {
+                "force_time": 0.0,
+                "force_calls": 0.0,
+                "action_time": 0.0,
+                "action_calls": 0.0,
+            },
+        )
+
+    for m in theory.hamiltonian.monomials:
+        name = str(getattr(m, "name", m.__class__.__name__))
+        rec = _mk_rec(name)
+        orig_force = m.force
+        orig_action = m.action
+
+        def force_wrapped(q, _orig=orig_force, _rec=rec):
+            t0 = time.perf_counter()
+            y = _orig(q)
+            y = jax.block_until_ready(y)
+            _rec["force_time"] += (time.perf_counter() - t0)
+            _rec["force_calls"] += 1.0
+            return y
+
+        def action_wrapped(q, _orig=orig_action, _rec=rec):
+            t0 = time.perf_counter()
+            y = _orig(q)
+            y = jax.block_until_ready(y)
+            _rec["action_time"] += (time.perf_counter() - t0)
+            _rec["action_calls"] += 1.0
+            return y
+
+        m.force = force_wrapped
+        m.action = action_wrapped
+
+    def snapshot():
+        out: Dict[str, Dict[str, float]] = {}
+        for k, v in stats.items():
+            out[k] = dict(v)
+        return out
+
+    return snapshot
+
+
+def _diff_monomial_stats(
+    start: Dict[str, Dict[str, float]],
+    end: Dict[str, Dict[str, float]],
+) -> Dict[str, Dict[str, float]]:
+    out: Dict[str, Dict[str, float]] = {}
+    names = sorted(set(start.keys()) | set(end.keys()))
+    for n in names:
+        a = start.get(n, {})
+        b = end.get(n, {})
+        out[n] = {
+            "force_time": float(b.get("force_time", 0.0) - a.get("force_time", 0.0)),
+            "force_calls": float(b.get("force_calls", 0.0) - a.get("force_calls", 0.0)),
+            "action_time": float(b.get("action_time", 0.0) - a.get("action_time", 0.0)),
+            "action_calls": float(b.get("action_calls", 0.0) - a.get("action_calls", 0.0)),
+        }
+    return out
+
+
+def _print_monomial_timing(
+    title: str,
+    stats: Dict[str, Dict[str, float]],
+    ntraj: int,
+) -> None:
+    if not stats:
+        return
+    tot_f = float(sum(v.get("force_time", 0.0) for v in stats.values()))
+    tot_a = float(sum(v.get("action_time", 0.0) for v in stats.values()))
+    print(title)
+    print(f"  trajectories profiled: {int(ntraj)}")
+    print(f"  total force/action time: {tot_f:.6f}s / {tot_a:.6f}s")
+    for name in sorted(stats.keys()):
+        s = stats[name]
+        fc = float(s.get("force_calls", 0.0))
+        ft = float(s.get("force_time", 0.0))
+        ac = float(s.get("action_calls", 0.0))
+        at = float(s.get("action_time", 0.0))
+        f_ms = (1e3 * ft / fc) if fc > 0 else float("nan")
+        a_ms = (1e3 * at / ac) if ac > 0 else float("nan")
+        f_share = (100.0 * ft / (tot_f + 1e-30)) if tot_f > 0 else 0.0
+        a_share = (100.0 * at / (tot_a + 1e-30)) if tot_a > 0 else 0.0
+        f_traj = (1e3 * ft / max(1, ntraj))
+        a_traj = (1e3 * at / max(1, ntraj))
+        print(
+            f"  {name}:"
+            f" force={ft:.6f}s ({f_share:.1f}%) calls={int(fc)} ms/call={f_ms:.3f} ms/traj={f_traj:.3f};"
+            f" action={at:.6f}s ({a_share:.1f}%) calls={int(ac)} ms/call={a_ms:.3f} ms/traj={a_traj:.3f}"
+        )
+
+
+def _install_hmc_component_profiler(theory: SU3WilsonNf2, chain):
+    stats: Dict[str, float] = {
+        "refresh_time": 0.0,
+        "refresh_calls": 0.0,
+        "kinetic_time": 0.0,
+        "kinetic_calls": 0.0,
+        "action_time": 0.0,
+        "action_calls": 0.0,
+        "integrate_time": 0.0,
+        "integrate_calls": 0.0,
+    }
+
+    if hasattr(theory, "refreshP"):
+        orig_refresh = theory.refreshP
+
+        def refresh_wrapped(*args, **kwargs):
+            t0 = time.perf_counter()
+            y = orig_refresh(*args, **kwargs)
+            y = jax.block_until_ready(y)
+            stats["refresh_time"] += (time.perf_counter() - t0)
+            stats["refresh_calls"] += 1.0
+            return y
+
+        theory.refreshP = refresh_wrapped
+
+    orig_kinetic = theory.kinetic
+
+    def kinetic_wrapped(*args, **kwargs):
+        t0 = time.perf_counter()
+        y = orig_kinetic(*args, **kwargs)
+        y = jax.block_until_ready(y)
+        stats["kinetic_time"] += (time.perf_counter() - t0)
+        stats["kinetic_calls"] += 1.0
+        return y
+
+    theory.kinetic = kinetic_wrapped
+
+    orig_action = theory.action
+
+    def action_wrapped(*args, **kwargs):
+        t0 = time.perf_counter()
+        y = orig_action(*args, **kwargs)
+        y = jax.block_until_ready(y)
+        stats["action_time"] += (time.perf_counter() - t0)
+        stats["action_calls"] += 1.0
+        return y
+
+    theory.action = action_wrapped
+
+    def _wrap_integrate():
+        orig_integrate = chain.I.integrate
+
+        def integrate_wrapped(*args, **kwargs):
+            t0 = time.perf_counter()
+            out = orig_integrate(*args, **kwargs)
+            if isinstance(out, tuple):
+                out = tuple(jax.block_until_ready(x) for x in out)
+            else:
+                out = jax.block_until_ready(out)
+            stats["integrate_time"] += (time.perf_counter() - t0)
+            stats["integrate_calls"] += 1.0
+            return out
+
+        chain.I.integrate = integrate_wrapped
+
+    _wrap_integrate()
+
+    def snapshot():
+        return dict(stats)
+    return snapshot, _wrap_integrate
+
+
+def _diff_component_stats(start: Dict[str, float], end: Dict[str, float]) -> Dict[str, float]:
+    keys = (
+        "refresh_time",
+        "refresh_calls",
+        "kinetic_time",
+        "kinetic_calls",
+        "action_time",
+        "action_calls",
+        "integrate_time",
+        "integrate_calls",
+    )
+    return {k: float(end.get(k, 0.0) - start.get(k, 0.0)) for k in keys}
+
+
+def _print_hmc_traj_profile(idx: int, d: Dict[str, float], traj_ms: float, prefix: str) -> None:
+    r_ms = 1e3 * float(d.get("refresh_time", 0.0))
+    k_ms = 1e3 * float(d.get("kinetic_time", 0.0))
+    a_ms = 1e3 * float(d.get("action_time", 0.0))
+    i_ms = 1e3 * float(d.get("integrate_time", 0.0))
+    known_ms = r_ms + k_ms + a_ms + i_ms
+    other_ms = float(traj_ms) - known_ms
+    print(
+        f"{prefix} traj_profile[{idx}]:"
+        f" refresh={r_ms:.3f}ms({int(d.get('refresh_calls', 0.0))})"
+        f" kinetic={k_ms:.3f}ms({int(d.get('kinetic_calls', 0.0))})"
+        f" action={a_ms:.3f}ms({int(d.get('action_calls', 0.0))})"
+        f" integrate={i_ms:.3f}ms({int(d.get('integrate_calls', 0.0))})"
+        f" other={other_ms:.3f}ms"
+        f" total={traj_ms:.3f}ms"
+    )
+
+
+def _print_hmc_component_summary(title: str, traj_profiles: list[Dict[str, float]], traj_ms_list: list[float]) -> None:
+    n = min(len(traj_profiles), len(traj_ms_list))
+    if n <= 0:
+        return
+    arr_ms = np.asarray(traj_ms_list[:n], dtype=np.float64)
+    def _mean(key: str) -> float:
+        return float(np.mean(np.asarray([d.get(key, 0.0) for d in traj_profiles[:n]], dtype=np.float64)))
+    r_ms = 1e3 * _mean("refresh_time")
+    k_ms = 1e3 * _mean("kinetic_time")
+    a_ms = 1e3 * _mean("action_time")
+    i_ms = 1e3 * _mean("integrate_time")
+    total_ms = float(np.mean(arr_ms))
+    known_ms = r_ms + k_ms + a_ms + i_ms
+    other_ms = total_ms - known_ms
+    print(title)
+    print(
+        f"  mean per trajectory:"
+        f" refresh={r_ms:.3f}ms"
+        f" kinetic={k_ms:.3f}ms"
+        f" action={a_ms:.3f}ms"
+        f" integrate={i_ms:.3f}ms"
+        f" other={other_ms:.3f}ms"
+        f" total={total_ms:.3f}ms"
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--L", type=int, default=4, help="lattice size per dimension")
@@ -192,7 +469,19 @@ def main():
     ap.add_argument("--preconditioner", type=str, default="none", choices=["none", "jacobi"])
     ap.add_argument("--gmres-restart", type=int, default=32)
     ap.add_argument("--gmres-solve-method", type=str, default="batched")
+    ap.add_argument(
+        "--fermion-bc",
+        type=str,
+        default="periodic",
+        help="fermion boundary phases per direction, e.g. 1,1,1,-1 or aliases: periodic, antiperiodic-t",
+    )
     ap.add_argument("--exp-method", type=str, default="su3", choices=["su3", "expm"])
+    ap.add_argument(
+        "--hot-start-scale",
+        type=float,
+        default=0.2,
+        help="initial algebra amplitude for hot start (ignored on --resume)",
+    )
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--layout", type=str, default="BMXYIJ", choices=["BMXYIJ", "BXYMIJ", "auto"])
     ap.add_argument("--layout-bench-iters", type=int, default=3)
@@ -203,12 +492,19 @@ def main():
     ap.add_argument(
         "--fermion-monomial-kind",
         type=str,
-        default="unpreconditioned",
+        default="eo_preconditioned",
         choices=["unpreconditioned", "eo_preconditioned"],
     )
     ap.add_argument("--gauge-timescale", type=int, default=0)
     ap.add_argument("--fermion-timescale", type=int, default=1)
     ap.add_argument("--pf-refresh", type=str, default="auto", choices=["auto", "heatbath", "ou"])
+    ap.add_argument(
+        "--pf-force-mode",
+        type=str,
+        default="analytic",
+        choices=["autodiff", "analytic"],
+        help="pseudofermion force mode (analytic is production default)",
+    )
     ap.add_argument(
         "--pf-gamma",
         type=float,
@@ -217,6 +513,12 @@ def main():
     )
 
     # Update/integrator controls.
+    ap.add_argument(
+        "--warmup-no-ar",
+        type=int,
+        default=0,
+        help="initial warmup trajectories without Metropolis accept/reject (primarily for HMC)",
+    )
     ap.add_argument("--warmup", type=int, default=20)
     ap.add_argument("--meas", type=int, default=50)
     ap.add_argument("--skip", type=int, default=5)
@@ -265,6 +567,24 @@ def main():
         default=True,
         help="jit refresh_p_with_key",
     )
+    ap.add_argument(
+        "--profile-monomials",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="collect explicit per-monomial action/force timing",
+    )
+    ap.add_argument(
+        "--profile-hmc-components",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="collect explicit per-trajectory HMC component timing (refresh/kinetic/action/integrate)",
+    )
+    ap.add_argument(
+        "--profile-hmc-every",
+        type=int,
+        default=1,
+        help="print per-trajectory HMC component profile every N trajectories when enabled",
+    )
 
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", type=str, default="su3_wilson_nf2_ckpt.pkl", help="checkpoint path")
@@ -300,10 +620,12 @@ def main():
     batch = int(args.batch)
     tau = float(args.tau)
     skip = int(args.skip)
+    warmup_no_ar = int(args.warmup_no_ar)
     integrator_name = str(args.integrator)
     nmd = int(args.nmd)
     selected_layout = str(args.layout)
     exp_method = str(args.exp_method)
+    hot_start_scale = float(args.hot_start_scale)
     update_name = args.update
     smd_gamma = args.smd_gamma
     smd_accept_reject = args.smd_accept_reject
@@ -313,7 +635,9 @@ def main():
     gauge_timescale = int(args.gauge_timescale)
     fermion_timescale = int(args.fermion_timescale)
     pf_refresh = str(args.pf_refresh)
+    pf_force_mode = str(args.pf_force_mode)
     pf_gamma = args.pf_gamma
+    fermion_bc = _parse_fermion_bc(args.fermion_bc, len(lattice_shape))
 
     if ckpt is not None:
         c = ckpt.get("config", {})
@@ -328,18 +652,22 @@ def main():
         preconditioner = str(c.get("preconditioner", preconditioner))
         gmres_restart = int(c.get("gmres_restart", gmres_restart))
         gmres_solve_method = str(c.get("gmres_solve_method", gmres_solve_method))
+        fermion_bc = c.get("fermion_bc", fermion_bc)
         batch = int(c.get("batch", batch))
         tau = float(c.get("tau", tau))
         skip = int(c.get("skip", skip))
+        warmup_no_ar = int(c.get("warmup_no_ar", warmup_no_ar))
         integrator_name = str(c.get("integrator", integrator_name))
         selected_layout = str(c.get("layout", "BMXYIJ"))
         exp_method = str(c.get("exp_method", exp_method))
+        hot_start_scale = float(c.get("hot_start_scale", hot_start_scale))
         include_gauge_monomial = bool(c.get("include_gauge_monomial", include_gauge_monomial))
         include_fermion_monomial = bool(c.get("include_fermion_monomial", include_fermion_monomial))
         fermion_monomial_kind = str(c.get("fermion_monomial_kind", fermion_monomial_kind))
         gauge_timescale = int(c.get("gauge_timescale", gauge_timescale))
         fermion_timescale = int(c.get("fermion_timescale", fermion_timescale))
         pf_refresh = str(c.get("pf_refresh", pf_refresh))
+        pf_force_mode = str(c.get("pf_force_mode", pf_force_mode))
         if pf_gamma is None:
             pf_gamma = c.get("pf_gamma", None)
         if update_name is None:
@@ -362,6 +690,9 @@ def main():
     update_name = str(update_name).lower()
     if update_name == "ghmc":
         update_name = "smd"
+    if update_name != "hmc" and warmup_no_ar > 0:
+        print(f"Note: --warmup-no-ar is HMC-only; ignoring ({warmup_no_ar} -> 0) for update={update_name}.")
+        warmup_no_ar = 0
 
     if pf_refresh == "auto":
         pf_refresh = "ou" if update_name == "smd" else "heatbath"
@@ -370,6 +701,14 @@ def main():
         pf_gamma = float(smd_gamma) if pf_refresh.lower() == "ou" else 0.3
     else:
         pf_gamma = float(pf_gamma)
+    if isinstance(fermion_bc, str):
+        fermion_bc = _parse_fermion_bc(fermion_bc, len(lattice_shape))
+    else:
+        fermion_bc = tuple(complex(v) for v in fermion_bc)
+        if len(fermion_bc) != len(lattice_shape):
+            raise ValueError(
+                f"fermion_bc must have Nd={len(lattice_shape)} entries; got {len(fermion_bc)}"
+            )
 
     if selected_layout == "auto" and ckpt is None:
         # Heuristic gauge-kernel benchmark for choosing layout before expensive fermion runs.
@@ -401,6 +740,7 @@ def main():
         preconditioner_kind=preconditioner,
         gmres_restart=gmres_restart,
         gmres_solve_method=gmres_solve_method,
+        fermion_bc=fermion_bc,
         include_gauge_monomial=include_gauge_monomial,
         include_fermion_monomial=include_fermion_monomial,
         fermion_monomial_kind=fermion_monomial_kind,
@@ -408,6 +748,7 @@ def main():
         fermion_timescale=fermion_timescale,
         pseudofermion_refresh=pf_refresh,
         pseudofermion_gamma=pf_gamma,
+        pseudofermion_force_mode=pf_force_mode,
         smd_gamma=float(smd_gamma),
         auto_refresh_pseudofermions=True,
     )
@@ -419,7 +760,11 @@ def main():
     if args.jit_refresh_key and hasattr(theory, "refresh_p_with_key"):
         theory.refresh_p_with_key = jax.jit(theory.refresh_p_with_key)
 
-    q = theory.hotStart(scale=0.2)
+    monomial_snapshot = None
+    if bool(args.profile_monomials):
+        monomial_snapshot = _install_monomial_profiler(theory)
+
+    q = theory.hotStart(scale=hot_start_scale)
 
     I = _build_integrator(integrator_name, theory, nmd, tau)
     if update_name == "hmc":
@@ -436,12 +781,24 @@ def main():
     else:
         raise ValueError(f"Unknown update algorithm: {update_name}")
 
+    hmc_comp_snapshot = None
+    hmc_comp_rewrap_integrate = None
+    if bool(args.profile_hmc_components):
+        hmc_comp_snapshot, hmc_comp_rewrap_integrate = _install_hmc_component_profiler(theory, chain)
+
     warmup_done = 0
+    warmup_noar_done = 0
     meas_done = 0
     warmup_traj_acc = []
     meas_step_acc = []
     plaquettes = []
     gauge_actions = []
+    warmup_noar_traj_time_ms = []
+    warmup_traj_time_ms = []
+    meas_traj_time_ms = []
+    warmup_noar_hmc_profiles = []
+    warmup_hmc_profiles = []
+    meas_hmc_profiles = []
 
     if ckpt is not None:
         q = jax.device_put(np.asarray(ckpt["q"]))
@@ -455,15 +812,27 @@ def main():
             chain.p = None if p_arr is None else jax.device_put(np.asarray(p_arr))
         chain.AcceptReject = list(np.asarray(ckpt.get("accept_reject", []), dtype=np.float64))
         s = ckpt.get("state", {})
+        warmup_noar_done = int(s.get("warmup_noar_done", 0))
         warmup_done = int(s.get("warmup_done", 0))
         meas_done = int(s.get("meas_done", 0))
         nmd = int(s.get("nmd", nmd))
         chain.I = _build_integrator(integrator_name, theory, nmd, tau)
+        if hmc_comp_rewrap_integrate is not None:
+            hmc_comp_rewrap_integrate()
         warmup_traj_acc = list(s.get("warmup_traj_acc", []))
         meas_step_acc = list(s.get("meas_step_acc", []))
         plaquettes = list(s.get("plaquettes", []))
         gauge_actions = list(s.get("gauge_actions", []))
-        print(f"  resumed state: warmup_done={warmup_done}, meas_done={meas_done}, nmd={nmd}")
+        warmup_noar_traj_time_ms = [float(x) for x in s.get("warmup_noar_traj_time_ms", [])]
+        warmup_traj_time_ms = [float(x) for x in s.get("warmup_traj_time_ms", [])]
+        meas_traj_time_ms = [float(x) for x in s.get("meas_traj_time_ms", [])]
+        warmup_noar_hmc_profiles = list(s.get("warmup_noar_hmc_profiles", []))
+        warmup_hmc_profiles = list(s.get("warmup_hmc_profiles", []))
+        meas_hmc_profiles = list(s.get("meas_hmc_profiles", []))
+        print(
+            f"  resumed state:"
+            f" warmup_noar_done={warmup_noar_done}, warmup_done={warmup_done}, meas_done={meas_done}, nmd={nmd}"
+        )
 
     target_accept = float(args.target_accept) if args.target_accept is not None else _default_target_accept(integrator_name)
 
@@ -471,6 +840,7 @@ def main():
     print(f"  lattice_shape: {lattice_shape}")
     print(f"  beta: {beta}")
     print(f"  mass/r: {mass} / {wilson_r}")
+    print(f"  fermion_bc: {_format_fermion_bc(fermion_bc)}")
     solver_line = (
         "  solver:"
         f" kind={solver_kind}"
@@ -483,6 +853,7 @@ def main():
         solver_line += f" gmres_restart={gmres_restart} gmres_solve_method={gmres_solve_method}"
     print(solver_line)
     print(f"  exp_method: {exp_method}")
+    print(f"  hot_start_scale: {hot_start_scale}")
     print(f"  batch: {batch}")
     print(f"  layout: {selected_layout}")
     if update_name == "smd":
@@ -495,10 +866,11 @@ def main():
     print(
         "  pseudofermions:"
         f" refresh={pf_refresh}"
+        f" force_mode={pf_force_mode}"
         f" gamma={float(pf_gamma):.6g}"
         f" (auto=>{'ou' if update_name=='smd' else 'heatbath'}, gamma defaults from smd-gamma for ou)"
     )
-    print(f"  warmup/meas/skip: {args.warmup}/{args.meas}/{skip}")
+    print(f"  warmup(no-ar/ar)/meas/skip: {warmup_no_ar}/{args.warmup}/{args.meas}/{skip}")
     print(
         "  jit:"
         f" action=False"
@@ -518,6 +890,8 @@ def main():
         f" bounds=[{args.nmd_min},{args.nmd_max}]"
     )
     print(f"  checkpoint: save='{args.save}' resume='{args.resume or '<none>'}' every={args.save_every}")
+    print(f"  monomial timing profile: {bool(args.profile_monomials)}")
+    print(f"  hmc component profile: {bool(args.profile_hmc_components)} every={max(1, int(args.profile_hmc_every))}")
 
     ckpt_config = {
         "lattice_shape": tuple(int(v) for v in lattice_shape),
@@ -531,7 +905,9 @@ def main():
         "preconditioner": str(preconditioner),
         "gmres_restart": int(gmres_restart),
         "gmres_solve_method": str(gmres_solve_method),
+        "fermion_bc": tuple(complex(v) for v in fermion_bc),
         "exp_method": str(exp_method),
+        "hot_start_scale": float(hot_start_scale),
         "batch": int(batch),
         "layout": selected_layout,
         "update": update_name,
@@ -539,6 +915,7 @@ def main():
         "smd_accept_reject": bool(smd_accept_reject),
         "integrator": integrator_name,
         "tau": float(tau),
+        "warmup_no_ar": int(warmup_no_ar),
         "skip": int(skip),
         "include_gauge_monomial": bool(include_gauge_monomial),
         "include_fermion_monomial": bool(include_fermion_monomial),
@@ -546,6 +923,7 @@ def main():
         "gauge_timescale": int(gauge_timescale),
         "fermion_timescale": int(fermion_timescale),
         "pf_refresh": str(pf_refresh),
+        "pf_force_mode": str(pf_force_mode),
         "pf_gamma": float(pf_gamma),
     }
 
@@ -554,22 +932,95 @@ def main():
             return
         state = {
             "nmd": int(nmd),
+            "warmup_noar_done": int(warmup_noar_done),
             "warmup_done": int(warmup_done),
             "meas_done": int(meas_done),
             "warmup_traj_acc": [float(x) for x in warmup_traj_acc],
             "meas_step_acc": [float(x) for x in meas_step_acc],
             "plaquettes": [float(x) for x in plaquettes],
             "gauge_actions": [float(x) for x in gauge_actions],
+            "warmup_noar_traj_time_ms": [float(x) for x in warmup_noar_traj_time_ms],
+            "warmup_traj_time_ms": [float(x) for x in warmup_traj_time_ms],
+            "meas_traj_time_ms": [float(x) for x in meas_traj_time_ms],
+            "warmup_noar_hmc_profiles": warmup_noar_hmc_profiles,
+            "warmup_hmc_profiles": warmup_hmc_profiles,
+            "meas_hmc_profiles": meas_hmc_profiles,
             "reason": reason,
         }
         _save_checkpoint(args.save, q, theory, chain, state, ckpt_config)
 
+    # Optional no-accept/reject warmup phase.
+    warmup_noar_start = int(warmup_noar_done)
+    warmup_noar_timing_start_idx = len(warmup_noar_traj_time_ms)
+    warmup_noar_hmc_start_idx = len(warmup_noar_hmc_profiles)
+    warmup_noar_prof_start = monomial_snapshot() if monomial_snapshot is not None else None
+    warmup_noar_t0 = time.perf_counter()
+    for kn in range(warmup_noar_start, int(warmup_no_ar)):
+        hmc_start = hmc_comp_snapshot() if hmc_comp_snapshot is not None else None
+        traj_t0 = time.perf_counter()
+        q = _run_one_trajectory_hmc_no_ar(q, chain)
+        traj_ms = 1e3 * (time.perf_counter() - traj_t0)
+        warmup_noar_traj_time_ms.append(float(traj_ms))
+        if hmc_comp_snapshot is not None and hmc_start is not None:
+            hmc_end = hmc_comp_snapshot()
+            hd = _diff_component_stats(hmc_start, hmc_end)
+            warmup_noar_hmc_profiles.append(hd)
+            idx = len(warmup_noar_hmc_profiles)
+            if idx % max(1, int(args.profile_hmc_every)) == 0:
+                _print_hmc_traj_profile(idx=idx, d=hd, traj_ms=float(traj_ms), prefix="warmup-noar")
+        warmup_noar_done = kn + 1
+
+        if warmup_noar_done % max(1, int(args.warmup_log_every)) == 0 or warmup_noar_done == int(warmup_no_ar):
+            print(
+                f"warmup-noar k={warmup_noar_done}/{warmup_no_ar}"
+                f" nmd={nmd}"
+                f" traj_ms={traj_ms:.3f}"
+            )
+
+        if args.save_every > 0 and warmup_noar_done % int(args.save_every) == 0:
+            maybe_save(reason="warmup_no_ar")
+
+    warmup_noar_t1 = time.perf_counter()
+    if warmup_no_ar > warmup_noar_start:
+        warm_noar_seg = np.asarray(warmup_noar_traj_time_ms[warmup_noar_timing_start_idx:], dtype=np.float64)
+        print(f"warmup-noar time per trajectory: {float(np.mean(warm_noar_seg)):.3f} ms")
+        print(
+            "warmup-noar time per trajectory (wall):"
+            f" {(warmup_noar_t1 - warmup_noar_t0) * 1e3 / max(1, warmup_no_ar - warmup_noar_start):.3f} ms"
+        )
+    elif warmup_no_ar > 0:
+        print("warmup-noar: already completed in checkpoint")
+    if monomial_snapshot is not None:
+        warm_noar_end = monomial_snapshot()
+        warm_noar_diff = _diff_monomial_stats(warmup_noar_prof_start or {}, warm_noar_end)
+        n_warm_noar = max(0, int(warmup_no_ar) - warmup_noar_start)
+        if n_warm_noar > 0:
+            _print_monomial_timing("Warmup(no-AR) monomial timing:", warm_noar_diff, n_warm_noar)
+    if hmc_comp_snapshot is not None:
+        warm_noar_h = warmup_noar_hmc_profiles[warmup_noar_hmc_start_idx:]
+        warm_noar_ms = warmup_noar_traj_time_ms[warmup_noar_timing_start_idx:]
+        _print_hmc_component_summary("Warmup(no-AR) HMC component timing:", warm_noar_h, warm_noar_ms)
+
     # Warmup with optional nmd adaptation.
     warmup_start = int(warmup_done)
+    warmup_timing_start_idx = len(warmup_traj_time_ms)
+    warmup_hmc_start_idx = len(warmup_hmc_profiles)
+    warmup_prof_start = monomial_snapshot() if monomial_snapshot is not None else None
     warmup_t0 = time.perf_counter()
     for kw in range(warmup_start, int(args.warmup)):
+        hmc_start = hmc_comp_snapshot() if hmc_comp_snapshot is not None else None
+        traj_t0 = time.perf_counter()
         prev = len(chain.AcceptReject)
         q = _run_one_trajectory(q, chain, warmup=True)
+        traj_ms = 1e3 * (time.perf_counter() - traj_t0)
+        warmup_traj_time_ms.append(float(traj_ms))
+        if hmc_comp_snapshot is not None and hmc_start is not None:
+            hmc_end = hmc_comp_snapshot()
+            hd = _diff_component_stats(hmc_start, hmc_end)
+            warmup_hmc_profiles.append(hd)
+            idx = len(warmup_hmc_profiles)
+            if idx % max(1, int(args.profile_hmc_every)) == 0:
+                _print_hmc_traj_profile(idx=idx, d=hd, traj_ms=float(traj_ms), prefix="warmup")
         new = np.asarray(chain.AcceptReject[prev:], dtype=np.float64)
         traj_acc = float(new.mean()) if new.size else float("nan")
         warmup_traj_acc.append(traj_acc)
@@ -587,14 +1038,17 @@ def main():
                 old = nmd
                 nmd = int(nmd_new)
                 chain.I = _build_integrator(integrator_name, theory, nmd, tau)
+                if hmc_comp_rewrap_integrate is not None:
+                    hmc_comp_rewrap_integrate()
                 print(f"warmup adapt: k={warmup_done} acc_win={acc_w:.3f} nmd {old} -> {nmd}")
 
         if warmup_done % max(1, int(args.warmup_log_every)) == 0 or warmup_done == int(args.warmup):
             w = np.asarray(warmup_traj_acc[-max(1, int(args.adapt_window)) :], dtype=np.float64)
             print(
-                f"warmup k={warmup_done}/{args.warmup}"
+                f"warmup-ar k={warmup_done}/{args.warmup}"
                 f" nmd={nmd}"
                 f" traj_acc={traj_acc:.3f}"
+                f" traj_ms={traj_ms:.3f}"
                 f" win_acc={float(np.nanmean(w)):.3f}"
                 f" global_acc={chain.calc_Acceptance():.3f}"
             )
@@ -604,11 +1058,26 @@ def main():
 
     warmup_t1 = time.perf_counter()
     if args.warmup > warmup_start:
-        print(f"warmup time per trajectory: {(warmup_t1 - warmup_t0) * 1e3 / max(1, args.warmup - warmup_start):.3f} ms")
+        warm_seg = np.asarray(warmup_traj_time_ms[warmup_timing_start_idx:], dtype=np.float64)
+        print(f"warmup-ar time per trajectory: {float(np.mean(warm_seg)):.3f} ms")
+        print(f"warmup-ar time per trajectory (wall): {(warmup_t1 - warmup_t0) * 1e3 / max(1, args.warmup - warmup_start):.3f} ms")
     elif args.warmup > 0:
-        print("warmup: already completed in checkpoint")
+        print("warmup-ar: already completed in checkpoint")
+    if monomial_snapshot is not None:
+        warm_end = monomial_snapshot()
+        warm_diff = _diff_monomial_stats(warmup_prof_start or {}, warm_end)
+        n_warm_traj = max(0, int(args.warmup) - warmup_start)
+        if n_warm_traj > 0:
+            _print_monomial_timing("Warmup(AR) monomial timing:", warm_diff, n_warm_traj)
+    if hmc_comp_snapshot is not None:
+        warm_h = warmup_hmc_profiles[warmup_hmc_start_idx:]
+        warm_ms = warmup_traj_time_ms[warmup_timing_start_idx:]
+        _print_hmc_component_summary("Warmup(AR) HMC component timing:", warm_h, warm_ms)
 
     meas_start = int(meas_done)
+    meas_timing_start_idx = len(meas_traj_time_ms)
+    meas_hmc_start_idx = len(meas_hmc_profiles)
+    meas_prof_start = monomial_snapshot() if monomial_snapshot is not None else None
     t0 = time.perf_counter()
     for k in range(meas_start, int(args.meas)):
         plaq = np.asarray(theory.average_plaquette(q))
@@ -618,9 +1087,22 @@ def main():
         gauge_actions.extend(gact.tolist())
 
         step_accs = []
+        step_traj_ms = []
         for _ in range(int(skip)):
+            hmc_start = hmc_comp_snapshot() if hmc_comp_snapshot is not None else None
+            traj_t0 = time.perf_counter()
             prev = len(chain.AcceptReject)
             q = _run_one_trajectory(q, chain, warmup=False)
+            dt_ms = 1e3 * (time.perf_counter() - traj_t0)
+            meas_traj_time_ms.append(float(dt_ms))
+            step_traj_ms.append(float(dt_ms))
+            if hmc_comp_snapshot is not None and hmc_start is not None:
+                hmc_end = hmc_comp_snapshot()
+                hd = _diff_component_stats(hmc_start, hmc_end)
+                meas_hmc_profiles.append(hd)
+                idx = len(meas_hmc_profiles)
+                if idx % max(1, int(args.profile_hmc_every)) == 0:
+                    _print_hmc_traj_profile(idx=idx, d=hd, traj_ms=float(dt_ms), prefix="meas")
             new = np.asarray(chain.AcceptReject[prev:], dtype=np.float64)
             if new.size:
                 step_accs.append(float(new.mean()))
@@ -638,6 +1120,8 @@ def main():
                 float(gact.mean()),
                 "step_acc=",
                 step_acc,
+                "step_traj_ms=",
+                float(np.mean(np.asarray(step_traj_ms, dtype=np.float64))) if step_traj_ms else float("nan"),
                 "acc=",
                 chain.calc_Acceptance(),
             )
@@ -648,9 +1132,21 @@ def main():
     t1 = time.perf_counter()
     if int(args.meas) > meas_start:
         n_traj = (int(args.meas) - meas_start) * int(skip)
-        print(f"meas-update time per trajectory: {(t1 - t0) * 1e3 / max(1, n_traj):.3f} ms")
+        meas_seg = np.asarray(meas_traj_time_ms[meas_timing_start_idx:], dtype=np.float64)
+        print(f"meas-update time per trajectory: {float(np.mean(meas_seg)):.3f} ms")
+        print(f"meas-update time per trajectory (wall): {(t1 - t0) * 1e3 / max(1, n_traj):.3f} ms")
     elif args.meas > 0:
         print("measurement: already completed in checkpoint")
+    if monomial_snapshot is not None:
+        meas_end = monomial_snapshot()
+        meas_diff = _diff_monomial_stats(meas_prof_start or {}, meas_end)
+        n_meas_traj = max(0, (int(args.meas) - meas_start) * int(skip))
+        if n_meas_traj > 0:
+            _print_monomial_timing("Measurement monomial timing:", meas_diff, n_meas_traj)
+    if hmc_comp_snapshot is not None:
+        meas_h = meas_hmc_profiles[meas_hmc_start_idx:]
+        meas_ms = meas_traj_time_ms[meas_timing_start_idx:]
+        _print_hmc_component_summary("Measurement HMC component timing:", meas_h, meas_ms)
 
     mP, eP = avg_and_err(plaquettes)
     mSg, eSg = avg_and_err(gauge_actions)
@@ -680,9 +1176,18 @@ def main():
     else:
         print(f"  Plaquette IAT: unavailable ({iat.get('message', 'unknown error')})")
     if warmup_traj_acc:
-        print("  Warmup acc (mean over traj):", float(np.nanmean(np.asarray(warmup_traj_acc))))
+        print("  Warmup(AR) acc (mean over traj):", float(np.nanmean(np.asarray(warmup_traj_acc))))
     if meas_step_acc:
         print("  Meas acc (mean over steps):", float(np.nanmean(np.asarray(meas_step_acc))))
+    if warmup_noar_traj_time_ms:
+        print(
+            "  Warmup(no-AR) trajectory time (overall mean ms):",
+            float(np.mean(np.asarray(warmup_noar_traj_time_ms, dtype=np.float64))),
+        )
+    if warmup_traj_time_ms:
+        print("  Warmup(AR) trajectory time (overall mean ms):", float(np.mean(np.asarray(warmup_traj_time_ms, dtype=np.float64))))
+    if meas_traj_time_ms:
+        print("  Measurement trajectory time (overall mean ms):", float(np.mean(np.asarray(meas_traj_time_ms, dtype=np.float64))))
     print("  Final nmd:", nmd)
     print("  Acceptance:", chain.calc_Acceptance())
     maybe_save(reason="final")

@@ -21,6 +21,13 @@ from .integrators import (
 from .update import HMC, SMD, ghmc, hmc, smd
 from .hmc_sampler import HMCSampler, hmc_sampler
 from .hamiltonian import Monomial, HamiltonianModel
+from .measurements import (
+    InlineMeasurement,
+    MeasurementContext,
+    PlaquetteMeasurement,
+    build_inline_measurements,
+    run_inline_measurements,
+)
 
 __all__ = [
     "Integrator",
@@ -48,4 +55,9 @@ __all__ = [
     "hmc_sampler",
     "Monomial",
     "HamiltonianModel",
+    "InlineMeasurement",
+    "MeasurementContext",
+    "PlaquetteMeasurement",
+    "build_inline_measurements",
+    "run_inline_measurements",
 ]
