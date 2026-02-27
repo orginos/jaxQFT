@@ -102,6 +102,7 @@ if str(ROOT) not in sys.path:
 from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
 from jaxqft.core.measurements import MeasurementContext, build_inline_measurements, run_inline_measurements
 from jaxqft.core.update import SMD, hmc
+from jaxqft.io import decode_scidac_gauge, decode_scidac_momentum, decode_scidac_pseudofermion
 from jaxqft.models.su3_wilson_nf2 import SU3WilsonNf2
 from jaxqft.models.su3_ym import SU3YangMills
 from jaxqft.stats import integrated_autocorr_time
@@ -118,6 +119,15 @@ shape = [8, 8, 8, 16]
 batch = 1
 layout = "BMXYIJ"  # BMXYIJ | BXYMIJ | auto
 exp_method = "su3"
+hot_start_scale = 0.2
+
+[input]
+init_cfg_lime = ""                    # SciDAC/ILDG cfg .lime
+init_mom_lime = ""                    # SciDAC mom .lime (SMD/GHMC only)
+init_pf_lime = ""                     # SciDAC pseudofermion .lime
+init_pf_field_index = -1              # -1 => auto-select PF leaf
+init_pf_cb_fix = "auto"               # none | auto | shiftx1
+init_use_loaded_pf_first_traj = true  # skip one PF refresh after load
 
 [physics]
 beta = 5.7
@@ -321,6 +331,16 @@ def main():
     batch = int(_cfg_get(cfg, "run.batch", 1))
     layout = str(_cfg_get(cfg, "run.layout", "BMXYIJ"))
     exp_method = str(_cfg_get(cfg, "run.exp_method", "su3"))
+    hot_start_scale = float(_cfg_get(cfg, "run.hot_start_scale", 0.2))
+
+    init_cfg_lime = str(_cfg_get(cfg, "input.init_cfg_lime", "")).strip()
+    init_mom_lime = str(_cfg_get(cfg, "input.init_mom_lime", "")).strip()
+    init_pf_lime = str(_cfg_get(cfg, "input.init_pf_lime", "")).strip()
+    init_pf_field_index = int(_cfg_get(cfg, "input.init_pf_field_index", -1))
+    init_pf_cb_fix = str(_cfg_get(cfg, "input.init_pf_cb_fix", "auto")).strip().lower()
+    init_use_loaded_pf_first_traj = bool(_cfg_get(cfg, "input.init_use_loaded_pf_first_traj", True))
+    if init_pf_cb_fix not in ("none", "auto", "shiftx1"):
+        raise ValueError(f"input.init_pf_cb_fix must be one of none/auto/shiftx1, got {init_pf_cb_fix!r}")
 
     beta = float(_cfg_get(cfg, "physics.beta", 5.8))
     mass = float(_cfg_get(cfg, "physics.mass", 0.05))
@@ -399,6 +419,14 @@ def main():
     pf_gamma = float(pf_gamma)
 
     ckpt = _load_checkpoint(resume_path) if resume_path else None
+    if ckpt is not None and (init_cfg_lime or init_mom_lime or init_pf_lime):
+        print(
+            "Note: input.init_*_lime options are ignored on resume "
+            "(checkpoint state takes precedence)."
+        )
+        init_cfg_lime = ""
+        init_mom_lime = ""
+        init_pf_lime = ""
 
     if layout == "auto" and ckpt is None:
         timings = SU3YangMills.benchmark_layout(
@@ -459,7 +487,7 @@ def main():
     else:
         raise ValueError(f"Unknown update algorithm: {update_name}")
 
-    q = theory.hotStart(scale=0.2)
+    q = theory.hotStart(scale=hot_start_scale)
 
     warmup_noar_done = 0
     warmup_ar_done = 0
@@ -498,6 +526,85 @@ def main():
         saved_configs = int(st.get("saved_configs", 0))
         mctx.state = dict(st.get("measurement_context_state", {}))
         print(f"Resumed from {resume_path} at noAR/AR/meas={warmup_noar_done}/{warmup_ar_done}/{meas_done}, nmd={nmd}")
+    else:
+        if init_cfg_lime:
+            q_loaded = decode_scidac_gauge(init_cfg_lime, batch_size=batch)
+            if tuple(q_loaded.shape) != tuple(q.shape):
+                raise ValueError(
+                    f"Loaded cfg shape mismatch: {tuple(q_loaded.shape)} vs expected {tuple(q.shape)}"
+                )
+            q = jax.device_put(np.asarray(q_loaded))
+
+        if init_mom_lime:
+            p_loaded, p_info = decode_scidac_momentum(init_mom_lime, batch_size=batch)
+            if hasattr(chain, "p"):
+                if tuple(p_loaded.shape) != tuple(q.shape):
+                    raise ValueError(
+                        f"Loaded momentum shape mismatch: {tuple(p_loaded.shape)} vs expected {tuple(q.shape)}"
+                    )
+                chain.p = jax.device_put(np.asarray(p_loaded, dtype=np.complex64))
+                print(
+                    "  loaded momenta:"
+                    f" antiH={float(p_info.get('rel_antihermitian_error', float('nan'))):.3e}"
+                    f" max|tr|={float(p_info.get('max_abs_trace', float('nan'))):.3e}"
+                )
+            else:
+                print("  note: input.init_mom_lime provided, but update=hmc has no stored momentum state; ignoring")
+
+        if init_pf_lime:
+            pf_idx = None if int(init_pf_field_index) < 0 else int(init_pf_field_index)
+            pf_loaded, pf_meta = decode_scidac_pseudofermion(
+                init_pf_lime,
+                field_index=pf_idx,
+                batch_size=batch,
+            )
+            pf_loaded = np.asarray(pf_loaded)
+            expected_pf_shape = tuple(int(v) for v in theory.fermion_shape())
+            if tuple(pf_loaded.shape) != expected_pf_shape:
+                raise ValueError(
+                    "Loaded pseudofermion shape mismatch: "
+                    f"{tuple(pf_loaded.shape)} vs expected {expected_pf_shape}"
+                )
+
+            if theory.fermion_monomial_kind == "eo_preconditioned":
+                pe = np.asarray(theory._project_even(jax.device_put(pf_loaded)))
+                po = np.asarray(theory._project_odd(jax.device_put(pf_loaded)))
+                ne = float(np.linalg.norm(pe))
+                no = float(np.linalg.norm(po))
+                do_shift = False
+                if init_pf_cb_fix == "shiftx1":
+                    do_shift = True
+                elif init_pf_cb_fix == "auto":
+                    do_shift = (no > 0.0) and (ne <= 1e-12 * no)
+                if do_shift:
+                    pf_loaded = np.roll(pf_loaded, shift=1, axis=1)
+                    pe = np.asarray(theory._project_even(jax.device_put(pf_loaded)))
+                    po = np.asarray(theory._project_odd(jax.device_put(pf_loaded)))
+                    ne = float(np.linalg.norm(pe))
+                    no = float(np.linalg.norm(po))
+                    print(
+                        "  loaded pseudofermion checkerboard fix: applied x-shift(+1)"
+                        f" even_norm={ne:.6e} odd_norm={no:.6e}"
+                    )
+                else:
+                    print(
+                        "  loaded pseudofermion checkerboard:"
+                        f" even_norm={ne:.6e} odd_norm={no:.6e}"
+                    )
+
+            theory.set_loaded_pseudofermion(
+                jax.device_put(np.asarray(pf_loaded, dtype=np.complex64)),
+                skip_next_refresh=bool(init_use_loaded_pf_first_traj),
+            )
+            print(
+                "  loaded pseudofermion:"
+                f" datatype={pf_meta.datatype}"
+                f" precision={pf_meta.precision}"
+                f" spins={pf_meta.spins}"
+                f" colors={pf_meta.colors}"
+                f" recordtype={pf_meta.recordtype}"
+                f" skip_first_refresh={bool(init_use_loaded_pf_first_traj)}"
+            )
 
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
@@ -506,11 +613,24 @@ def main():
     print(f"  theory: {theory_family}/{theory_name}")
     print(f"  shape: {lattice_shape}")
     print(f"  beta/mass/r: {beta} / {mass} / {wilson_r}")
+    print(f"  hot_start_scale: {hot_start_scale}")
     print(f"  update: {update_name}")
     print(f"  integrator: {integrator_name} (tau={tau}, nmd={nmd})")
     print(f"  warmup(no-AR/AR)/meas/skip: {warmup_no_ar}/{warmup_ar}/{meas}/{skip}")
     print(f"  monomials: {', '.join(theory.hamiltonian.monomial_names())}")
     print(f"  inline measurements: {[m.name for m in measurements]}")
+    if init_cfg_lime:
+        print(f"  init cfg lime: {init_cfg_lime}")
+    if init_mom_lime:
+        print(f"  init mom lime: {init_mom_lime}")
+    if init_pf_lime:
+        print(
+            "  init pf lime:"
+            f" path={init_pf_lime}"
+            f" field_index={init_pf_field_index}"
+            f" cb_fix={init_pf_cb_fix}"
+            f" use_first_traj={bool(init_use_loaded_pf_first_traj)}"
+        )
 
     ckpt_config = dict(cfg)
 
@@ -703,4 +823,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

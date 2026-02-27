@@ -94,6 +94,7 @@ if str(ROOT) not in sys.path:
 
 from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
 from jaxqft.core.update import SMD, hmc
+from jaxqft.io import decode_scidac_gauge, decode_scidac_momentum, decode_scidac_pseudofermion
 from jaxqft.models.su3_wilson_nf2 import SU3WilsonNf2
 from jaxqft.models.su3_ym import SU3YangMills
 from jaxqft.stats import integrated_autocorr_time
@@ -485,6 +486,33 @@ def main():
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--layout", type=str, default="BMXYIJ", choices=["BMXYIJ", "BXYMIJ", "auto"])
     ap.add_argument("--layout-bench-iters", type=int, default=3)
+    ap.add_argument("--init-cfg-lime", type=str, default="", help="initialize gauge field from SciDAC/ILDG .lime file")
+    ap.add_argument(
+        "--init-mom-lime",
+        type=str,
+        default="",
+        help="initialize updater momentum from SciDAC .lime file (SMD/GHMC only)",
+    )
+    ap.add_argument("--init-pf-lime", type=str, default="", help="initialize pseudofermion field from SciDAC .lime file")
+    ap.add_argument(
+        "--init-pf-field-index",
+        type=int,
+        default=-1,
+        help="field index in pseudofermion .lime; -1 means auto-select leaf field",
+    )
+    ap.add_argument(
+        "--init-pf-cb-fix",
+        type=str,
+        default="auto",
+        choices=["none", "auto", "shiftx1"],
+        help="checkerboard fix for EO-preconditioned pseudofermions loaded from .lime",
+    )
+    ap.add_argument(
+        "--init-use-loaded-pf-first-traj",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="when loading pseudofermion from .lime, skip one trajectory refresh so the loaded field is used first",
+    )
 
     # Monomial controls.
     ap.add_argument("--include-gauge-monomial", action=argparse.BooleanOptionalAction, default=True)
@@ -626,6 +654,12 @@ def main():
     selected_layout = str(args.layout)
     exp_method = str(args.exp_method)
     hot_start_scale = float(args.hot_start_scale)
+    init_cfg_lime = str(args.init_cfg_lime).strip()
+    init_mom_lime = str(args.init_mom_lime).strip()
+    init_pf_lime = str(args.init_pf_lime).strip()
+    init_pf_field_index = int(args.init_pf_field_index)
+    init_pf_cb_fix = str(args.init_pf_cb_fix).lower()
+    init_use_loaded_pf_first_traj = bool(args.init_use_loaded_pf_first_traj)
     update_name = args.update
     smd_gamma = args.smd_gamma
     smd_accept_reject = args.smd_accept_reject
@@ -679,6 +713,14 @@ def main():
         nmd = int(ckpt.get("state", {}).get("nmd", nmd))
         print(f"Resuming from {args.resume}")
         print("  using checkpoint config for shape/model/layout/exp_method/integrator/update/tau/skip")
+        if init_cfg_lime or init_mom_lime or init_pf_lime:
+            print(
+                "  note: --init-*-lime options are ignored on --resume "
+                "(checkpoint state takes precedence)"
+            )
+            init_cfg_lime = ""
+            init_mom_lime = ""
+            init_pf_lime = ""
     else:
         if update_name is None:
             update_name = "hmc"
@@ -833,6 +875,85 @@ def main():
             f"  resumed state:"
             f" warmup_noar_done={warmup_noar_done}, warmup_done={warmup_done}, meas_done={meas_done}, nmd={nmd}"
         )
+    else:
+        if init_cfg_lime:
+            q_loaded = decode_scidac_gauge(init_cfg_lime, batch_size=batch)
+            if tuple(q_loaded.shape) != tuple(q.shape):
+                raise ValueError(
+                    f"Loaded cfg shape mismatch: {tuple(q_loaded.shape)} vs expected {tuple(q.shape)}"
+                )
+            q = jax.device_put(np.asarray(q_loaded))
+
+        if init_mom_lime:
+            p_loaded, p_info = decode_scidac_momentum(init_mom_lime, batch_size=batch)
+            if hasattr(chain, "p"):
+                if tuple(p_loaded.shape) != tuple(q.shape):
+                    raise ValueError(
+                        f"Loaded momentum shape mismatch: {tuple(p_loaded.shape)} vs expected {tuple(q.shape)}"
+                    )
+                chain.p = jax.device_put(np.asarray(p_loaded, dtype=np.complex64))
+                print(
+                    "  loaded momenta:"
+                    f" antiH={float(p_info.get('rel_antihermitian_error', float('nan'))):.3e}"
+                    f" max|tr|={float(p_info.get('max_abs_trace', float('nan'))):.3e}"
+                )
+            else:
+                print("  note: --init-mom-lime provided, but update=hmc has no stored momentum state; ignoring")
+
+        if init_pf_lime:
+            pf_idx = None if int(init_pf_field_index) < 0 else int(init_pf_field_index)
+            pf_loaded, pf_meta = decode_scidac_pseudofermion(
+                init_pf_lime,
+                field_index=pf_idx,
+                batch_size=batch,
+            )
+            pf_loaded = np.asarray(pf_loaded)
+            expected_pf_shape = tuple(int(v) for v in theory.fermion_shape())
+            if tuple(pf_loaded.shape) != expected_pf_shape:
+                raise ValueError(
+                    "Loaded pseudofermion shape mismatch: "
+                    f"{tuple(pf_loaded.shape)} vs expected {expected_pf_shape}"
+                )
+
+            if theory.fermion_monomial_kind == "eo_preconditioned":
+                pe = np.asarray(theory._project_even(jax.device_put(pf_loaded)))
+                po = np.asarray(theory._project_odd(jax.device_put(pf_loaded)))
+                ne = float(np.linalg.norm(pe))
+                no = float(np.linalg.norm(po))
+                do_shift = False
+                if init_pf_cb_fix == "shiftx1":
+                    do_shift = True
+                elif init_pf_cb_fix == "auto":
+                    do_shift = (no > 0.0) and (ne <= 1e-12 * no)
+                if do_shift:
+                    pf_loaded = np.roll(pf_loaded, shift=1, axis=1)
+                    pe = np.asarray(theory._project_even(jax.device_put(pf_loaded)))
+                    po = np.asarray(theory._project_odd(jax.device_put(pf_loaded)))
+                    ne = float(np.linalg.norm(pe))
+                    no = float(np.linalg.norm(po))
+                    print(
+                        "  loaded pseudofermion checkerboard fix: applied x-shift(+1)"
+                        f" even_norm={ne:.6e} odd_norm={no:.6e}"
+                    )
+                else:
+                    print(
+                        "  loaded pseudofermion checkerboard:"
+                        f" even_norm={ne:.6e} odd_norm={no:.6e}"
+                    )
+
+            theory.set_loaded_pseudofermion(
+                jax.device_put(np.asarray(pf_loaded, dtype=np.complex64)),
+                skip_next_refresh=bool(init_use_loaded_pf_first_traj),
+            )
+            print(
+                "  loaded pseudofermion:"
+                f" datatype={pf_meta.datatype}"
+                f" precision={pf_meta.precision}"
+                f" spins={pf_meta.spins}"
+                f" colors={pf_meta.colors}"
+                f" recordtype={pf_meta.recordtype}"
+                f" skip_first_refresh={bool(init_use_loaded_pf_first_traj)}"
+            )
 
     target_accept = float(args.target_accept) if args.target_accept is not None else _default_target_accept(integrator_name)
 
@@ -890,6 +1011,16 @@ def main():
         f" bounds=[{args.nmd_min},{args.nmd_max}]"
     )
     print(f"  checkpoint: save='{args.save}' resume='{args.resume or '<none>'}' every={args.save_every}")
+    if ckpt is None and (init_cfg_lime or init_mom_lime or init_pf_lime):
+        print(
+            "  lime init:"
+            f" cfg='{init_cfg_lime or '<none>'}'"
+            f" mom='{init_mom_lime or '<none>'}'"
+            f" pf='{init_pf_lime or '<none>'}'"
+            f" pf_field_index={init_pf_field_index}"
+            f" pf_cb_fix={init_pf_cb_fix}"
+            f" use_loaded_pf_first_traj={bool(init_use_loaded_pf_first_traj)}"
+        )
     print(f"  monomial timing profile: {bool(args.profile_monomials)}")
     print(f"  hmc component profile: {bool(args.profile_hmc_components)} every={max(1, int(args.profile_hmc_every))}")
 
@@ -925,6 +1056,12 @@ def main():
         "pf_refresh": str(pf_refresh),
         "pf_force_mode": str(pf_force_mode),
         "pf_gamma": float(pf_gamma),
+        "init_cfg_lime": str(init_cfg_lime),
+        "init_mom_lime": str(init_mom_lime),
+        "init_pf_lime": str(init_pf_lime),
+        "init_pf_field_index": int(init_pf_field_index),
+        "init_pf_cb_fix": str(init_pf_cb_fix),
+        "init_use_loaded_pf_first_traj": bool(init_use_loaded_pf_first_traj),
     }
 
     def maybe_save(reason: str):

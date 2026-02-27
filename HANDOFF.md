@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-02-26
+Last updated: 2026-02-27
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -31,6 +31,13 @@ Last updated: 2026-02-26
     - `warmup_ar` (Metropolis enabled, optional `nmd` adaptation)
     - `measure`
   - Separates restart checkpoints from saved gauge-field configurations.
+  - Supports SU3 Wilson LIME initialization from control file:
+    - `[input].init_cfg_lime`, `[input].init_mom_lime`, `[input].init_pf_lime`
+    - optional PF leaf index and checkerboard fix controls:
+      - `init_pf_field_index`, `init_pf_cb_fix={none,auto,shiftx1}`
+    - one-shot skip of first pseudofermion refresh after load:
+      - `init_use_loaded_pf_first_traj=true`
+    - on `output.resume`, `input.init_*_lime` is ignored (checkpoint state wins).
   - TOML template generation: `--write-template`.
 - Monomial Hamiltonian infrastructure:
   - `jaxqft/core/hamiltonian.py` with `Monomial` protocol and `HamiltonianModel`.
@@ -81,6 +88,8 @@ Last updated: 2026-02-26
       - `heatbath` (independent redraw)
       - `ou` (OU rotation with `c1=exp(-gamma*traj_length)` on underlying Gaussian field)
       - if pseudofermion gamma is omitted and refresh mode is `ou`, it defaults to SMD/GHMC `gamma`
+    - `SU3WilsonNf2.set_loaded_pseudofermion(phi, skip_next_refresh=True)` added for importing external pseudofermion states.
+      - `prepare_trajectory(...)` now supports one-shot refresh skip so the loaded pseudofermion is actually used on the first trajectory.
   - `SU3WilsonNf2` sets `requires_trajectory_refresh=True` when stochastic monomials are present.
 - Integrators:
   - 2nd-order (`leapfrog`, `minnorm2`) and 4th-order (`forcegrad`, `minnorm4pf4`) in `jaxqft/core/integrators.py`.
@@ -93,6 +102,21 @@ Last updated: 2026-02-26
     - `build_inline_measurements(...)`
     - `run_inline_measurements(...)`
   - Current built-in measurement: `plaquette`.
+- SciDAC/ILDG LIME I/O:
+  - New module: `jaxqft/io/lime.py`
+  - Reads LIME headers/records and decodes SciDAC fields (big-endian, lexicographic site order).
+  - Validated on Chroma checkpoint files:
+    - `run-6_cfg_100.lime` gauge decode gives plaquette `0.4005066` (matches XMLDAT at update 100).
+    - `smd-6_mom_100.lime` decodes as traceless anti-Hermitian SU(3) momentum matrices.
+    - `smd-1_pf_{100,200,300,400,500}.lime` decode works:
+      - files contain extra global metadata records (`datatype=char`, `precision=U`, `recordtype=1`)
+      - pseudofermion leaf is the `recordtype=0` floating field (`datatype=Lattice`, `spins=4`, `colors=3`, `typesize=96`, `datacount=1`)
+      - decoded pseudofermion shape: `(1, Lx, Ly, Lz, Lt, 4, 3)` for SU3 Wilson runs
+  - CLI helper:
+    - `python -m jaxqft.io.lime <file.lime> --decode`
+    - `python -m jaxqft.io.lime <cfg.lime> --decode-gauge --check-plaq --beta <beta>`
+    - `python -m jaxqft.io.lime <mom.lime> --decode-momentum`
+    - `python -m jaxqft.io.lime <pf.lime> --decode-pf` (auto-selects pseudofermion leaf field)
 - Autocorrelation/statistics:
   - `jaxqft/stats/autocorr.py` with IPS, Sokal, and Gamma methods.
 - Fermion building blocks:
@@ -185,6 +209,16 @@ Last updated: 2026-02-26
   - defaults now target production throughput:
     - `fermion_monomial_kind=eo_preconditioned`
     - `pf_force_mode=analytic`
+  - can initialize from Chroma LIME files (no resume):
+    - `--init-cfg-lime <cfg.lime>`
+    - `--init-mom-lime <mom.lime>` (SMD/GHMC only)
+    - `--init-pf-lime <pf.lime>`
+    - pseudofermion leaf selection: `--init-pf-field-index -1` (auto, default)
+    - EO checkerboard convention fix for imported pseudofermions:
+      - `--init-pf-cb-fix auto` (default; applies `x` shift by +1 if needed)
+      - `--init-pf-cb-fix shiftx1|none`
+    - use loaded pseudofermion for first trajectory:
+      - `--init-use-loaded-pf-first-traj` (default true)
   - explicit monomial timing profile (force/action):
     - `--profile-monomials` enables per-monomial timing output (default off for performance runs)
   - explicit HMC loop timing profile:

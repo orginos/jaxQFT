@@ -368,6 +368,7 @@ class SU3WilsonNf2(SU3YangMills):
     jit_dirac_kernels: bool = True
     jit_solvers: bool = True
     requires_trajectory_refresh: bool = field(default=False, init=False)
+    _skip_next_trajectory_refresh: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self):
         super().__post_init__()
@@ -1338,7 +1339,22 @@ class SU3WilsonNf2(SU3YangMills):
 
     def prepare_trajectory(self, U: Array, traj_length: float = 1.0) -> None:
         """Refresh stochastic monomials (pseudofermions) once per trajectory."""
+        if bool(self._skip_next_trajectory_refresh):
+            self._skip_next_trajectory_refresh = False
+            return
         self.hamiltonian.prepare_trajectory(U, traj_length=float(traj_length))
+
+    def set_loaded_pseudofermion(self, phi: Array, *, skip_next_refresh: bool = True) -> None:
+        """Inject externally loaded pseudofermion field into the fermion monomial."""
+        if self.fermion_monomial is None:
+            raise ValueError("No fermion monomial present; cannot set pseudofermion field")
+        p = jnp.asarray(phi, dtype=self.dtype)
+        self.fermion_monomial.phi = p
+        self.fermion_monomial.eta = None
+        if hasattr(self.fermion_monomial, "clear_solver_guess"):
+            self.fermion_monomial.clear_solver_guess()
+        if bool(skip_next_refresh):
+            self._skip_next_trajectory_refresh = True
 
     def clear_pseudofermion(self) -> None:
         if self.fermion_monomial is not None:
