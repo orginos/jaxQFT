@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JAX equivalent of torchQFT/hmc_phi4.py (core workflow)."""
+"""SMD/GHMC simulation for phi^4 theory in 2D."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import numpy as np
 if platform.system() == "Darwin" and "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
     os.environ["JAX_PLATFORMS"] = "cpu"
 
-# Allow running as `python scripts/phi4/hmc_phi4.py` from repository root.
+# Allow running as `python scripts/phi4/smd_phi4.py` from repository root.
 def _project_root() -> Path:
     p = Path(__file__).resolve()
     while p != p.parent:
@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
 
 from jaxqft.core.integrators import minnorm2
 from jaxqft.models.phi4 import Phi4
-from jaxqft.core.update import hmc
+from jaxqft.core.update import SMD
 from jaxqft.stats.autocorr import integrated_autocorr_time
 import jax
 
@@ -60,37 +60,43 @@ def analyze(obs2d: np.ndarray) -> dict:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="HMC for phi^4 theory in 2D")
-    ap.add_argument("--shape",      type=str,   default="64,64",  help="Lattice shape, e.g. 16,16")
-    ap.add_argument("--lam",        type=float, default=0.5,      help="Quartic coupling lambda")
-    ap.add_argument("--mass",       type=float, default=-0.205,   help="Bare mass")
-    ap.add_argument("--nwarm",      type=int,   default=100,      help="Warmup trajectories")
-    ap.add_argument("--nmeas",      type=int,   default=100,      help="Measurement steps")
-    ap.add_argument("--nskip",      type=int,   default=10,       help="Trajectories between measurements")
-    ap.add_argument("--batch-size", type=int,   default=16,       help="Batch size (independent chains)")
-    ap.add_argument("--nmd",        type=int,   default=7,        help="MD steps per trajectory")
-    ap.add_argument("--tau",        type=float, default=1.0,      help="Trajectory length")
-    ap.add_argument("--json-out",   type=str,   default=None,     help="Save results to JSON file")
+    ap = argparse.ArgumentParser(description="SMD/GHMC for phi^4 theory in 2D")
+    ap.add_argument("--shape",            type=str,   default="64,64",  help="Lattice shape, e.g. 16,16")
+    ap.add_argument("--lam",              type=float, default=0.5,      help="Quartic coupling lambda")
+    ap.add_argument("--mass",             type=float, default=-0.205,   help="Bare mass")
+    ap.add_argument("--nwarm",            type=int,   default=100,      help="Warmup trajectories (A/R disabled)")
+    ap.add_argument("--nmeas",            type=int,   default=100,      help="Measurement steps")
+    ap.add_argument("--nskip",            type=int,   default=10,       help="Trajectories between measurements")
+    ap.add_argument("--batch-size",       type=int,   default=16,       help="Batch size (independent chains)")
+    ap.add_argument("--nmd",              type=int,   default=7,        help="MD steps per trajectory")
+    ap.add_argument("--tau",              type=float, default=1.0,      help="Trajectory length")
+    ap.add_argument("--gamma",            type=float, default=0.3,      help="SMD friction coefficient")
+    ap.add_argument("--no-accept-reject", action="store_true",          help="Disable Metropolis A/R (pure SMD)")
+    ap.add_argument("--json-out",         type=str,   default=None,     help="Save results to JSON file")
     args = ap.parse_args()
 
-    lat = [int(x) for x in args.shape.split(",")]
-    Vol = int(np.prod(lat))
+    lat           = [int(x) for x in args.shape.split(",")]
+    Vol           = int(np.prod(lat))
+    accept_reject = not args.no_accept_reject
 
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
     print(f"Lattice: {lat}  lam={args.lam}  mass={args.mass}  batch={args.batch_size}")
     print(f"Integrator: minnorm2  nmd={args.nmd}  tau={args.tau}")
+    print(f"SMD gamma={args.gamma}  accept_reject={accept_reject}")
     print(f"Nwarm={args.nwarm}  Nmeas={args.nmeas}  Nskip={args.nskip}")
 
     sg    = Phi4(lat, args.lam, args.mass, batch_size=args.batch_size)
     phi   = sg.hotStart()
     mn2   = minnorm2(sg.force, sg.evolveQ, args.nmd, args.tau)
-    chain = hmc(T=sg, I=mn2, verbose=False)
+    chain = SMD(T=sg, I=mn2, gamma=args.gamma, accept_reject=accept_reject, verbose=False)
 
+    # Warmup with A/R disabled (pure MD thermalisation)
     tic = time.perf_counter()
-    phi = chain.evolve(phi, args.nwarm)
+    phi = chain.evolve(phi, args.nwarm, warmup=True)
     toc = time.perf_counter()
     print(f"Warmup done: {(toc - tic) * 1e6 / args.nwarm:.1f} μs/traj")
+    chain.reset_acceptance()
 
     obs_E        = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
     obs_phi      = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
@@ -123,7 +129,7 @@ def main():
     print(f"Measurement done: {(toc - tic) * 1e6 / (args.nmeas * args.nskip):.1f} μs/traj")
 
     # Connected susceptibility: chi_conn = <phi^2>*Vol - <phi>^2*Vol
-    m_phi_est   = float(np.mean(obs_phi))
+    m_phi_est    = float(np.mean(obs_phi))
     obs_chi_conn = obs_chi_raw - m_phi_est**2 * Vol
 
     r_phi = analyze(obs_phi)
@@ -133,7 +139,7 @@ def main():
     xi    = correlation_length(lat[0], r_chi["mean"], r_C2p["mean"])
     acc   = chain.calc_Acceptance()
 
-    print("\n--- Results (HMC) ---")
+    print("\n--- Results (SMD) ---")
     print(f"{'Observable':<10}  {'mean':>13}  {'sigma_mean':>13}  {'tau_int':>9}  {'ESS':>8}")
     print(f"{'av_phi':<10}  {r_phi['mean']:>+13.6f}  {r_phi['sigma']:>13.6f}  {r_phi['tau_int']:>9.2f}  {r_phi['ess']:>8.0f}")
     print(f"{'Chi_m':<10}  {r_chi['mean']:>+13.4f}  {r_chi['sigma']:>13.4f}  {r_chi['tau_int']:>9.2f}  {r_chi['ess']:>8.0f}")
@@ -144,9 +150,10 @@ def main():
 
     if args.json_out:
         out = dict(
-            updater="hmc", shape=lat, lam=args.lam, mass=args.mass,
+            updater="smd", shape=lat, lam=args.lam, mass=args.mass,
             nwarm=args.nwarm, nmeas=args.nmeas, nskip=args.nskip,
             batch_size=args.batch_size, nmd=args.nmd, tau=args.tau,
+            gamma=args.gamma, accept_reject=accept_reject,
             phi=r_phi, chi_m=r_chi, C2p=r_C2p, E=r_E,
             xi=float(xi), acceptance=float(acc),
         )

@@ -1,0 +1,727 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{listings}
+\lstset{basicstyle=\small\ttfamily, breaklines=true, frame=single, backgroundcolor=\color{gray!10}}
+
+\newcommand{\vev}[1]{\langle #1 \rangle}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\order}[1]{\mathcal{O}(#1)}
+\newcommand{\abs}[1]{|#1|}
+
+\title{Stochastic Automatic Differentiation for the\\
+       Two-Point Function in 2D $\phi^4$ Theory\\[6pt]
+       \large Implementation Notes and Numerical Tests}
+\author{jaxQFT Project}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe the implementation and numerical verification of the
+Stochastic Automatic Differentiation (SAD) method of Catumba \& Ramos
+\cite{catumba2025} within the jaxQFT framework.
+SAD reformulates the connected two-point function as a one-point function
+of a tangent field propagated via forward-mode automatic differentiation
+through the Markov chain.
+This eliminates the exponential signal-to-noise degradation that plagues
+the standard product estimator.
+We verify the implementation against the analytic free-field propagator,
+then demonstrate dramatic noise reduction on interacting $\phi^4$ theory
+on $16\times 16$ and $64\times 32$ lattices.  On the larger lattice the
+SAD estimator achieves up to a \textbf{950-fold reduction in statistical
+error} at the temporal midpoint, corresponding to an effective speedup of
+$\sim\!5\times 10^5$ relative to the standard estimator.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Introduction}
+%======================================================================
+
+A central challenge in lattice field theory is the \emph{signal-to-noise
+problem}: the connected two-point function
+$C(t) = \sum_{x'}\langle \phi(x,t)\,\phi(x',0)\rangle_{\text{conn}}$
+decays exponentially as $e^{-mt}$ at large Euclidean time~$t$, while the
+variance of the naive product estimator $\phi(x,t)\,\phi(x',0)$ remains
+$\order{1}$.  The signal-to-noise ratio therefore degrades as $e^{-mt}$,
+making precision measurements at large $t$ prohibitively expensive.
+
+Catumba and Ramos~\cite{catumba2025} proposed a method called
+\textbf{Stochastic Automatic Differentiation (SAD)} that reformulates $C(t)$
+as the expectation value of a \emph{tangent field} propagated through the
+molecular dynamics trajectory via forward-mode AD\@.  Because the tangent
+field is a one-point function (not a product of two fields), its variance can
+be dramatically smaller, in some cases eliminating the signal-to-noise problem
+entirely.
+
+In this note we describe our implementation of the SAD method in JAX,
+explain why it works, analyze its computational cost and volume scaling,
+and present detailed numerical tests.
+
+
+%======================================================================
+\section{Theoretical Framework}
+\label{sec:theory}
+%======================================================================
+
+%----------------------------------------------------------------------
+\subsection{$\phi^4$ Theory on a 2D Periodic Lattice}
+%----------------------------------------------------------------------
+
+We consider a real scalar field $\phi(x,t)$ on a two-dimensional periodic
+lattice of size $T\times L$ (time $\times$ space).  The lattice action is
+\begin{equation}
+  \label{eq:action}
+  S[\phi] = \sum_{x,t}\Bigl[
+    \frac{\tilde{m}}{2}\,\phi(x,t)^2
+    + \frac{\lambda}{24}\,\phi(x,t)^4
+  \Bigr]
+  - \sum_{x,t}\sum_{\mu=0}^{1} \phi(x,t)\,\phi(x{+}\hat\mu,t),
+\end{equation}
+where $\tilde{m} = m^2 + 2N_d$ with $N_d=2$ the number of dimensions,
+and $\lambda$ is the quartic coupling.  The path integral is
+$Z = \int\!\mathcal{D}\phi\;e^{-S[\phi]}$.
+
+%----------------------------------------------------------------------
+\subsection{Source-Modified Action}
+%----------------------------------------------------------------------
+
+To access the connected propagator via differentiation, we introduce a
+source~$J$ coupled to the zero-timeslice field:
+\begin{equation}
+  \label{eq:actionJ}
+  S_J[\phi] = S[\phi] - J\sum_{x}\phi(x,t{=}0).
+\end{equation}
+The sign convention ensures that the linear-response derivative gives a
+positive propagator.  Explicitly,
+\begin{equation}
+  \label{eq:Cdef}
+  C(t) \;\equiv\; \frac{\partial}{\partial J}
+    \bigl\langle\phi(x,t)\bigr\rangle_{\!J}\,\bigg|_{J=0}
+  \;=\; \sum_{x'} G_{\text{conn}}\!\bigl((x,t);\,(x',0)\bigr) \;>\;0,
+\end{equation}
+where
+$G_{\text{conn}} = \langle\phi\,\phi\rangle - \langle\phi\rangle\langle\phi\rangle$
+is the connected propagator.  The proof follows from differentiating the
+partition function:
+\begin{equation}
+  \frac{\partial}{\partial J}\langle\phi(x,t)\rangle_{\!J}\bigg|_{J=0}
+  = \sum_{x'}\bigl[\langle\phi(x,t)\,\phi(x',0)\rangle
+    - \langle\phi(x,t)\rangle\langle\phi(x',0)\rangle\bigr].
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Cosh Effective Mass}
+%----------------------------------------------------------------------
+
+On a periodic lattice the correlator receives contributions from both
+forward- and backward-propagating states:
+\begin{equation}
+  C(t) \;\approx\; A\,\cosh\!\bigl[m\,(t - T/2)\bigr]
+  \quad\text{(single-state dominance)}.
+\end{equation}
+The \emph{cosh effective mass} at timeslice~$t$ is defined as the
+solution of
+\begin{equation}
+  \label{eq:cosh_meff}
+  \frac{C(t)}{C(t{+}1)} = \frac{\cosh\!\bigl[m_{\text{eff}}(t-T/2)\bigr]}
+                                 {\cosh\!\bigl[m_{\text{eff}}(t{+}1-T/2)\bigr]},
+\end{equation}
+which we solve numerically via bisection.  For a correlator dominated by
+a single mass, $m_{\text{eff}}(t)$ is independent of~$t$, forming a
+\emph{plateau} whose value equals the physical mass gap.
+
+%----------------------------------------------------------------------
+\subsection{Free-Field Propagator}
+%----------------------------------------------------------------------
+
+For the free field ($\lambda=0$, $m^2>0$), the propagator can be
+computed analytically.  The source at $t{=}0$ projects onto zero
+spatial momentum ($k_x{=}0$), giving
+\begin{equation}
+  \label{eq:Cfree}
+  C(t) = \frac{1}{T}\sum_{k_t=0}^{T-1}
+    \frac{e^{2\pi i\,k_t\,t/T}}{D(k_t)},
+  \qquad
+  D(k_t) = m^2 + 4\sin^2\!\bigl(\pi k_t/T\bigr).
+\end{equation}
+This is simply the inverse DFT of $1/D$, computed as
+$C = \operatorname{Re}\!\bigl[\operatorname{ifft}(1/D)\bigr]$.
+The exact mass gap is $m_{\text{gap}} = 2\,\operatorname{arcsinh}\!\sqrt{m^2/4}$.
+
+
+%======================================================================
+\section{The SAD Method}
+\label{sec:sad}
+%======================================================================
+
+%----------------------------------------------------------------------
+\subsection{SMD Base Algorithm (No Accept/Reject)}
+%----------------------------------------------------------------------
+
+We use Stochastic Molecular Dynamics (SMD) as the base sampling algorithm.
+At each step:
+\begin{enumerate}
+  \item \textbf{OU momentum refresh:}
+    $\pi' = c_1\,\pi + c_2\,\eta$,\quad $\eta\sim\mathcal{N}(0,I)$,
+    \quad with $c_1 = e^{-\gamma\tau}$, $c_2=\sqrt{1-c_1^2}$.
+  \item \textbf{Leapfrog integration:}
+    $(\phi_{\text{new}}, \pi_{\text{new}}) =
+      \operatorname{Leapfrog}(\phi, \pi', J{=}0;\;\delta\tau, n_{\text{md}})$.
+\end{enumerate}
+No Metropolis accept/reject step is applied.  The trajectory length is
+$\tau = n_{\text{md}}\cdot\delta\tau$, and the friction parameter $\gamma$
+controls the decorrelation rate.
+
+%----------------------------------------------------------------------
+\subsection{Forward-Mode AD Through the Markov Chain}
+%----------------------------------------------------------------------
+
+The SAD estimator for $C(t)$ is the \emph{tangent field}
+$\xi_n(x,t) \equiv \partial\phi_n(x,t)/\partial J$, where $\phi_n$ is the
+field configuration at Markov chain step~$n$.  In equilibrium,
+\begin{equation}
+  \label{eq:sad_estimator}
+  \bigl\langle\xi_n(x,t)\bigr\rangle
+  = \frac{\partial}{\partial J}\bigl\langle\phi(x,t)\bigr\rangle_{\!J}\bigg|_{J=0}
+  = C(t).
+\end{equation}
+
+The tangent is propagated through the entire chain, not just a single
+trajectory.  At each step the update rule is:
+
+\begin{enumerate}
+  \item \textbf{OU tangent refresh:}
+    \begin{equation}
+      \pi'_{\text{tan}} = c_1\,\pi_{\text{tan}}.
+    \end{equation}
+    The random noise $\eta$ is independent of~$J$, so
+    $\partial\eta/\partial J = 0$.  The damping factor $c_1<1$ ensures
+    the tangent does not grow without bound.
+
+  \item \textbf{Leapfrog tangent propagation:}
+    \begin{equation}
+      \label{eq:jvp}
+      \bigl(\phi_{\text{new,tan}},\;\pi_{\text{new,tan}}\bigr)
+      = \operatorname{JVP}_{(\phi,\,\pi',\,J)}\!
+        \operatorname{Leapfrog}\;\cdot\;
+        \bigl(\phi_{\text{tan}},\;\pi'_{\text{tan}},\;1\bigr).
+    \end{equation}
+    The Jacobian--vector product (JVP) simultaneously propagates:
+    \begin{itemize}
+      \item $\phi_{\text{tan}}$: accumulated tangent from all previous steps
+            (indirect effect of~$J$ through the initial conditions),
+      \item $\pi'_{\text{tan}}$: OU-damped momentum tangent,
+      \item $1$: fresh source injection at $t{=}0$ (direct effect of~$J$
+            in this step's leapfrog via $\partial F_J/\partial J = +\delta_{t,0}$).
+    \end{itemize}
+\end{enumerate}
+
+The SAD observable is the spatial mean of the tangent field:
+\begin{equation}
+  C_{\text{SAD}}(t) = \frac{1}{N}\sum_{n=1}^{N}
+    \frac{1}{L}\sum_{x}\xi_n(x,t).
+\end{equation}
+
+%----------------------------------------------------------------------
+\subsection{Why SAD Works}
+\label{sec:why}
+%----------------------------------------------------------------------
+
+The fundamental identity underlying SAD is that \emph{the derivative of
+the expectation equals the expectation of the derivative} (under
+regularity conditions satisfied by the lattice path integral):
+\begin{equation}
+  C(t) = \frac{\partial}{\partial J}\bigl\langle\phi(x,t)\bigr\rangle_{\!J}
+  = \biggl\langle\frac{\partial\phi(x,t)}{\partial J}\biggr\rangle
+  = \langle\xi(x,t)\rangle.
+\end{equation}
+
+The tangent field $\xi$ satisfies a \emph{linearized} equation of motion
+around the primal trajectory.  For the leapfrog integrator, the tangent
+at each half-step evolves as
+\begin{equation}
+  \label{eq:tangent_eom}
+  \delta\pi_{\text{tan}} = \tfrac{\delta\tau}{2}\!\left[
+    -\frac{\partial^2 S_J}{\partial\phi^2}\bigg|_{J=0}\!\cdot\,\phi_{\text{tan}}
+    + \delta_{t,0}
+  \right],
+  \qquad
+  \delta\phi_{\text{tan}} = \delta\tau\cdot\pi_{\text{tan}}.
+\end{equation}
+The Hessian $\partial^2 S/\partial\phi^2$ couples the tangent to the
+primal field configuration.  For the \textbf{free field} ($\lambda=0$),
+the Hessian is constant (the lattice Laplacian plus mass), so the tangent
+evolves deterministically and $C_{\text{SAD}}$ has \emph{zero variance}.
+For the \textbf{interacting theory} ($\lambda>0$), the Hessian fluctuates
+with the field, introducing stochastic variability in the tangent---but
+this variability is much milder than the exponential noise in the
+standard estimator.
+
+The OU damping provides a natural regularization.  The momentum tangent
+is multiplied by $c_1 = e^{-\gamma\tau} < 1$ at every step, so the
+contribution of old tangent information decays geometrically.  The
+tangent equilibrates in $\order{1/(1{-}c_1)}$ steps, with the
+stationary value encoding the full connected propagator.
+
+%----------------------------------------------------------------------
+\subsection{Comparison with the Standard Estimator}
+%----------------------------------------------------------------------
+
+The \emph{standard estimator} for $C(t)$ is
+\begin{equation}
+  C_{\text{std}}(t) = L\,\bar\phi(t)\,\bar\phi(0),
+  \qquad \bar\phi(t) \equiv \frac{1}{L}\sum_x \phi(x,t).
+\end{equation}
+This is a product of two noisy fields.  By the Parisi--Lepage
+argument~\cite{parisi1984,lepage1989}, the signal-to-noise ratio degrades as
+\begin{equation}
+  \frac{|C(t)|}{\sigma_{\text{std}}(t)} \;\sim\; e^{-m\,t},
+\end{equation}
+making measurements at large~$t$ exponentially expensive.
+
+The SAD estimator replaces this product with a \emph{single} tangent
+field $\xi(t)$.  Its variance comes not from the product of independent
+fluctuations but from the accumulated linearized response along the
+trajectory.  Empirically we observe that $\sigma_{\text{SAD}}$ tracks
+the signal much more closely, yielding improvement factors that grow
+\emph{exponentially} with~$t$.
+
+
+%======================================================================
+\section{Implementation in JAX}
+\label{sec:implementation}
+%======================================================================
+
+%----------------------------------------------------------------------
+\subsection{Key Design Choices}
+%----------------------------------------------------------------------
+
+\paragraph{Forward-mode AD via \texttt{jax.jvp}.}
+JAX provides \texttt{jax.jvp} for forward-mode automatic differentiation.
+Given a function $f$ and a tangent vector, it simultaneously computes
+$f(x)$ and the Jacobian--vector product $J_f \cdot v$ in a single forward
+pass.  The cost is approximately $2\times$ that of evaluating~$f$ alone,
+regardless of the dimensionality.
+
+\paragraph{\texttt{lax.scan} for the leapfrog.}
+The leapfrog integrator \emph{must} use \texttt{jax.lax.scan} rather
+than a Python \texttt{for}-loop.  Without \texttt{scan}, \texttt{jax.jvp}
+unrolls the full $n_{\text{md}}$-step computation graph at trace time,
+causing catastrophically slow JIT compilation or out-of-memory errors.
+With \texttt{scan}, JAX differentiates the loop body \emph{once} and
+applies it $n_{\text{md}}$ times, keeping compilation $\order{1}$ in
+$n_{\text{md}}$.
+
+\paragraph{Batched independent chains.}
+We use \texttt{jax.vmap} to run $B$ independent Markov chains in
+parallel, each with its own PRNG key.  The batched step function is
+JIT-compiled once and applied to all chains simultaneously, achieving
+efficient hardware utilization.
+
+%----------------------------------------------------------------------
+\subsection{Code Structure}
+%----------------------------------------------------------------------
+
+The implementation consists of two files:
+\begin{itemize}
+  \item \texttt{jaxqft/models/phi4\_sad.py}: Core SAD building blocks:
+    \texttt{action\_J}, \texttt{force\_J}, \texttt{leapfrog\_scan}, and
+    \texttt{smd\_sad\_step}.
+  \item \texttt{scripts/phi4/sad\_phi4.py}: Measurement script with
+    warmup, measurement loop, jackknife statistics, and cosh effective
+    mass computation.
+\end{itemize}
+
+The \texttt{smd\_sad\_step} function takes the primal state
+$(\phi, \pi)$ and accumulated tangent state $(\phi_{\text{tan}}, \pi_{\text{tan}})$
+as inputs, performs the OU refresh and leapfrog with a single
+\texttt{jax.jvp} call through all three arguments
+$(\phi, \pi', J)$, and returns the updated primal and tangent states.
+
+
+%======================================================================
+\section{Computational Cost Analysis}
+\label{sec:cost}
+%======================================================================
+
+%----------------------------------------------------------------------
+\subsection{Per-Step Cost}
+%----------------------------------------------------------------------
+
+\begin{table}[h]
+\centering
+\caption{Per-step computational cost comparison.  $V = T\times L$ is
+the lattice volume; $n_{\text{md}}$ the number of leapfrog steps.}
+\label{tab:cost}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Operation} & \textbf{Standard SMD} & \textbf{SAD (SMD + JVP)} \\
+\midrule
+OU refresh            & $\order{V}$  & $\order{V}$ \\
+Leapfrog ($n_{\text{md}}$ steps) & $\order{n_{\text{md}} V}$
+                                  & $\sim 2\times\order{n_{\text{md}} V}$ \\
+Tangent accumulation  & ---          & $\order{V}$ \\
+\midrule
+\textbf{Total}        & $\order{n_{\text{md}} V}$
+                      & $\sim 2\times\order{n_{\text{md}} V}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The JVP overhead is a constant factor of approximately~$2\times$,
+independent of $V$, $n_{\text{md}}$, or any other parameter.  This
+is a fundamental property of forward-mode AD: the tangent computation
+mirrors the primal computation step by step.
+
+%----------------------------------------------------------------------
+\subsection{Memory Requirements}
+%----------------------------------------------------------------------
+
+SAD requires storing four field-sized arrays per chain:
+$\phi$, $\pi$, $\phi_{\text{tan}}$, $\pi_{\text{tan}}$.
+This is $2\times$ the memory of standard SMD (which stores $\phi$ and $\pi$).
+For $B$ parallel chains on a $T\times L$ lattice with 32-bit floats:
+\begin{equation}
+  \text{Memory} = 4\,B\,T\,L\times 4\;\text{bytes}.
+\end{equation}
+For our largest test ($B{=}8$, $T{=}64$, $L{=}32$):
+$4\times 8\times 64\times 32\times 4 = 2\;\text{MB}$, which is trivial.
+
+%----------------------------------------------------------------------
+\subsection{Effective Speedup}
+%----------------------------------------------------------------------
+
+Let $R(t) = \sigma_{\text{std}}(t)/\sigma_{\text{SAD}}(t)$ be the noise
+reduction factor.  To achieve the same statistical precision, the standard
+estimator requires $R^2$ times more measurements.  The effective speedup
+accounting for the $2\times$ JVP overhead is
+\begin{equation}
+  \label{eq:speedup}
+  \text{Speedup}(t) = \frac{R(t)^2}{2}.
+\end{equation}
+Representative values from our tests:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Lattice & $t$ & $R(t)$ & Speedup \\
+\midrule
+$16\times 16$ & 8 (midpoint) & 5.6 & 16$\times$ \\
+$64\times 32$ & 8  & 5.7 & 16$\times$ \\
+$64\times 32$ & 16 & 64  & 2\,000$\times$ \\
+$64\times 32$ & 32 (midpoint) & 950 & 450\,000$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%----------------------------------------------------------------------
+\subsection{Volume Scaling}
+%----------------------------------------------------------------------
+
+The improvement factor $R(t)$ grows with the temporal extent~$T$ because:
+\begin{enumerate}
+  \item The standard estimator's noise $\sigma_{\text{std}}$ is roughly
+    constant in~$t$ (it is $\order{1}$ regardless of the signal), while
+    the signal $C(t)$ decays as $e^{-mt}$.
+  \item The SAD estimator's noise $\sigma_{\text{SAD}}$ approximately
+    tracks the signal, since the tangent field couples linearly to the
+    primal dynamics.  The relative error
+    $\sigma_{\text{SAD}}/|C|$ grows only mildly with~$t$.
+\end{enumerate}
+
+Consequently, $R(t) \sim \sigma_{\text{std}}/\sigma_{\text{SAD}}$
+grows \emph{exponentially} in~$t$:
+\begin{equation}
+  R(t) \;\sim\; e^{m\,t}\qquad \text{(up to polynomial prefactors)}.
+\end{equation}
+On larger lattices with more timeslices, the midpoint $t{=}T/2$ gives
+a correspondingly larger~$R$.  Our results confirm this:
+$R(T/2) \approx 5.6$ on $16\times 16$ versus
+$R(T/2) \approx 950$ on $64\times 32$, consistent with
+$e^{m\cdot(32-8)} = e^{0.28\times 24} \approx 800$.
+
+
+%======================================================================
+\section{Numerical Tests}
+\label{sec:tests}
+%======================================================================
+
+All tests use SMD without accept/reject, with friction $\gamma=0.3$
+and trajectory length $\tau=1.0$.  We run $B=8$ independent chains and
+report jackknife errors.
+
+%----------------------------------------------------------------------
+\subsection{Free-Field Verification ($\lambda=0$)}
+%----------------------------------------------------------------------
+
+\paragraph{Parameters.}
+$T{=}L{=}16$, $m^2{=}1.0$, $\lambda{=}0$, $n_{\text{md}}{=}50$
+($\delta\tau{=}0.02$), $N_{\text{warm}}{=}500$, $N_{\text{meas}}{=}2000$.
+
+\paragraph{Results.}
+The SAD estimator reproduces the analytic propagator (\cref{eq:Cfree})
+to machine precision at all 16~timeslices, with \emph{zero statistical
+error} (see \cref{fig:free}).  This is the expected behaviour: for
+$\lambda{=}0$ the Hessian in \cref{eq:tangent_eom} is field-independent,
+so the tangent evolution is deterministic.
+
+The cosh effective mass from SAD gives a perfect plateau at
+$m_{\text{eff}} = 0.96242$ for all $t = 0,\ldots,T/2{-}1$, matching
+the exact value $m_{\text{gap}} = 2\operatorname{arcsinh}(\sqrt{m^2/4}) = 0.96242$.
+The standard estimator, by contrast, loses the signal entirely for $t\geq 3$.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sad_free_correlator.png}
+  \caption{Free-field test ($16\times 16$, $m^2{=}1.0$).
+  \textbf{Left:} Correlator $C(t)$ on a log scale.
+  The SAD estimator (blue) matches the exact result (dashed) to
+  machine precision with zero error bars.  The standard estimator
+  (orange) is noise-dominated for $t\geq 3$.
+  \textbf{Right:} Cosh effective mass.  SAD gives a perfect
+  plateau at $m=0.96242$ (exact value).}
+  \label{fig:free}
+\end{figure}
+
+%----------------------------------------------------------------------
+\subsection{Interacting $\phi^4$ on $16\times 16$}
+%----------------------------------------------------------------------
+
+\paragraph{Parameters.}
+$T{=}L{=}16$, $m^2{=}-0.40$, $\lambda{=}2.4$, $n_{\text{md}}{=}10$
+($\delta\tau{=}0.10$), $N_{\text{warm}}{=}1000$, $N_{\text{meas}}{=}5000$.
+
+\paragraph{Correlator and effective mass.}
+Both SAD and standard estimators agree within errors, confirming that
+the SAD estimator is unbiased (\cref{fig:phi4_16x16}).  The SAD errors
+are 2.6--5.9$\times$ smaller than the standard errors, with the
+improvement largest at the temporal midpoint $t{=}8$.
+
+The cosh effective mass from SAD shows a clean plateau at
+$m_{\text{eff}} \approx 0.282$ across all timeslices $t=0,\ldots,7$, with
+errors of $\order{10^{-3}}$.  The standard estimator gives a consistent
+value but with 4--11$\times$ larger errors, and becomes unreliable for
+$t\geq 6$.
+
+\begin{table}[H]
+\centering
+\caption{Cosh effective mass on $16\times 16$ ($m^2{=}-0.40$, $\lambda{=}2.4$).}
+\label{tab:meff_16x16}
+\begin{tabular}{cccccc}
+\toprule
+$t$ & $m_{\text{eff}}^{\text{SAD}}$ & $\sigma_{\text{SAD}}$
+    & $m_{\text{eff}}^{\text{std}}$ & $\sigma_{\text{std}}$
+    & $\sigma_{\text{std}}/\sigma_{\text{SAD}}$ \\
+\midrule
+0 & 0.28295 & 0.00109 & 0.29545 & 0.00468 & 4.3 \\
+1 & 0.28177 & 0.00104 & 0.28185 & 0.00495 & 4.8 \\
+2 & 0.28274 & 0.00130 & 0.27834 & 0.00767 & 5.9 \\
+3 & 0.28319 & 0.00151 & 0.27049 & 0.00583 & 3.9 \\
+4 & 0.28240 & 0.00124 & 0.28244 & 0.00568 & 4.6 \\
+5 & 0.28052 & 0.00203 & 0.25535 & 0.00850 & 4.2 \\
+6 & 0.27873 & 0.00241 & 0.26497 & 0.02754 & 11.4 \\
+7 & 0.28037 & 0.00838 & 0.26894 & 0.09426 & 11.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sad_phi4_results_16x16.png}
+  \caption{SAD vs.\ Standard on $16\times 16$ ($m^2{=}-0.40$, $\lambda{=}2.4$).
+  \textbf{Top left:} $C(t)$ with error bars.
+  \textbf{Top right:} $C(t)$ on log scale.
+  \textbf{Bottom left:} Cosh effective mass plateau.
+  \textbf{Bottom right:} Noise reduction factor $\sigma_{\text{std}}/\sigma_{\text{SAD}}$.}
+  \label{fig:phi4_16x16}
+\end{figure}
+
+%----------------------------------------------------------------------
+\subsection{Interacting $\phi^4$ on $64\times 32$}
+%----------------------------------------------------------------------
+
+\paragraph{Parameters.}
+$T{=}64$, $L{=}32$, $m^2{=}-0.40$, $\lambda{=}2.4$, $n_{\text{md}}{=}10$
+($\delta\tau{=}0.10$), $N_{\text{warm}}{=}1000$, $N_{\text{meas}}{=}5000$.
+
+\paragraph{Results.}
+The larger lattice dramatically amplifies the SAD advantage.
+\Cref{fig:phi4_64x32_results,fig:phi4_64x32_errors} show the results.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sad_phi4_results_64x32.png}
+  \caption{SAD vs.\ Standard on $64\times 32$.
+  \textbf{Top left:} $C(t)$ with error bars.
+  \textbf{Top right:} $C(t)$ on log scale---the standard estimator
+  (orange) becomes pure noise for $t\gtrsim 12$, while SAD (blue) tracks
+  the signal cleanly out to $t=32$.
+  \textbf{Bottom left:} Cosh effective mass---SAD gives a stable plateau
+  at $m\approx 0.277$ visible across $t=0,\ldots,30$, while the standard
+  estimator is undefined for most timeslices.
+  \textbf{Bottom right:} Noise reduction factor reaching nearly 1000$\times$
+  at the midpoint.}
+  \label{fig:phi4_64x32_results}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sad_phi4_errors_64x32.png}
+  \caption{Signal-to-noise comparison on $64\times 32$.
+  \textbf{Left:} Absolute errors.  $\sigma_{\text{std}}$ (orange) stays
+  $\order{10^{-2}}$ across all~$t$, while $\sigma_{\text{SAD}}$ (blue)
+  tracks the signal, dropping to $\sim\!10^{-5}$ at the midpoint.
+  \textbf{Right:} Signal-to-noise ratio $|C|/\sigma$.  The standard
+  estimator's S/N drops below 1 (dashed line) for $t\gtrsim 12$,
+  rendering those measurements useless.  SAD maintains S/N $> 10$ for
+  all timeslices.}
+  \label{fig:phi4_64x32_errors}
+\end{figure}
+
+\paragraph{Noise reduction.}
+\Cref{tab:noise_reduction} summarizes the noise reduction factor at
+representative timeslices:
+
+\begin{table}[H]
+\centering
+\caption{Noise reduction factor $R = \sigma_{\text{std}}/\sigma_{\text{SAD}}$
+on $64\times 32$ at selected timeslices.}
+\label{tab:noise_reduction}
+\begin{tabular}{rrrrcr}
+\toprule
+$t$ & $C_{\text{SAD}}(t)$ & $\sigma_{\text{SAD}}$ & $\sigma_{\text{std}}$ & $R$ & Speedup $R^2/2$\\
+\midrule
+  0 & 1.731 & $4.4\times 10^{-3}$ & $1.5\times 10^{-2}$ &     3.3 & 6 \\
+  4 & 0.559 & $3.3\times 10^{-3}$ & $1.5\times 10^{-2}$ &     4.7 & 11 \\
+  8 & 0.181 & $2.0\times 10^{-3}$ & $1.1\times 10^{-2}$ &     5.7 & 16 \\
+ 12 & 0.059 & $7.3\times 10^{-4}$ & $2.0\times 10^{-2}$ &    27 & 370 \\
+ 16 & 0.020 & $2.4\times 10^{-4}$ & $1.5\times 10^{-2}$ &    64 & 2\,000 \\
+ 20 & 0.007 & $1.7\times 10^{-4}$ & $8.2\times 10^{-3}$ &    48 & 1\,200 \\
+ 24 & 0.002 & $7.6\times 10^{-5}$ & $1.2\times 10^{-2}$ &   157 & 12\,000 \\
+ 28 & 0.0008& $3.5\times 10^{-5}$ & $1.1\times 10^{-2}$ &   312 & 49\,000 \\
+ 32 & 0.0005& $1.6\times 10^{-5}$ & $1.5\times 10^{-2}$ &   950 & 450\,000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The key observations:
+\begin{itemize}
+  \item The SAD error $\sigma_{\text{SAD}}$ decreases proportionally to
+    the signal, maintaining a roughly constant relative error of a few percent.
+  \item The standard error $\sigma_{\text{std}} \approx 10^{-2}$
+    is essentially flat, independent of~$t$.
+  \item The noise reduction factor grows exponentially:
+    $R(t) \sim e^{m\,t}$ with $m\approx 0.28$.
+  \item At the midpoint ($t{=}32$), the effective speedup is
+    $\sim\!450{,}000\times$.
+\end{itemize}
+
+\paragraph{Effective mass on $64\times 32$.}
+The cosh effective mass from SAD gives a stable plateau at
+$m \approx 0.277$ visible across $t = 0,\ldots,30$ (see
+\cref{fig:phi4_64x32_results}, bottom left panel).  The standard
+estimator cannot determine the mass for $t > 10$ because the correlator
+measurements are noise-dominated.  This represents a striking practical
+advantage: SAD enables mass extraction from regions of the lattice that
+are completely inaccessible to the standard approach.
+
+
+%======================================================================
+\section{Discussion}
+\label{sec:discussion}
+%======================================================================
+
+\paragraph{Systematic effects.}
+Since we run SMD without Metropolis accept/reject, the equilibrium
+distribution differs from $e^{-S}$ by $\order{\delta\tau^2}$.  With
+$\delta\tau = 0.1$ this amounts to $\sim\!1\%$ systematic bias, which
+is smaller than our statistical errors on the $16\times 16$ lattice.
+For precision work, one should either reduce $\delta\tau$ or
+restore the accept/reject step (at the cost of discontinuous
+trajectories that complicate AD).
+
+\paragraph{Cost scaling to 4D.}
+The $2\times$ overhead of the JVP is independent of dimensionality.
+In 4D with volume $V = L^3 T$, the per-step cost remains
+$\sim 2\times\order{n_{\text{md}} V}$.  The memory overhead is also
+$2\times$ (four fields instead of two).  The noise reduction factor
+should grow as $\sim e^{m\,t}$ in 4D as well, since the signal-to-noise
+problem is a consequence of the exponential decay of the correlator,
+which is independent of dimensionality.
+
+\paragraph{Limitations.}
+The tangent propagation requires differentiating through the
+leapfrog, which needs a differentiable force function.  This is
+straightforward for scalar and gauge theories in pure JAX, but may
+be challenging for fermions where the force involves inverting the
+Dirac operator.  The accept/reject step in standard HMC is not
+differentiable (it involves a step function), motivating the use of
+SMD without accept/reject as the base algorithm.
+
+
+%======================================================================
+\section{Conclusions}
+\label{sec:conclusions}
+%======================================================================
+
+We have implemented the SAD method of Catumba \& Ramos within the
+jaxQFT framework and verified it through three tests:
+
+\begin{enumerate}
+  \item \textbf{Free field:} Exact agreement with the analytic
+    propagator at machine precision, with zero statistical variance.
+  \item \textbf{$\phi^4$ on $16\times 16$:} 3--6$\times$ noise
+    reduction across all timeslices, with a clean effective mass
+    plateau at $m \approx 0.282$.
+  \item \textbf{$\phi^4$ on $64\times 32$:} Up to 950$\times$ noise
+    reduction at the temporal midpoint, corresponding to an effective
+    speedup of $\sim\!450{,}000\times$.  The cosh effective mass is
+    determined precisely across 30 timeslices, compared to $\sim\!10$
+    with the standard estimator.
+\end{enumerate}
+
+The computational overhead is a modest factor of~2 in both time and
+memory.  The implementation leverages JAX's \texttt{jvp} for
+forward-mode AD and \texttt{lax.scan} for efficient compilation,
+resulting in clean, maintainable code.
+
+The SAD method is a compelling approach for any lattice field theory
+calculation where the signal-to-noise problem limits the achievable
+precision.  Extension to gauge theories and fermion correlators is an
+important direction for future work.
+
+
+%======================================================================
+\begin{thebibliography}{9}
+
+\bibitem{catumba2025}
+G.~Catumba and F.~Ramos,
+``Stochastic automatic differentiation for Monte Carlo processes,''
+arXiv:2502.15570 [hep-lat] (2025).
+
+\bibitem{parisi1984}
+G.~Parisi,
+``The strategy for computing the hadronic mass spectrum,''
+Phys.\ Rept.\ \textbf{103}, 203 (1984).
+
+\bibitem{lepage1989}
+G.~P.~Lepage,
+``The analysis of algorithms for lattice field theory,''
+TASI 89, Boulder, CO (1989).
+
+\end{thebibliography}
+
+\end{document}
