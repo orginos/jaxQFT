@@ -95,6 +95,9 @@ Last updated: 2026-02-27
   - 2nd-order (`leapfrog`, `minnorm2`) and 4th-order (`forcegrad`, `minnorm4pf4`) in `jaxqft/core/integrators.py`.
 - Diagnostics/tests in model CLIs:
   - `layout`, `timing`, `fd`, `autodiff`, `eps2`, `eps4`, `gauge`, `forcecov`, `forceimpl`, `selfcheck`.
+  - `su3_wilson_nf2` now also includes:
+    - `pfsolve`: pseudofermion solver-path consistency (`normal` residuals; split/eo-split cross-checks when non-Hermitian solvers are used)
+    - `pfcov`: pseudofermion-force gauge covariance (autodiff and analytic)
 - Inline measurement infrastructure:
   - `jaxqft/core/measurements.py`
   - `MeasurementContext` provides per-step data handoff between ordered measurements.

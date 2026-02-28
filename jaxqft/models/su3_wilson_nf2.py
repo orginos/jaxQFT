@@ -2018,6 +2018,175 @@ def test_pseudofermion_force_compare(
     }
 
 
+def test_pseudofermion_solver_consistency(
+    th: SU3WilsonNf2,
+    q_scale: float = 0.05,
+    n_trials: int = 2,
+) -> Dict[str, float]:
+    if th.fermion_monomial is None:
+        return {"enabled": 0.0}
+
+    m = th.fermion_monomial
+    have_split = bool(th.solver_kind in ("bicgstab", "gmres"))
+
+    rel_res_n = []
+    rel_act_split = []
+    rel_x_split = []
+    rel_r1_split = []
+    rel_r2_split = []
+    rel_rt_split = []
+    rel_x_eo = []
+    rel_r1_eo = []
+    rel_r2_eo = []
+    rel_rt_eo = []
+
+    def _mean_rel(a: Array, b: Array) -> float:
+        an = jax.vmap(_field_norm, in_axes=0)(a)
+        bn = jax.vmap(_field_norm, in_axes=0)(b)
+        return float(jnp.mean(an / (bn + 1e-30)))
+
+    def _mean_rel_diff(a: Array, b: Array) -> float:
+        return _mean_rel(a - b, b)
+
+    for _ in range(max(1, int(n_trials))):
+        U = th.hot_start(scale=q_scale)
+        m.refresh(U, traj_length=1.0)
+        assert m.phi is not None
+        phi = m.phi
+
+        if th.fermion_monomial_kind == "eo_preconditioned":
+            x_n = th.solve_eop_even_normal(U, phi)
+            y_n = th.apply_eo_schur_even(U, x_n, normalized=True)
+            r_n = th.apply_eo_schur_even_dagger(U, y_n, normalized=True) - phi
+            rel_res_n.append(_mean_rel(r_n, phi))
+
+            if have_split:
+                x_s, y_s = th.solve_eop_even_split_with_intermediate(U, phi)
+                r1 = th.apply_eo_schur_even_dagger(U, y_s, normalized=True) - phi
+                r2 = th.apply_eo_schur_even(U, x_s, normalized=True) - y_s
+                rt = th.apply_eo_schur_even_dagger(
+                    U, th.apply_eo_schur_even(U, x_s, normalized=True), normalized=True
+                ) - phi
+                Sn = jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(phi, x_n))
+                Ss = jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(y_s, y_s))
+                rel_act_split.append(float(jnp.mean(jnp.abs(Sn - Ss) / (jnp.abs(Sn) + 1e-30))))
+                rel_x_split.append(_mean_rel_diff(x_s, x_n))
+                rel_r1_split.append(_mean_rel(r1, phi))
+                rel_r2_split.append(_mean_rel(r2, y_s))
+                rel_rt_split.append(_mean_rel(rt, phi))
+        else:
+            x_n = th.solve_normal(U, phi)
+            y_n = th.apply_D(U, x_n)
+            r_n = th.apply_Ddag(U, y_n) - phi
+            rel_res_n.append(_mean_rel(r_n, phi))
+
+            if have_split:
+                x_s, y_s = th.solve_split_with_intermediate(U, phi)
+                r1 = th.apply_Ddag(U, y_s) - phi
+                r2 = th.apply_D(U, x_s) - y_s
+                rt = th.apply_normal(U, x_s) - phi
+                Sn = jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(phi, x_n))
+                Ss = jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(y_s, y_s))
+                rel_act_split.append(float(jnp.mean(jnp.abs(Sn - Ss) / (jnp.abs(Sn) + 1e-30))))
+                rel_x_split.append(_mean_rel_diff(x_s, x_n))
+                rel_r1_split.append(_mean_rel(r1, phi))
+                rel_r2_split.append(_mean_rel(r2, y_s))
+                rel_rt_split.append(_mean_rel(rt, phi))
+
+                y_e = th.solve_dagger_eo(U, phi)
+                x_e = th.solve_direct_eo(U, y_e)
+                r1e = th.apply_Ddag(U, y_e) - phi
+                r2e = th.apply_D(U, x_e) - y_e
+                rte = th.apply_normal(U, x_e) - phi
+                rel_x_eo.append(_mean_rel_diff(x_e, x_n))
+                rel_r1_eo.append(_mean_rel(r1e, phi))
+                rel_r2_eo.append(_mean_rel(r2e, y_e))
+                rel_rt_eo.append(_mean_rel(rte, phi))
+
+    out = {
+        "enabled": 1.0,
+        "split_enabled": float(1.0 if have_split else 0.0),
+        "mean_rel_residual_normal": float(np.mean(rel_res_n)),
+    }
+    if have_split and rel_act_split:
+        out.update(
+            {
+                "mean_rel_action_split_vs_normal": float(np.mean(rel_act_split)),
+                "mean_rel_x_split_vs_normal": float(np.mean(rel_x_split)),
+                "mean_rel_residual_split_stage1": float(np.mean(rel_r1_split)),
+                "mean_rel_residual_split_stage2": float(np.mean(rel_r2_split)),
+                "mean_rel_residual_split_total": float(np.mean(rel_rt_split)),
+            }
+        )
+    if have_split and rel_x_eo:
+        out.update(
+            {
+                "mean_rel_x_eo_vs_normal": float(np.mean(rel_x_eo)),
+                "mean_rel_residual_eo_stage1": float(np.mean(rel_r1_eo)),
+                "mean_rel_residual_eo_stage2": float(np.mean(rel_r2_eo)),
+                "mean_rel_residual_eo_total": float(np.mean(rel_rt_eo)),
+            }
+        )
+    return out
+
+
+def test_pseudofermion_force_gauge_covariance(
+    th: SU3WilsonNf2,
+    q_scale: float = 0.05,
+    omega_scale: float = 0.05,
+    n_trials: int = 3,
+    gauge_exp_method: str = "expm",
+) -> Dict[str, float]:
+    if th.fermion_monomial is None:
+        return {"enabled": 0.0}
+
+    m = th.fermion_monomial
+    rel_ad = []
+    rel_an = []
+
+    def _covariantize_force(F: Array, Om: Array) -> Array:
+        F_cov_mu = []
+        for mu in range(th.Nd):
+            F_mu = th._take_mu(F, mu)
+            F_cov_mu.append(_dagger(Om) @ F_mu @ Om)
+        if th.layout == "BMXYIJ":
+            return jnp.stack(F_cov_mu, axis=1)
+        return jnp.stack(F_cov_mu, axis=1 + th.Nd)
+
+    for _ in range(max(1, int(n_trials))):
+        U = th.hot_start(scale=q_scale)
+        m.refresh(U, traj_length=1.0)
+        assert m.phi is not None
+        phi = m.phi
+        Om = random_site_gauge_with_method(th, scale=omega_scale, method=gauge_exp_method)
+        Up = gauge_transform_links(th, U, Om)
+        phi_p = _gauge_transform_fermion(phi, Om)
+        if th.fermion_monomial_kind == "eo_preconditioned":
+            phi_p = th._project_even(phi_p)
+
+        F_ad = m.force_autodiff(U, phi)
+        F_ad_p = m.force_autodiff(Up, phi_p)
+        F_ad_cov = _covariantize_force(F_ad, Om)
+        rel_ad.append(float(jnp.linalg.norm(F_ad_p - F_ad_cov) / (jnp.linalg.norm(F_ad_cov) + 1e-12)))
+
+        try:
+            F_an = m.force_analytic(U, phi)
+            F_an_p = m.force_analytic(Up, phi_p)
+            F_an_cov = _covariantize_force(F_an, Om)
+            rel_an.append(float(jnp.linalg.norm(F_an_p - F_an_cov) / (jnp.linalg.norm(F_an_cov) + 1e-12)))
+        except Exception:
+            pass
+
+    out = {
+        "enabled": 1.0,
+        "max_rel_autodiff": float(np.max(rel_ad)),
+        "mean_rel_autodiff": float(np.mean(rel_ad)),
+    }
+    if rel_an:
+        out.update({"max_rel_analytic": float(np.max(rel_an)), "mean_rel_analytic": float(np.mean(rel_an))})
+    return out
+
+
 def test_eop_force_fd(
     th: SU3WilsonNf2,
     q_scale: float = 0.05,
@@ -2496,13 +2665,31 @@ def main():
         "--tests",
         type=str,
         default="all",
-        help="comma-separated: gamma,adjoint,normal,perf,eo,eoperf,eps2,eps4,hamiltonian,pfrefresh,pfid,gauge,conventions,forcecmp,eopforce,all",
+        help="comma-separated: gamma,adjoint,normal,perf,eo,eoperf,eps2,eps4,hamiltonian,pfrefresh,pfid,pfsolve,pfcov,gauge,conventions,forcecmp,eopforce,all",
     )
     args = ap.parse_args()
 
     tests = {t.strip().lower() for t in args.tests.split(",") if t.strip()}
     if "all" in tests:
-        tests = {"gamma", "adjoint", "normal", "perf", "eo", "eoperf", "eps2", "eps4", "hamiltonian", "pfrefresh", "pfid", "gauge", "conventions", "forcecmp", "eopforce"}
+        tests = {
+            "gamma",
+            "adjoint",
+            "normal",
+            "perf",
+            "eo",
+            "eoperf",
+            "eps2",
+            "eps4",
+            "hamiltonian",
+            "pfrefresh",
+            "pfid",
+            "pfsolve",
+            "pfcov",
+            "gauge",
+            "conventions",
+            "forcecmp",
+            "eopforce",
+        }
 
     shape = _parse_shape(args.shape)
     fermion_bc = _parse_fermion_bc(args.fermion_bc, len(shape))
@@ -2706,6 +2893,49 @@ def main():
             print(f"  max rel |Spf-eta2|/|eta2|:  {pfi['max_rel_spf_vs_eta2']:.6e}")
             print(f"  mean rel |Spf-eta2|/|eta2|: {pfi['mean_rel_spf_vs_eta2']:.6e}")
             print(f"  mean Spf / mean eta2:       {pfi['mean_spf']:.6e} / {pfi['mean_eta2']:.6e}")
+
+    if "pfsolve" in tests:
+        ps = test_pseudofermion_solver_consistency(th, q_scale=0.05, n_trials=int(args.pf_id_trials))
+        if not bool(int(ps.get("enabled", 0.0))):
+            print("Pseudofermion solver consistency: skipped (no fermion monomial)")
+        else:
+            print("Pseudofermion solver consistency:")
+            print(f"  mean rel residual (normal): {ps['mean_rel_residual_normal']:.6e}")
+            if bool(int(ps.get("split_enabled", 0.0))):
+                if np.isfinite(ps.get("mean_rel_action_split_vs_normal", float("nan"))):
+                    print(f"  mean rel action split vs normal: {ps['mean_rel_action_split_vs_normal']:.6e}")
+                    print(f"  mean rel x split vs normal:      {ps['mean_rel_x_split_vs_normal']:.6e}")
+                    print(f"  mean rel residual split stage1:  {ps['mean_rel_residual_split_stage1']:.6e}")
+                    print(f"  mean rel residual split stage2:  {ps['mean_rel_residual_split_stage2']:.6e}")
+                    print(f"  mean rel residual split total:   {ps['mean_rel_residual_split_total']:.6e}")
+                if np.isfinite(ps.get("mean_rel_x_eo_vs_normal", float("nan"))):
+                    print(f"  mean rel x eo-split vs normal:   {ps['mean_rel_x_eo_vs_normal']:.6e}")
+                    print(f"  mean rel residual eo stage1:     {ps['mean_rel_residual_eo_stage1']:.6e}")
+                    print(f"  mean rel residual eo stage2:     {ps['mean_rel_residual_eo_stage2']:.6e}")
+                    print(f"  mean rel residual eo total:      {ps['mean_rel_residual_eo_total']:.6e}")
+            else:
+                print("  split/eo-split checks: skipped for solver-kind=cg")
+
+    if "pfcov" in tests:
+        gauge_exp_method = args.gauge_exp_method
+        if gauge_exp_method == "auto":
+            gauge_exp_method = str(th.exp_method)
+        pc = test_pseudofermion_force_gauge_covariance(
+            th,
+            q_scale=0.05,
+            omega_scale=float(args.gauge_omega_scale),
+            n_trials=int(args.gauge_trials),
+            gauge_exp_method=gauge_exp_method,
+        )
+        if not bool(int(pc.get("enabled", 0.0))):
+            print("Pseudofermion force gauge-covariance: skipped (no fermion monomial)")
+        else:
+            print("Pseudofermion force gauge-covariance:")
+            print(f"  max rel autodiff: {pc['max_rel_autodiff']:.6e}")
+            print(f"  mean rel autodiff:{pc['mean_rel_autodiff']:.6e}")
+            if np.isfinite(pc.get("max_rel_analytic", float("nan"))):
+                print(f"  max rel analytic: {pc['max_rel_analytic']:.6e}")
+                print(f"  mean rel analytic:{pc['mean_rel_analytic']:.6e}")
 
     if "gauge" in tests:
         gauge_exp_method = args.gauge_exp_method
