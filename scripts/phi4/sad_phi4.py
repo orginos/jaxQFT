@@ -82,7 +82,9 @@ def cosh_meff_solve(R: float, t: int, T: int,
     For a periodic correlator  C(t) ~ A cosh(m (t - T/2)),
     this gives the effective mass at timeslice t.
 
-    Uses bisection in [0, m_max].  Returns NaN if no solution.
+    Uses bisection in [0, m_max] on the log-space equation
+    log(cosh(m*u)/cosh(m*v)) = log(R) to avoid overflow for large T.
+    Returns NaN if no solution.
     """
     if not np.isfinite(R) or R <= 1.0:
         return np.nan
@@ -94,15 +96,25 @@ def cosh_meff_solve(R: float, t: int, T: int,
     if abs(v) < 1e-10:
         return float(np.arccosh(R))
 
-    def f(m):
-        try:
-            return np.cosh(m * u) / np.cosh(m * v) - R
-        except (OverflowError, FloatingPointError):
-            return np.inf
+    logR = np.log(R)
 
-    # f(0) = 1 - R < 0;  f(m_max) should be > 0 for |u| > |v|
+    def _log_cosh_ratio(m):
+        """log(cosh(m*u) / cosh(m*v)), numerically stable for large T.
+
+        Uses log(cosh(x)) = |x| + log1p(exp(-2|x|)) - log(2).
+        The difference cancels the log(2) terms, and exp(-2|x|) underflows
+        gracefully to 0 for large |x|.
+        """
+        au = abs(m * u)
+        av = abs(m * v)
+        return (au - av) + np.log1p(np.exp(-2 * au)) - np.log1p(np.exp(-2 * av))
+
+    def f(m):
+        return _log_cosh_ratio(m) - logR
+
+    # f(0) = 0 - logR < 0;  f(m_max) should be > 0 for |u| > |v|
     a, b = 0.0, m_max
-    fa = 1.0 - R
+    fa = -logR
     fb = f(b)
     if not np.isfinite(fb) or fa * fb > 0:
         return np.nan

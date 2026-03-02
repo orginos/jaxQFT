@@ -309,6 +309,40 @@ Last updated: 2026-02-27
   - unpreconditioned: `--tests all --fermion-monomial-kind unpreconditioned`
   - EO-preconditioned: `--tests all --fermion-monomial-kind eo_preconditioned --pf-force-mode analytic`
 
+## SAD (Stochastic Automatic Differentiation)
+- Reference: Catumba & Ramos, arXiv:2502.15570 (2025).
+- Status: **Implemented and validated** for phi^4 in 2D.
+- Eliminates exponential signal-to-noise degradation in correlator measurements by reformulating the connected two-point function C(t) as a one-point function of a tangent field, computed via forward-mode AD (`jax.jvp`) through the SMD integrator.
+
+### Key files:
+- `jaxqft/models/phi4_sad.py`: Core library — `action_J`, `force_J`, `leapfrog_scan`, `smd_sad_step`, `free_propagator`.
+- `scripts/phi4/sad_phi4.py`: Measurement driver — batched chains, warmup, measurement, jackknife statistics, cosh m_eff, JSON output.
+- `scripts/phi4/plot_sad.py`: Plotting — correlator, effective mass, signal-to-noise, error bar comparison. Reads JSON from `sad_phi4.py`.
+- `docs/phi4_sad/`: Results directory — LaTeX note (`sad_note.tex`/`.pdf`), plots (`.png`), data (`.json`).
+
+### Architecture:
+- `smd_sad_step(phi, pi, phi_tan, pi_tan, key, ...)` takes and returns accumulated tangent state.
+- The tangent pair `(phi_tan, pi_tan)` is initialized to zeros and propagated through every SMD step (warmup + measurement).
+- At each step: OU refresh gives `pi_ou_tan = c1 * pi_tan`, then `jax.jvp` through `leapfrog_scan` propagates `(phi_tan, pi_ou_tan, 1.0)`.
+- The J-tangent `1.0` injects a fresh source at t=0 every step; OU damping `c1 < 1` ensures convergence.
+- Observable: `C_sad(t) = mean_x(phi_tan(x,t))` — the spatial mean of the tangent field.
+- Cost: ~2x a standard SMD step (forward-mode AD doubles the leapfrog work).
+- Batching: `jax.vmap` over independent chains, compiled with `jax.jit`.
+
+### Validated results:
+- Free field (m2=1.0, 16x16): SAD matches exact propagator to machine precision.
+- phi^4 (m2=-0.40, lam=2.4, 16x16): 3-6x noise reduction across timeslices.
+- phi^4 (m2=-0.40, lam=2.4, 64x32): Up to 950x noise reduction at t=T/2, ~450,000x effective speedup.
+- phi^4 (m2=-0.55, lam=2.4, 256x128): Peak R~12,000 at t~120.
+- phi^4 (m2=-0.55, lam=2.4, 512x256, B=32, N=40000): Peak R~67,000 at t~252, m_eff = 0.090 ± 0.001 for t=3-20.
+
+### Known pitfalls (see AGENTS.md for details):
+1. Tangent must accumulate across full Markov chain (not per-trajectory).
+2. Leapfrog must use `jax.lax.scan` (not Python for-loop) for efficient JVP.
+3. Source sign convention: `S = S - J * sum(phi[0])` for positive C(t).
+4. Connected subtraction uses per-chain phi_bar, not global mean.
+5. Cosh m_eff solver overflows for large T — use log-space bisection (fixed in `cosh_meff_solve`).
+
 ## Priority Backlog
 1. Add nested integrator schedules over monomial timescales (Sexton-Weingarten style).
 2. Add Hasenbusch-preconditioned monomials for SU3 Wilson Nf=2.

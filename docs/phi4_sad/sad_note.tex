@@ -39,10 +39,20 @@ This eliminates the exponential signal-to-noise degradation that plagues
 the standard product estimator.
 We verify the implementation against the analytic free-field propagator,
 then demonstrate dramatic noise reduction on interacting $\phi^4$ theory
-on $16\times 16$ and $64\times 32$ lattices.  On the larger lattice the
-SAD estimator achieves up to a \textbf{950-fold reduction in statistical
-error} at the temporal midpoint, corresponding to an effective speedup of
-$\sim\!5\times 10^5$ relative to the standard estimator.
+on $16\times 16$, $64\times 32$, $256\times 128$, and $512\times 256$
+lattices.  On the $64\times 32$ lattice the SAD estimator achieves up to
+a \textbf{950-fold reduction in statistical error} at the temporal
+midpoint; on the $512\times 256$ lattice with $m^2{=}-0.55$ this grows
+to a peak of $\sim\!67{,}000\times$, corresponding to an effective
+speedup of $\sim\!2\times 10^9$.
+We investigate the behaviour of SAD near the critical point on the
+$256\times 128$ and $512\times 256$ lattices, where critical slowing
+down limits the effective statistics.  We find that SAD continues to
+eliminate exponential signal-to-noise degradation but its prefactor grows
+with the correlation length, and long autocorrelation times reduce the
+effective number of independent samples.  Doubling the lattice from
+$256\times 128$ to $512\times 256$ dramatically extends the range over
+which SAD dominates.
 \end{abstract}
 
 \tableofcontents
@@ -398,8 +408,8 @@ For $B$ parallel chains on a $T\times L$ lattice with 32-bit floats:
 \begin{equation}
   \text{Memory} = 4\,B\,T\,L\times 4\;\text{bytes}.
 \end{equation}
-For our largest test ($B{=}8$, $T{=}64$, $L{=}32$):
-$4\times 8\times 64\times 32\times 4 = 2\;\text{MB}$, which is trivial.
+For our largest test ($B{=}8$, $T{=}512$, $L{=}256$):
+$4\times 8\times 512\times 256\times 4 = 128\;\text{MB}$, which is modest.
 
 %----------------------------------------------------------------------
 \subsection{Effective Speedup}
@@ -423,6 +433,9 @@ $16\times 16$ & 8 (midpoint) & 5.6 & 16$\times$ \\
 $64\times 32$ & 8  & 5.7 & 16$\times$ \\
 $64\times 32$ & 16 & 64  & 2\,000$\times$ \\
 $64\times 32$ & 32 (midpoint) & 950 & 450\,000$\times$ \\
+$512\times 256$ & 100 & 16 & 130$\times$ \\
+$512\times 256$ & 200 & 3\,700 & $6.9\times 10^6$ \\
+$512\times 256$ & 252 & 67\,000 & $2.2\times 10^9$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -639,6 +652,393 @@ advantage: SAD enables mass extraction from regions of the lattice that
 are completely inaccessible to the standard approach.
 
 
+%----------------------------------------------------------------------
+\subsection{Near-Critical $\phi^4$ on $256\times 128$}
+\label{sec:256x128}
+%----------------------------------------------------------------------
+
+\paragraph{Parameters.}
+$T{=}256$, $L{=}128$, $m^2{=}-0.55$, $\lambda{=}2.4$, $n_{\text{md}}{=}10$
+($\delta\tau{=}0.10$), $N_{\text{warm}}{=}4000$, $N_{\text{meas}}{=}20{,}000$,
+$B{=}8$ chains.  This choice of $m^2$ is significantly more negative than the
+$m^2{=}-0.40$ used in the earlier tests, bringing the theory closer to the
+critical point of the $\mathbb{Z}_2$-symmetry-breaking transition.  The
+physical mass is lighter ($m_{\text{eff}} \approx 0.10$--$0.14$ versus
+$\approx 0.28$), so the correlation length is correspondingly larger.
+
+\paragraph{Results.}
+\Cref{fig:phi4_256x128_results,fig:phi4_256x128_errors} show the results.
+Several qualitative differences emerge compared to the smaller lattices:
+
+\begin{enumerate}
+  \item \textbf{SAD is noisier than standard at short distances.}
+    For $t \lesssim 34$, the SAD error exceeds the standard error by a
+    factor of~$\sim\!2$ ($\sigma_{\text{std}}/\sigma_{\text{SAD}} \approx 0.5$).
+    This is because the tangent field responds to the source over the full
+    correlation volume~$\sim\!\xi^{N_d}$, introducing fluctuations that the
+    standard estimator (which benefits from $L$-fold spatial averaging) does
+    not have.  This overhead grows with~$\xi$.
+
+  \item \textbf{SAD still eliminates exponential S/N degradation.}
+    For $t \gtrsim 35$, the noise reduction factor $R(t)$ grows rapidly,
+    reaching $R \approx 81$ at $t{=}105$ (effective speedup $\sim\!3300\times$).
+    The standard estimator becomes pure noise for $t \gtrsim 40$, while
+    SAD maintains a measurable signal with $|C|/\sigma > 1$ out to
+    $t \approx 90$.
+
+  \item \textbf{Reduced peak $R$ compared to $64\times 32$.}
+    The peak noise reduction of $\sim\!81$ on $256\times 128$ is much less
+    than the $\sim\!950$ on $64\times 32$, despite the lattice being larger.
+    This is \emph{not} a failure of SAD; rather, it reflects the
+    lighter mass ($m\approx 0.11$ vs.\ $0.28$) which means the standard
+    estimator's error is also somewhat smaller relative to the signal at
+    moderate~$t$, while the SAD variance is inflated by the larger
+    correlation length.
+
+  \item \textbf{Forward-backward asymmetry.}
+    Ideal measurements should give $C(t) = C(T{-}t)$ by time-reversal
+    symmetry.  We observe a residual asymmetry:
+    $C_{\text{SAD}}(0) = 5.12(22)$ vs.\
+    $C_{\text{SAD}}(255) = 4.67(22)$.
+    This indicates residual autocorrelations---even with $N_{\text{warm}}{=}4000$
+    and $N_{\text{meas}}{=}20{,}000$, the effective number of independent
+    samples per chain is limited by critical slowing down.
+\end{enumerate}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sad_phi4_results_256x128.png}
+  \caption{SAD vs.\ Standard on $256\times 128$ ($m^2{=}-0.55$, $\lambda{=}2.4$,
+  $N_{\text{meas}}{=}20{,}000$).
+  \textbf{Top left:} $C(t)$ with error bars---note the cosh-like shape from
+  periodic boundary conditions.
+  \textbf{Top right:} $C(t)$ on log scale for $0 \leq t \leq 128$.
+  The standard estimator loses the signal for $t \gtrsim 40$.
+  \textbf{Bottom left:} Cosh effective mass.
+  SAD gives a few valid points around $t \approx 57$--$60$ with
+  $m_{\text{eff}} \approx 0.10$, but the plateau is not clean due to
+  the large errors and long autocorrelation times.
+  \textbf{Bottom right:} Noise reduction factor.}
+  \label{fig:phi4_256x128_results}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sad_phi4_errors_256x128.png}
+  \caption{Signal-to-noise comparison on $256\times 128$.
+  \textbf{Left:} Absolute errors.  The SAD error (blue) drops by
+  $\sim\!3$ orders of magnitude from $t{=}0$ to $t \approx 90$, tracking
+  the signal decay.  The standard error (orange) stays flat at
+  $\sim\!0.05$--$0.1$.
+  \textbf{Right:} Signal-to-noise ratio.  The standard estimator drops
+  below S/N~$= 1$ for $t \gtrsim 25$, while SAD maintains S/N~$> 1$
+  out to $t \approx 90$.}
+  \label{fig:phi4_256x128_errors}
+\end{figure}
+
+\paragraph{Noise reduction.}
+\Cref{tab:noise_256x128} summarizes the noise reduction at selected
+timeslices:
+
+\begin{table}[H]
+\centering
+\caption{Noise reduction factor $R = \sigma_{\text{std}}/\sigma_{\text{SAD}}$
+on $256\times 128$ ($m^2{=}-0.55$, $\lambda{=}2.4$).}
+\label{tab:noise_256x128}
+\begin{tabular}{rrrrcr}
+\toprule
+$t$ & $C_{\text{SAD}}(t)$ & $\sigma_{\text{SAD}}$ & $\sigma_{\text{std}}$ & $R$ & Speedup $R^2/2$\\
+\midrule
+  0 & 5.125  & $2.2\times 10^{-1}$ & $1.2\times 10^{-1}$ &  0.5 & --- \\
+ 10 & 2.109  & $1.3\times 10^{-1}$ & $7.7\times 10^{-2}$ &  0.6 & --- \\
+ 20 & 0.886  & $1.0\times 10^{-1}$ & $5.2\times 10^{-2}$ &  0.5 & --- \\
+ 30 & 0.404  & $6.5\times 10^{-2}$ & $2.4\times 10^{-2}$ &  0.4 & --- \\
+ 40 & 0.148  & $1.6\times 10^{-2}$ & $5.2\times 10^{-2}$ &  3.2 & 5 \\
+ 50 & 0.056  & $1.7\times 10^{-2}$ & $6.9\times 10^{-2}$ &  4.2 & 9 \\
+ 60 & 0.013  & $6.5\times 10^{-3}$ & $4.0\times 10^{-2}$ &  6.1 & 19 \\
+ 70 & 0.006  & $2.6\times 10^{-3}$ & $5.5\times 10^{-2}$ & 21.3 & 227 \\
+ 80 & $\approx 0$  & $2.1\times 10^{-3}$ & $5.0\times 10^{-2}$ & 24.3 & 295 \\
+ 90 & $\approx 0$  & $1.1\times 10^{-3}$ & $4.6\times 10^{-2}$ & 41.6 & 865 \\
+100 & $\approx 0$  & $6.5\times 10^{-4}$ & $2.9\times 10^{-2}$ & 43.9 & 965 \\
+105 & $\approx 0$  & $6.7\times 10^{-4}$ & $5.4\times 10^{-2}$ & 81.2 & 3\,300 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+%----------------------------------------------------------------------
+\subsection{Near-Critical $\phi^4$ on $512\times 256$}
+\label{sec:512x256}
+%----------------------------------------------------------------------
+
+\paragraph{Parameters.}
+$T{=}512$, $L{=}256$, $m^2{=}-0.55$, $\lambda{=}2.4$, $n_{\text{md}}{=}10$
+($\delta\tau{=}0.10$), $N_{\text{warm}}{=}4000$, $N_{\text{meas}}{=}40{,}000$,
+$B{=}32$ chains.  Compared to the $256\times 128$ test, the lattice volume
+is four times larger and the statistical power is enhanced by $4\times$
+the batch size and $2\times$ the measurements per chain, giving a
+$\sim\!4\times$ reduction in jackknife errors.  The use of $B{=}32$
+independent chains (vs.\ $B{=}8$ earlier) is crucial: each chain is
+truly independent, so increasing~$B$ directly reduces the error without
+any autocorrelation penalty.
+
+\paragraph{Results.}
+\Cref{fig:phi4_512x256_results,fig:phi4_512x256_errors} show the results.
+The increase in volume has a dramatic effect on the noise reduction:
+
+\begin{enumerate}
+  \item \textbf{SAD and standard comparable at short distances.}
+    Unlike the $256\times 128$ case where SAD was $\sim\!2\times$ noisier
+    at short~$t$, on $512\times 256$ the two estimators have comparable
+    errors at $t{=}0$ ($R \approx 1.0$).  The standard estimator is
+    slightly better for $1 \leq t \lesssim 17$ ($R \approx 0.87$--$0.97$),
+    with SAD becoming consistently better for $t \gtrsim 18$.
+
+  \item \textbf{Peak noise reduction $R \approx 67{,}000$.}
+    The noise reduction factor grows to a peak of $R \approx 67{,}000$ at
+    $t \approx 252$, compared to $R \approx 81$ on $256\times 128$.
+    This three-order-of-magnitude increase in~$R$ reflects the exponential
+    growth $R(t) \sim e^{mt}$: the midpoint has doubled from
+    $T/2{=}128$ to~256, giving $R \sim e^{0.09 \times 128} \approx 10^5$
+    times larger.
+
+  \item \textbf{Standard estimator completely fails.}
+    The standard estimator produces negative values (wrong sign) over a
+    wide range of intermediate~$t$, with errors far exceeding the signal.
+    It is pure noise for $t \gtrsim 40$.  SAD, by contrast, maintains a
+    measurable positive signal out to $t \approx 130$.
+
+  \item \textbf{Clean cosh effective mass plateau from SAD.}
+    With $B{=}32$ chains and a numerically stable log-space bisection
+    solver (required for $T{=}512$ to avoid $\cosh$ overflow), the SAD
+    estimator yields a clear effective mass plateau at
+    \begin{equation}
+      m_{\text{eff}} = 0.090 \pm 0.001 \qquad (t = 3\text{--}20).
+    \end{equation}
+    The standard estimator gives consistent values at the shortest
+    timeslices ($m_{\text{eff}} \approx 0.091$--$0.096$) with comparable
+    errors, but its $m_{\text{eff}}$ becomes unreliable for $t \gtrsim 30$
+    as the correlator enters the noise-dominated regime.
+    \Cref{tab:meff_512x256} shows the effective mass at selected timeslices.
+
+  \item \textbf{Reduced forward-backward asymmetry.}
+    $C_{\text{SAD}}(0) = 5.04(3)$ vs.\ $C_{\text{SAD}}(511) = 4.58(3)$,
+    an $\sim\!9\%$ asymmetry.  While still present, the jackknife errors
+    are now $3\times$ smaller than the $B{=}8$ run, giving a clearer
+    characterization of the CSD-induced bias.
+\end{enumerate}
+
+\begin{table}[H]
+\centering
+\caption{Cosh effective mass from SAD on $512\times 256$ ($m^2{=}-0.55$,
+$\lambda{=}2.4$, $B{=}32$, $N{=}40{,}000$).}
+\label{tab:meff_512x256}
+\begin{tabular}{cccccc}
+\toprule
+$t$ & $m_{\text{eff}}^{\text{SAD}}$ & $\sigma_{\text{SAD}}$
+    & $m_{\text{eff}}^{\text{std}}$ & $\sigma_{\text{std}}$
+    & $\sigma_{\text{std}}/\sigma_{\text{SAD}}$ \\
+\midrule
+ 0 & 0.0949 & 0.0009 & 0.0962 & 0.0006 & 0.7 \\
+ 2 & 0.0913 & 0.0010 & 0.0921 & 0.0008 & 0.8 \\
+ 5 & 0.0896 & 0.0010 & 0.0911 & 0.0010 & 1.0 \\
+ 8 & 0.0900 & 0.0011 & 0.0919 & 0.0012 & 1.1 \\
+10 & 0.0906 & 0.0016 & 0.0885 & 0.0014 & 0.9 \\
+15 & 0.0917 & 0.0017 & 0.0889 & 0.0025 & 1.5 \\
+20 & 0.0871 & 0.0025 & 0.0883 & 0.0036 & 1.4 \\
+30 & 0.0899 & 0.0043 & 0.071  & 0.008  & 1.8 \\
+40 & 0.097  & 0.009  & 0.070  & 0.017  & 1.9 \\
+50 & 0.148  & 0.054  & 0.209  & 0.106  & 2.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sad_phi4_results_512x256.png}
+  \caption{SAD vs.\ Standard on $512\times 256$ ($m^2{=}-0.55$, $\lambda{=}2.4$,
+  $B{=}32$, $N_{\text{meas}}{=}40{,}000$).
+  \textbf{Top left:} $C(t)$ with error bars.
+  \textbf{Top right:} $C(t)$ on log scale for $0 \leq t \leq 256$.
+  The standard estimator becomes pure noise for $t \gtrsim 40$, while
+  SAD tracks the signal to $t \approx 130$.
+  \textbf{Bottom left:} Cosh effective mass---SAD shows a plateau at
+  $m \approx 0.090$ for $t = 3$--$20$; the standard estimator is
+  consistent at short~$t$ but diverges beyond $t \gtrsim 30$.
+  \textbf{Bottom right:} Noise reduction factor reaching
+  $\sim\!67{,}000\times$ near the midpoint.}
+  \label{fig:phi4_512x256_results}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sad_phi4_errors_512x256.png}
+  \caption{Signal-to-noise comparison on $512\times 256$.
+  \textbf{Left:} Absolute errors.  The SAD error (blue) drops by
+  $\sim\!5$ orders of magnitude from $t{=}0$ to $t \approx 230$,
+  tracking the signal decay.  The standard error (orange) stays flat at
+  $\sim\!0.02$--$0.04$.
+  \textbf{Right:} Signal-to-noise ratio.  The standard estimator drops
+  below S/N~$= 1$ for $t \gtrsim 25$; SAD maintains S/N~$> 1$ out to
+  $t \approx 130$.}
+  \label{fig:phi4_512x256_errors}
+\end{figure}
+
+\paragraph{Noise reduction.}
+\Cref{tab:noise_512x256} summarizes the noise reduction at selected
+timeslices:
+
+\begin{table}[H]
+\centering
+\caption{Noise reduction factor $R = \sigma_{\text{std}}/\sigma_{\text{SAD}}$
+on $512\times 256$ ($m^2{=}-0.55$, $\lambda{=}2.4$, $B{=}32$, $N{=}40{,}000$).}
+\label{tab:noise_512x256}
+\begin{tabular}{rrrrcr}
+\toprule
+$t$ & $C_{\text{SAD}}(t)$ & $\sigma_{\text{SAD}}$ & $\sigma_{\text{std}}$ & $R$ & Speedup $R^2/2$\\
+\midrule
+  0 & 5.038  & $2.6\times 10^{-2}$ & $2.6\times 10^{-2}$ &  1.0 & --- \\
+ 10 & 2.073  & $2.7\times 10^{-2}$ & $2.4\times 10^{-2}$ &  0.9 & --- \\
+ 20 & 0.861  & $2.0\times 10^{-2}$ & $2.3\times 10^{-2}$ &  1.1 & 1 \\
+ 40 & 0.162  & $1.3\times 10^{-2}$ & $3.0\times 10^{-2}$ &  2.3 & 3 \\
+ 60 & 0.023  & $3.3\times 10^{-3}$ & $1.6\times 10^{-2}$ &  4.9 & 12 \\
+ 80 & 0.012  & $3.2\times 10^{-3}$ & $1.5\times 10^{-2}$ &  4.8 & 11 \\
+100 & 0.004  & $6.7\times 10^{-4}$ & $1.1\times 10^{-2}$ & 16 & 130 \\
+110 & 0.001  & $2.7\times 10^{-4}$ & $1.2\times 10^{-2}$ & 44 & 970 \\
+128 & $\approx 0$  & $8.1\times 10^{-5}$ & $1.4\times 10^{-2}$ & 176 & 15\,500 \\
+150 & $\approx 0$  & $1.4\times 10^{-5}$ & $1.0\times 10^{-2}$ & 703 & $2.5\times 10^5$ \\
+200 & $\approx 0$  & $5.1\times 10^{-6}$ & $1.9\times 10^{-2}$ & 3\,700 & $6.9\times 10^6$ \\
+252 & $\approx 0$  & $2.0\times 10^{-7}$ & $1.3\times 10^{-2}$ & 67\,000 & $2.2\times 10^9$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Volume comparison.}
+\Cref{tab:volume_comparison} compares the key metrics across the two
+near-critical lattices:
+
+\begin{table}[H]
+\centering
+\caption{Comparison of near-critical tests at $m^2{=}-0.55$, $\lambda{=}2.4$.}
+\label{tab:volume_comparison}
+\begin{tabular}{lcc}
+\toprule
+& $256\times 128$ & $512\times 256$ \\
+\midrule
+Volume & 32\,768 & 131\,072 \\
+$B \times N_{\text{meas}}$ & $8 \times 20{,}000$ & $32 \times 40{,}000$ \\
+Crossover $t^*$ (SAD $>$ std) & $\sim 34$ & $\sim 18$ \\
+Peak $R$ & 81 & 67\,000 \\
+S/N $> 1$ for std & $t \lesssim 25$ & $t \lesssim 25$ \\
+S/N $> 1$ for SAD & $t \lesssim 90$ & $t \lesssim 130$ \\
+Cosh $m_{\text{eff}}$ from SAD & Marginal ($t \approx 57$--$60$) & Plateau at $0.090 \pm 0.001$ ($t = 3$--$20$) \\
+$\mu$s/step & 4\,600 & 62\,000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+%======================================================================
+\section{Behaviour Near the Critical Point}
+\label{sec:critical}
+%======================================================================
+
+The near-critical tests ($256\times 128$ and $512\times 256$) with
+$m^2{=}-0.55$ bring the theory closer to the critical point of the
+$\mathbb{Z}_2$-symmetry-breaking phase transition, where new challenges
+emerge.  We discuss how they interact with the SAD method.
+
+%----------------------------------------------------------------------
+\subsection{Critical Slowing Down}
+%----------------------------------------------------------------------
+
+Near the critical point, the correlation length $\xi$ diverges and the
+SMD autocorrelation time grows as $\tau_{\text{int}} \sim \xi^z$ (with
+dynamical critical exponent $z \approx 2$ for local algorithms).
+The tangent field inherits this autocorrelation: since the tangent is
+propagated through the Markov chain, successive tangent measurements
+are correlated over $\tau_{\text{int}}$ steps.
+
+This means that even with 20\,000 measurement steps per chain, the
+effective number of \emph{independent} tangent samples may be only
+$N_{\text{eff}} \sim N_{\text{meas}} / (2\tau_{\text{int}})$, which
+can be much smaller than~$N_{\text{meas}}$.  The residual
+forward-backward asymmetry observed in \cref{sec:256x128} is
+a direct manifestation of insufficient statistics relative to~$\tau_{\text{int}}$.
+
+\paragraph{Implications for SAD.}
+SAD does not cure critical slowing down.  The method eliminates
+the \emph{exponential} signal-to-noise degradation at large~$t$, but
+the \emph{rate} at which the tangent converges to its equilibrium value
+is governed by the same autocorrelation time as the primal fields.
+Thus, near the critical point one must:
+\begin{itemize}
+  \item increase $N_{\text{warm}}$ to ensure the tangent has equilibrated,
+  \item increase $N_{\text{meas}}$ to overcome the reduced $N_{\text{eff}}$,
+  \item potentially tune $\gamma$ and $\tau$ to minimize $\tau_{\text{int}}$.
+\end{itemize}
+
+%----------------------------------------------------------------------
+\subsection{Tangent Variance and Correlation Length}
+%----------------------------------------------------------------------
+
+A distinctive feature of the near-critical results is that
+\textbf{the SAD estimator is noisier than the standard estimator at
+short distances} ($t \lesssim 34$).  This was not observed on the
+smaller lattices.
+
+The physical origin is the tangent response function.  The source~$J$
+at $t{=}0$ induces a tangent field $\xi(x,t)$ that is nonzero over a
+spatial region of size~$\sim\!\xi$.  The tangent observable
+$C_{\text{SAD}}(t) = \langle\bar\xi(t)\rangle$ (spatial average)
+inherits fluctuations from the tangent field across this correlation
+volume.  At short~$t$ these fluctuations contribute a variance
+\begin{equation}
+  \sigma^2_{\text{SAD}}(t) \;\sim\; \frac{1}{L}\sum_{x,x'}
+    \text{Cov}\!\bigl[\xi(x,t),\;\xi(x',t)\bigr]
+  \;\sim\; \frac{\xi}{L}\;\sigma^2_{\text{local}},
+\end{equation}
+where $\sigma^2_{\text{local}}$ is the per-site tangent variance.  When
+$\xi$ is large, this exceeds the standard estimator's variance
+$\sigma^2_{\text{std}} \sim 1/L$ (which benefits from spatial averaging
+of an \emph{incoherent} product of fields).
+
+The crossover timeslice $t^*$ where SAD becomes advantageous satisfies
+\begin{equation}
+  \sigma_{\text{SAD}}(t^*) \;\approx\; \sigma_{\text{std}}(t^*).
+\end{equation}
+For the $256\times 128$ lattice we find $t^* \approx 34$.  Below $t^*$
+the standard estimator is preferable; above it, SAD is dramatically better.
+
+%----------------------------------------------------------------------
+\subsection{Does SAD Degrade at Criticality?}
+%----------------------------------------------------------------------
+
+The answer is nuanced:
+\begin{itemize}
+  \item \textbf{No:} SAD still eliminates the exponential signal-to-noise
+    problem.  The ratio $\sigma_{\text{SAD}}/|C|$ grows only mildly with~$t$,
+    whereas the standard estimator's $\sigma_{\text{std}}/|C|$ grows as
+    $e^{+mt}$.
+
+  \item \textbf{Yes, in two indirect ways:}
+    \begin{enumerate}
+      \item The \emph{prefactor} of $\sigma_{\text{SAD}}$ grows with the
+        correlation length~$\xi$, raising the crossover point~$t^*$.
+      \item The effective statistics are reduced by critical slowing down
+        ($\tau_{\text{int}} \sim \xi^z$), requiring proportionally more
+        measurements for the same precision.
+    \end{enumerate}
+\end{itemize}
+
+The practical conclusion is that SAD remains highly beneficial near
+criticality for measuring the correlator at intermediate and large~$t$,
+but its advantage at short~$t$ diminishes as $\xi$ grows.  For optimal
+efficiency one could combine the standard estimator at short distances
+with the SAD estimator at large distances, using each where it has
+smaller variance.
+
+
 %======================================================================
 \section{Discussion}
 \label{sec:discussion}
@@ -678,25 +1078,50 @@ SMD without accept/reject as the base algorithm.
 %======================================================================
 
 We have implemented the SAD method of Catumba \& Ramos within the
-jaxQFT framework and verified it through three tests:
+jaxQFT framework and verified it through five tests of increasing
+complexity:
 
 \begin{enumerate}
-  \item \textbf{Free field:} Exact agreement with the analytic
-    propagator at machine precision, with zero statistical variance.
-  \item \textbf{$\phi^4$ on $16\times 16$:} 3--6$\times$ noise
-    reduction across all timeslices, with a clean effective mass
-    plateau at $m \approx 0.282$.
-  \item \textbf{$\phi^4$ on $64\times 32$:} Up to 950$\times$ noise
-    reduction at the temporal midpoint, corresponding to an effective
-    speedup of $\sim\!450{,}000\times$.  The cosh effective mass is
-    determined precisely across 30 timeslices, compared to $\sim\!10$
-    with the standard estimator.
+  \item \textbf{Free field ($16\times 16$):} Exact agreement with the
+    analytic propagator at machine precision, with zero statistical
+    variance.
+  \item \textbf{$\phi^4$ on $16\times 16$ ($m^2{=}-0.40$):}
+    3--6$\times$ noise reduction across all timeslices, with a clean
+    effective mass plateau at $m \approx 0.282$.
+  \item \textbf{$\phi^4$ on $64\times 32$ ($m^2{=}-0.40$):} Up to
+    950$\times$ noise reduction at the temporal midpoint, corresponding
+    to an effective speedup of $\sim\!450{,}000\times$.  The cosh
+    effective mass is determined precisely across 30 timeslices, compared
+    to $\sim\!10$ with the standard estimator.
+  \item \textbf{Near-critical $\phi^4$ on $256\times 128$ ($m^2{=}-0.55$):}
+    Up to $\sim\!81\times$ noise reduction.  SAD continues to eliminate
+    exponential S/N degradation, but the tangent variance prefactor
+    grows with the correlation length and critical slowing down limits
+    the effective statistics.  The standard estimator outperforms SAD at
+    short distances ($t \lesssim 34$), suggesting a hybrid strategy.
+  \item \textbf{Near-critical $\phi^4$ on $512\times 256$ ($m^2{=}-0.55$):}
+    Peak noise reduction $R \approx 67{,}000$ (effective speedup
+    $\sim\!2\times 10^9$).  With $B{=}32$ chains and $N{=}40{,}000$
+    measurements, SAD yields a clean cosh effective mass plateau at
+    $m_{\text{eff}} = 0.090 \pm 0.001$ over $t = 3$--$20$.  The standard
+    estimator is pure noise for $t \gtrsim 40$, while SAD maintains
+    signal out to $t \approx 130$.
 \end{enumerate}
 
 The computational overhead is a modest factor of~2 in both time and
 memory.  The implementation leverages JAX's \texttt{jvp} for
 forward-mode AD and \texttt{lax.scan} for efficient compilation,
 resulting in clean, maintainable code.
+
+The near-critical tests reveal that while SAD does not cure critical
+slowing down, it remains the superior estimator for intermediate-to-large
+Euclidean time separations where the standard estimator is
+noise-dominated.  The $512\times 256$ test demonstrates that the SAD
+advantage grows exponentially with $T$ as expected from
+$R(t) \sim e^{mt}$, confirming that the method scales favourably to
+large volumes.  A combined strategy using the standard estimator at
+short distances and the SAD estimator at large distances would be
+optimal.
 
 The SAD method is a compelling approach for any lattice field theory
 calculation where the signal-to-noise problem limits the achievable
