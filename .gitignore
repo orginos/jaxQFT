@@ -41,3 +41,7 @@ env/
 
 # CLAUDE
 .claude/
+
+# Testing and Running
+runs/
+
