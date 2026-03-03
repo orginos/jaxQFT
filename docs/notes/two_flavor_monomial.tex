@@ -79,6 +79,8 @@ S_{\mathrm{pf}} = \phi^\dagger (D^\dagger D)^{-1}\phi
 = \eta^\dagger \eta,
 \end{equation}
 which is used as a direct implementation check.
+No extra $1/2$ (or volume/parity) normalization factors are included in
+$S_{\mathrm{pf}}$; this is the implemented convention in code.
 
 \section{Analytic Pseudofermion Force}
 Define
@@ -246,6 +248,12 @@ S_{\mathrm{pf}}^{\mathrm{eo}}[U,\phi_e]
 \end{equation}
 Here $\eta_e$ is even-parity Gaussian noise and odd components are projected out.
 For Wilson without clover, omitted diagonal-block determinant factors are gauge-independent constants.
+The EO-preconditioned normalization is identical in form:
+\begin{equation}
+S_{\mathrm{pf}}^{\mathrm{eo}} = \phi_e^\dagger (\hat S_e^\dagger \hat S_e)^{-1}\phi_e
+= \eta_e^\dagger \eta_e,
+\end{equation}
+again with no additional prefactors.
 
 Solve count clarification:
 \begin{itemize}
@@ -283,11 +291,22 @@ In code this is mapped to two calls of the standard Wilson dslash-force kernel a
 The pseudofermion monomial supports:
 \begin{itemize}
   \item \texttt{heatbath}: independent redraw of $\eta$,
-  \item \texttt{ou}: OU rotation
-  $\eta \leftarrow c_1\eta + c_2\zeta$,
-  $c_1=e^{-\gamma\tau}$,
-  $c_2=\sqrt{1-c_1^2}$.
+  \item \texttt{ou}: OU update in pseudofermion field space.
 \end{itemize}
+For unpreconditioned monomials:
+\begin{equation}
+\phi \leftarrow c_1 \phi + c_2 D^\dagger(U)\zeta,
+\qquad
+c_1=e^{-\gamma\tau},\quad
+c_2=\sqrt{1-c_1^2},
+\end{equation}
+with fresh Gaussian $\zeta$.
+For EO-preconditioned monomials:
+\begin{equation}
+\phi_e \leftarrow c_1 \phi_e + c_2 \hat S_e^\dagger(U)\zeta_e.
+\end{equation}
+In OU mode, the implementation keeps $\phi$ (or $\phi_e$) as the dynamical field and
+does not transport a stored $\eta$ across changing gauge fields.
 If OU mode is used and pseudofermion $\gamma$ is not explicitly set,
 it defaults to the SMD/GHMC friction $\gamma$.
 For SMD/GHMC production runs, the recommended/default policy is OU refresh.
@@ -296,7 +315,7 @@ For SMD/GHMC production runs, the recommended/default policy is OU refresh.
 Implemented in the module CLI:
 \begin{itemize}
   \item Gauge covariance of $D$ and $D^\dagger D$,
-  \item Gauge covariance of $\phi=D^\dagger\eta$,
+  \item Gauge covariance of $\phi$ under the implemented refresh map,
   \item Gauge invariance of $S_{\mathrm{pf}}$ under transformed $(U,\phi)$,
   \item Identity check $S_{\mathrm{pf}} \approx \eta^\dagger\eta$ for refreshed fields,
   \item $\gamma_5$-Hermiticity check (even dimensions),

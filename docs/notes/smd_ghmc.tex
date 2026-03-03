@@ -63,6 +63,29 @@ then updates call
 \texttt{prepare\_trajectory(q, traj\_length)} once per trajectory before momentum refresh.
 This is used by monomial-based fermion theories for pseudofermion refresh.
 
+\subsection*{Pseudofermion Refresh (Current Wilson Nf=2)}
+For the two-flavor Wilson monomials, refresh happens inside
+\texttt{prepare\_trajectory(q, traj\_length)}:
+\begin{itemize}
+  \item Heatbath:
+  \begin{equation}
+  \phi = D^\dagger(U)\eta
+  \quad\text{(or EO: }\phi_e=\hat S_e^\dagger(U)\eta_e\text{)}.
+  \end{equation}
+  \item OU (correct implementation):
+  \begin{equation}
+  \phi \leftarrow c_1\phi + c_2 D^\dagger(U)\zeta,
+  \qquad
+  c_1=e^{-\gamma\tau},\quad c_2=\sqrt{1-c_1^2},
+  \end{equation}
+  and for EO monomials
+  \begin{equation}
+  \phi_e \leftarrow c_1\phi_e + c_2 \hat S_e^\dagger(U)\zeta_e.
+  \end{equation}
+\end{itemize}
+So OU is performed in pseudofermion-field space ($\phi$/$\phi_e$), not by transporting
+an old $\eta$ across a changed gauge field.
+
 \section{Implementation Status}
 Current code path:
 \begin{itemize}

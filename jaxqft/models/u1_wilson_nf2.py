@@ -115,17 +115,20 @@ class WilsonNf2PseudofermionMonomial:
         mode = str(self.refresh_mode).lower()
         if mode == "heatbath":
             self.eta = self.model.random_fermion()
+            self.phi = self.model.apply_Ddag(q, self.eta)
         elif mode == "ou":
             zeta = self.model.random_fermion()
-            if self.eta is None:
-                self.eta = zeta
+            phi_noise = self.model.apply_Ddag(q, zeta)
+            c1 = float(jnp.exp(-float(self.gamma) * float(traj_length)))
+            c2 = float(jnp.sqrt(max(0.0, 1.0 - c1 * c1)))
+            if self.phi is None:
+                self.phi = phi_noise
             else:
-                c1 = float(jnp.exp(-float(self.gamma) * float(traj_length)))
-                c2 = float(jnp.sqrt(max(0.0, 1.0 - c1 * c1)))
-                self.eta = c1 * self.eta + c2 * zeta
+                # OU update in pseudofermion-field space.
+                self.phi = c1 * self.phi + c2 * phi_noise
+            self.eta = None
         else:
             raise ValueError(f"Unknown pseudofermion refresh mode: {self.refresh_mode}")
-        self.phi = self.model.apply_Ddag(q, self.eta)
 
     def action(self, q: Array) -> Array:
         if self.phi is None:
@@ -209,20 +212,25 @@ class WilsonNf2EOPreconditionedMonomial:
         mode = str(self.refresh_mode).lower()
         if mode == "heatbath":
             eta = self.model.random_fermion()
+            self.eta = self.model._project_even(eta)
+            self.phi = self.model.apply_eo_schur_even_dagger(q, self.eta, normalized=True)
+            self.phi = self.model._project_even(self.phi)
         elif mode == "ou":
             zeta = self.model.random_fermion()
-            if self.eta is None:
-                eta = zeta
+            noise = self.model.apply_eo_schur_even_dagger(
+                q, self.model._project_even(zeta), normalized=True
+            )
+            c1 = float(jnp.exp(-float(self.gamma) * float(traj_length)))
+            c2 = float(jnp.sqrt(max(0.0, 1.0 - c1 * c1)))
+            if self.phi is None:
+                self.phi = noise
             else:
-                c1 = float(jnp.exp(-float(self.gamma) * float(traj_length)))
-                c2 = float(jnp.sqrt(max(0.0, 1.0 - c1 * c1)))
-                eta = c1 * self.eta + c2 * zeta
+                # OU update on EO-preconditioned pseudofermion field.
+                self.phi = c1 * self.phi + c2 * noise
+            self.phi = self.model._project_even(self.phi)
+            self.eta = None
         else:
             raise ValueError(f"Unknown pseudofermion refresh mode: {self.refresh_mode}")
-
-        self.eta = self.model._project_even(eta)
-        self.phi = self.model.apply_eo_schur_even_dagger(q, self.eta, normalized=True)
-        self.phi = self.model._project_even(self.phi)
 
     def action(self, q: Array) -> Array:
         if self.phi is None:
@@ -1210,6 +1218,24 @@ def test_hamiltonian_monomials(th: U1WilsonNf2) -> Dict[str, float]:
     }
 
 
+def _effective_refresh_eta(th: U1WilsonNf2, U: Array) -> Optional[Array]:
+    """Return eta associated with current pseudofermion state for refresh diagnostics."""
+    m = th.fermion_monomial
+    if m is None:
+        return None
+    eta = getattr(m, "eta", None)
+    if eta is not None:
+        return eta
+    phi = getattr(m, "phi", None)
+    if phi is None:
+        return None
+    if str(th.fermion_monomial_kind) == "eo_preconditioned":
+        x = th.solve_eop_even_normal(U, phi)
+        return th.apply_eo_schur_even(U, x, normalized=True)
+    x = th.solve_normal(U, phi)
+    return th.apply_D(U, x)
+
+
 def test_pseudofermion_refresh(th: U1WilsonNf2, traj_length: float = 1.0, n_refresh: int = 8) -> Dict[str, float]:
     if th.fermion_monomial is None:
         return {"enabled": 0.0}
@@ -1222,9 +1248,9 @@ def test_pseudofermion_refresh(th: U1WilsonNf2, traj_length: float = 1.0, n_refr
     phi_prev = None
     for _ in range(max(1, int(n_refresh))):
         m.refresh(U, traj_length=float(traj_length))
-        assert m.eta is not None
         assert m.phi is not None
-        eta_curr = m.eta
+        eta_curr = _effective_refresh_eta(th, U)
+        assert eta_curr is not None
         phi_curr = m.phi
         if eta_prev is not None:
             num = jnp.real(_vdot_field(eta_prev, eta_curr))
@@ -1345,10 +1371,11 @@ def test_pseudofermion_refresh_identity(
     for _ in range(max(1, int(n_trials))):
         U = th.hot_start(scale=q_scale)
         m.refresh(U, traj_length=float(traj_length))
-        assert m.eta is not None
         assert m.phi is not None
+        eta_eff = _effective_refresh_eta(th, U)
+        assert eta_eff is not None
         Spf = m.action(U)
-        eta2 = jnp.real(_vdot_field(m.eta, m.eta))
+        eta2 = jnp.real(_vdot_field(eta_eff, eta_eff))
         spf_m = jnp.mean(Spf)
         rel = jnp.abs(spf_m - eta2) / (jnp.abs(eta2) + 1e-12)
         rels.append(float(rel))
