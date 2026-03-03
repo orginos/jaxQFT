@@ -46,6 +46,7 @@ This file is the persistent development contract for this repository.
 - For gauge models (SU3/SU2/U1), keep CLI tests for:
   - `layout`, `timing`, `fd`, `autodiff`, `eps2`, `eps4`, `gauge`, `forcecov`, `forceimpl`, `selfcheck`
 - `selfcheck --selfcheck-fail` should be CI-friendly (nonzero on failure).
+- For Wilson Nf=2 models (SU3/SU2/U1), keep `mcmcsmoke` available as a fast stochastic consistency check, and ensure `--selfcheck-fail` exits nonzero when smoke fails.
 
 ## Public Repo Hygiene
 - Safe to keep public:
@@ -113,4 +114,3 @@ Use this template for issue updates, commit notes, or handoff snippets that will
 4. Add Hasenbusch monomials.
 5. Add RHMC monomials.
 6. Add optional QUDA backend under a solver/operator interface (keep JAX-native default).
-

@@ -27,6 +27,7 @@ except Exception:
 from jaxqft.core import HamiltonianModel
 from jaxqft.fermions import WilsonDiracOperator, check_gamma_algebra, gamma5
 from jaxqft.models.u1_ym import U1YangMills, gauge_transform_links, project_u1_algebra, random_site_gauge
+from jaxqft.testing import SmokeConfig, run_nf2_mcmc_smoke_suite
 
 
 Array = jax.Array
@@ -1746,11 +1747,22 @@ def main():
     ap.add_argument("--jit-dirac-kernels", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--jit-solvers", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--n-iter-timing", type=int, default=10)
+    ap.add_argument("--selfcheck-fail", action="store_true", help="exit nonzero when requested smoke checks fail")
+    ap.add_argument("--mcmcsmoke-seed", type=int, default=1234)
+    ap.add_argument("--mcmcsmoke-noar", type=int, default=2)
+    ap.add_argument("--mcmcsmoke-warmup", type=int, default=8)
+    ap.add_argument("--mcmcsmoke-meas", type=int, default=24)
+    ap.add_argument("--mcmcsmoke-nmd", type=int, default=8)
+    ap.add_argument("--mcmcsmoke-tau", type=float, default=1.0)
+    ap.add_argument("--mcmcsmoke-hot-scale", type=float, default=0.2)
+    ap.add_argument("--mcmcsmoke-iat", type=str, default="gamma", choices=["ips", "sokal", "gamma"])
+    ap.add_argument("--mcmcsmoke-sigma-cut", type=float, default=4.0)
+    ap.add_argument("--mcmcsmoke-repro-steps", type=int, default=3)
     ap.add_argument(
         "--tests",
         type=str,
         default="all",
-        help="comma-separated: gamma,adjoint,normal,perf,eo,hamiltonian,pfrefresh,pfid,gauge,conventions,forcecmp,eopforce,all",
+        help="comma-separated: gamma,adjoint,normal,perf,eo,hamiltonian,pfrefresh,pfid,gauge,conventions,forcecmp,eopforce,mcmcsmoke,all",
     )
     args = ap.parse_args()
 
@@ -1831,6 +1843,7 @@ def main():
     print(f"  pseudofermion force mode: {th.pseudofermion_force_mode}")
     print(f"  auto_refresh_pseudofermions: {bool(th.auto_refresh_pseudofermions)}")
     print(f"  jit dirac kernels / solvers: {bool(th.jit_dirac_kernels)} / {bool(th.jit_solvers)}")
+    smoke_failed = False
 
     if "gamma" in tests:
         g = check_gamma_algebra(th.gamma)
@@ -2031,6 +2044,98 @@ def main():
                     f" {ef['max_rel_force_autodiff_vs_analytic']:.6e} / {ef['mean_rel_force_autodiff_vs_analytic']:.6e}"
                 )
                 print(f"  analytic force sec/call:     {ef['analytic_force_sec_per_call']:.6e}")
+
+    if "mcmcsmoke" in tests:
+        cfg = SmokeConfig(
+            nmd=int(args.mcmcsmoke_nmd),
+            tau=float(args.mcmcsmoke_tau),
+            warmup_no_ar=int(args.mcmcsmoke_noar),
+            warmup_ar=int(args.mcmcsmoke_warmup),
+            nmeas=int(args.mcmcsmoke_meas),
+            hot_scale=float(args.mcmcsmoke_hot_scale),
+            iat_method=str(args.mcmcsmoke_iat),
+            sigma_cut=float(args.mcmcsmoke_sigma_cut),
+            seed=int(args.mcmcsmoke_seed),
+            smd_gamma=float(args.smd_gamma),
+            reproducibility_steps=int(args.mcmcsmoke_repro_steps),
+        )
+
+        def _factory(seed: int, pf_refresh: str):
+            return U1WilsonNf2(
+                lattice_shape=shape,
+                beta=args.beta,
+                batch_size=args.batch,
+                layout=args.layout,
+                mass=args.mass,
+                wilson_r=args.r,
+                cg_tol=float(args.solver_tol),
+                cg_maxiter=int(args.solver_maxiter),
+                solver_kind=str(args.solver_kind),
+                solver_form=str(args.solver_form),
+                preconditioner_kind=str(args.preconditioner),
+                gmres_restart=int(args.gmres_restart),
+                gmres_solve_method=str(args.gmres_solve_method),
+                dirac_kernel=str(args.dirac_kernel),
+                include_gauge_monomial=bool(args.include_gauge_monomial),
+                include_fermion_monomial=bool(args.include_fermion_monomial),
+                fermion_monomial_kind=str(args.fermion_monomial_kind),
+                gauge_timescale=int(args.gauge_timescale),
+                fermion_timescale=int(args.fermion_timescale),
+                pseudofermion_refresh=str(pf_refresh),
+                pseudofermion_gamma=float(pf_gamma),
+                pseudofermion_force_mode=str(args.pf_force_mode),
+                smd_gamma=float(args.smd_gamma),
+                auto_refresh_pseudofermions=bool(args.auto_refresh_pseudofermions),
+                jit_dirac_kernels=bool(args.jit_dirac_kernels),
+                jit_solvers=bool(args.jit_solvers),
+                seed=int(seed),
+            )
+
+        s = run_nf2_mcmc_smoke_suite("U1WilsonNf2", _factory, config=cfg)
+        print("MCMC smoke test:")
+        print(
+            "  HMC+OU:"
+            f" plaq={s['runs']['hmc_ou']['mean_plaquette']:.8f}"
+            f" +/- {s['runs']['hmc_ou']['err_iat']:.6e}"
+            f" acc={s['runs']['hmc_ou']['meas_acceptance']:.4f}"
+        )
+        print(
+            "  SMD+OU:"
+            f" plaq={s['runs']['smd_ou']['mean_plaquette']:.8f}"
+            f" +/- {s['runs']['smd_ou']['err_iat']:.6e}"
+            f" acc={s['runs']['smd_ou']['meas_acceptance']:.4f}"
+        )
+        print(
+            "  HMC+heatbath:"
+            f" plaq={s['runs']['hmc_heatbath']['mean_plaquette']:.8f}"
+            f" +/- {s['runs']['hmc_heatbath']['err_iat']:.6e}"
+            f" acc={s['runs']['hmc_heatbath']['meas_acceptance']:.4f}"
+        )
+        c1 = s["comparisons"]["hmc_ou_vs_smd_ou"]
+        c2 = s["comparisons"]["hmc_ou_vs_hmc_heatbath"]
+        print(
+            "  cmp HMC+OU vs SMD+OU:"
+            f" delta={c1['delta']:.6e} sigma={c1['sigma']:.3f} agree={bool(c1['agree'])}"
+        )
+        print(
+            "  cmp HMC+OU vs HMC+heatbath:"
+            f" delta={c2['delta']:.6e} sigma={c2['sigma']:.3f} agree={bool(c2['agree'])}"
+        )
+        r1 = s["reproducibility"]["hmc_ou"]
+        r2 = s["reproducibility"]["smd_ou"]
+        print(
+            "  reproducibility HMC+OU:"
+            f" max_abs={r1['max_abs_diff']:.3e} tol={r1['tol']:.3e} ok={bool(r1['ok'])}"
+        )
+        print(
+            "  reproducibility SMD+OU:"
+            f" max_abs={r2['max_abs_diff']:.3e} tol={r2['tol']:.3e} ok={bool(r2['ok'])}"
+        )
+        print(f"  pass={bool(s['pass'])}")
+        smoke_failed = not bool(s["pass"])
+
+    if bool(args.selfcheck_fail) and smoke_failed:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

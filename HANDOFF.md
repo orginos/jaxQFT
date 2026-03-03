@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-03-02
+Last updated: 2026-03-03
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -107,6 +107,15 @@ Last updated: 2026-03-02
   - `su3_wilson_nf2` now also includes:
     - `pfsolve`: pseudofermion solver-path consistency (`normal` residuals; split/eo-split cross-checks when non-Hermitian solvers are used)
     - `pfcov`: pseudofermion-force gauge covariance (autodiff and analytic)
+  - Wilson Nf=2 model CLIs (`su3_wilson_nf2`, `su2_wilson_nf2`, `u1_wilson_nf2`) now include:
+    - `mcmcsmoke`: short HMC/SMD consistency smoke check
+      - runs `HMC+OU`, `SMD+OU`, and `HMC+heatbath`
+      - compares plaquette means with IAT-adjusted errors
+      - checks deterministic reproducibility on short fixed-seed trajectories
+      - supports `--selfcheck-fail` (exit code 2 on smoke failure)
+  - Shared smoke harness module:
+    - `jaxqft/testing/mcmc_smoke.py`
+    - top-level matrix runner: `scripts/mcmc/test_nf2_smoke.py`
 - Inline measurement infrastructure:
   - `jaxqft/core/measurements.py`
   - `MeasurementContext` provides per-step data handoff between ordered measurements.
@@ -258,6 +267,13 @@ Last updated: 2026-03-02
     - optional half-spinor toggle: `--no-eo-use-half-spinor` (or benchmark both via default `--eop-perf-compare-halfspinor`)
 - SU3 Wilson pseudofermion refresh diagnostics:
   - `python -m jaxqft.models.su3_wilson_nf2 --tests pfrefresh --pf-refresh heatbath --shape 4,4,4,8`
+- Nf=2 smoke matrix (SU3/SU2/U1):
+  - `python scripts/mcmc/test_nf2_smoke.py --mode quick --selfcheck-fail`
+  - `python scripts/mcmc/test_nf2_smoke.py --mode long --selfcheck-fail --json-out /tmp/nf2_smoke_long.json`
+- Per-model smoke check:
+  - `python -m jaxqft.models.su3_wilson_nf2 --tests mcmcsmoke --selfcheck-fail`
+  - `python -m jaxqft.models.su2_wilson_nf2 --tests mcmcsmoke --selfcheck-fail`
+  - `python -m jaxqft.models.u1_wilson_nf2 --tests mcmcsmoke --selfcheck-fail`
   - `python -m jaxqft.models.su3_wilson_nf2 --tests pfrefresh --pf-refresh ou --smd-gamma 0.3 --traj-length 1.0 --shape 4,4,4,8`
   - `python -m jaxqft.models.su3_wilson_nf2 --tests pfid --shape 4,4,4,8`
   - `python -m jaxqft.models.su3_wilson_nf2 --tests pfid --shape 4,4,4,8 --fermion-monomial-kind eo_preconditioned`
