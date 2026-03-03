@@ -33,3 +33,11 @@ env/
 # JAX / run artifacts
 *.pkl
 *.pdf
+
+# LaTeX artifactos
+*.aux
+*.log
+*.toc
+
+# CLAUDE
+.claude/
