@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import sys
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 
 def _cli_value(argv, flag: str):
@@ -126,6 +127,106 @@ def _fmt_run(label: str, r: Dict) -> str:
     )
 
 
+def _ref_threshold_defaults(mode: str) -> Dict[str, float]:
+    m = str(mode).lower()
+    if m == "quick":
+        return {
+            "max_sigma": 6.0,
+            "max_abs_plaq": 8.0e-2,
+            "max_acc_diff": 2.5e-1,
+        }
+    if m == "long":
+        return {
+            "max_sigma": 4.0,
+            "max_abs_plaq": 3.0e-2,
+            "max_acc_diff": 1.0e-1,
+        }
+    raise ValueError(f"Unknown mode: {mode}")
+
+
+def _f64(x: Any) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float("nan")
+
+
+def _load_reference(path: str) -> Dict[str, Any]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"reference file not found: {p}")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _compare_reference(current_suites, reference_doc: Dict[str, Any], *, max_sigma: float, max_abs_plaq: float, max_acc_diff: float):
+    ref_suites = reference_doc.get("suites", [])
+    ref_by_model = {str(s.get("model")): s for s in ref_suites if isinstance(s, dict)}
+    run_keys = ("hmc_ou", "smd_ou", "hmc_heatbath")
+
+    model_results = {}
+    overall_ok = True
+    for cur in current_suites:
+        model = str(cur.get("model"))
+        ref = ref_by_model.get(model)
+        if ref is None:
+            model_results[model] = {
+                "ok": False,
+                "message": "missing model in reference",
+                "runs": {},
+            }
+            overall_ok = False
+            continue
+
+        runs_cur = cur.get("runs", {})
+        runs_ref = ref.get("runs", {})
+        runs_out = {}
+        model_ok = True
+        for rk in run_keys:
+            c = runs_cur.get(rk)
+            r = runs_ref.get(rk)
+            if not isinstance(c, dict) or not isinstance(r, dict):
+                runs_out[rk] = {"ok": False, "message": "missing run in reference/current"}
+                model_ok = False
+                continue
+
+            mc = _f64(c.get("mean_plaquette"))
+            mr = _f64(r.get("mean_plaquette"))
+            ec = abs(_f64(c.get("err_iat")))
+            er = abs(_f64(r.get("err_iat")))
+            acc_c = _f64(c.get("meas_acceptance"))
+            acc_r = _f64(r.get("meas_acceptance"))
+
+            delta = abs(mc - mr)
+            ed = math.sqrt(max(0.0, ec * ec + er * er))
+            sigma = delta / ed if (math.isfinite(ed) and ed > 0.0) else float("inf")
+            acc_diff = abs(acc_c - acc_r)
+
+            sigma_ok = math.isfinite(sigma) and sigma <= float(max_sigma)
+            abs_ok = math.isfinite(delta) and delta <= float(max_abs_plaq)
+            acc_ok = math.isfinite(acc_diff) and acc_diff <= float(max_acc_diff)
+            run_ok = bool(sigma_ok and abs_ok and acc_ok)
+            runs_out[rk] = {
+                "ok": run_ok,
+                "delta_plaquette": float(delta),
+                "sigma": float(sigma),
+                "acc_diff": float(acc_diff),
+            }
+            model_ok = model_ok and run_ok
+
+        model_results[model] = {"ok": bool(model_ok), "runs": runs_out}
+        overall_ok = overall_ok and model_ok
+
+    return {
+        "ok": bool(overall_ok),
+        "thresholds": {
+            "max_sigma": float(max_sigma),
+            "max_abs_plaq": float(max_abs_plaq),
+            "max_acc_diff": float(max_acc_diff),
+        },
+        "models": model_results,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description="Nf=2 MCMC smoke matrix")
     ap.add_argument("--mode", type=str, default="quick", choices=["quick", "long"])
@@ -150,6 +251,10 @@ def main():
     ap.add_argument("--sigma-cut", type=float, default=None)
     ap.add_argument("--repro-steps", type=int, default=None)
     ap.add_argument("--json-out", type=str, default="")
+    ap.add_argument("--reference-json", type=str, default="")
+    ap.add_argument("--ref-max-sigma", type=float, default=None)
+    ap.add_argument("--ref-max-abs-plaq", type=float, default=None)
+    ap.add_argument("--ref-max-acc-diff", type=float, default=None)
     ap.add_argument("--selfcheck-fail", action="store_true")
     ap.add_argument("--cpu-threads", type=int, default=int(os.environ.get("JAXQFT_CPU_THREADS", "0") or 0))
     ap.add_argument("--cpu-onednn", action=argparse.BooleanOptionalAction, default=None)
@@ -163,6 +268,10 @@ def main():
     tau = float(d["tau"] if args.tau is None else args.tau)
     sigma_cut = float(d["sigma_cut"] if args.sigma_cut is None else args.sigma_cut)
     repro_steps = int(d["repro_steps"] if args.repro_steps is None else args.repro_steps)
+    rt = _ref_threshold_defaults(args.mode)
+    ref_max_sigma = float(rt["max_sigma"] if args.ref_max_sigma is None else args.ref_max_sigma)
+    ref_max_abs_plaq = float(rt["max_abs_plaq"] if args.ref_max_abs_plaq is None else args.ref_max_abs_plaq)
+    ref_max_acc_diff = float(rt["max_acc_diff"] if args.ref_max_acc_diff is None else args.ref_max_acc_diff)
 
     shape_nd4 = _parse_shape(args.shape_nd4)
     shape_u1 = _parse_shape(args.shape_u1)
@@ -266,11 +375,50 @@ def main():
     print("=" * 88)
     print(f"OVERALL PASS: {overall}")
 
+    ref_check = None
+    if args.reference_json:
+        ref_doc = _load_reference(args.reference_json)
+        ref_check = _compare_reference(
+            suites,
+            ref_doc,
+            max_sigma=ref_max_sigma,
+            max_abs_plaq=ref_max_abs_plaq,
+            max_acc_diff=ref_max_acc_diff,
+        )
+        print("=" * 88)
+        print("Reference check:")
+        t = ref_check["thresholds"]
+        print(
+            "  thresholds:"
+            f" sigma<={t['max_sigma']:.3f}"
+            f" |delta_plaq|<={t['max_abs_plaq']:.6e}"
+            f" |delta_acc|<={t['max_acc_diff']:.6e}"
+        )
+        for model, mres in ref_check["models"].items():
+            print(f"  {model}: ok={mres['ok']}")
+            runs = mres.get("runs", {})
+            for rk in ("hmc_ou", "smd_ou", "hmc_heatbath"):
+                rr = runs.get(rk, {})
+                if "message" in rr:
+                    print(f"    {rk}: ok=False ({rr['message']})")
+                    continue
+                print(
+                    f"    {rk}: ok={rr.get('ok', False)}"
+                    f" delta={rr.get('delta_plaquette', float('nan')):.6e}"
+                    f" sigma={rr.get('sigma', float('nan')):.3f}"
+                    f" acc_diff={rr.get('acc_diff', float('nan')):.6e}"
+                )
+        print(f"REFERENCE PASS: {bool(ref_check['ok'])}")
+        overall = overall and bool(ref_check["ok"])
+        print("=" * 88)
+        print(f"OVERALL PASS (with reference): {overall}")
+
     out = {
         "backend": jax.default_backend(),
         "config": cfg.__dict__,
         "suites": suites,
         "overall_pass": bool(overall),
+        "reference_check": ref_check,
     }
     if args.json_out:
         p = Path(args.json_out)
@@ -284,4 +432,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

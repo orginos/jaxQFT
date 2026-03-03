@@ -270,6 +270,14 @@ Last updated: 2026-03-03
 - Nf=2 smoke matrix (SU3/SU2/U1):
   - `python scripts/mcmc/test_nf2_smoke.py --mode quick --selfcheck-fail`
   - `python scripts/mcmc/test_nf2_smoke.py --mode long --selfcheck-fail --json-out /tmp/nf2_smoke_long.json`
+  - compare against stored reference:
+    - `python scripts/mcmc/test_nf2_smoke.py --mode quick --reference-json /tmp/nf2_smoke_quick.json --selfcheck-fail`
+    - `python scripts/mcmc/test_nf2_smoke.py --mode long --reference-json /tmp/nf2_smoke_long.json --selfcheck-fail`
+  - reference thresholds are mode-aware by default:
+    - quick: `sigma<=6`, `|delta_plaq|<=8e-2`, `|delta_acc|<=2.5e-1`
+    - long: `sigma<=4`, `|delta_plaq|<=3e-2`, `|delta_acc|<=1e-1`
+  - optional overrides:
+    - `--ref-max-sigma`, `--ref-max-abs-plaq`, `--ref-max-acc-diff`
 - Per-model smoke check:
   - `python -m jaxqft.models.su3_wilson_nf2 --tests mcmcsmoke --selfcheck-fail`
   - `python -m jaxqft.models.su2_wilson_nf2 --tests mcmcsmoke --selfcheck-fail`
