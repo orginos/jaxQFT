@@ -140,10 +140,10 @@ class WilsonNf2PseudofermionMonomial:
             if self.phi is None:
                 self.phi = phi_noise
             else:
-                # OU update in pseudofermion-field space:
-                # phi <- c1 * phi + c2 * D^\dagger(U) zeta.
+                # OU update in pseudofermion-field space with current-gauge noise map:
+                # phi <- c1 * phi + c2 * D^\dagger(U_current) * eta_noise.
                 self.phi = c1 * self.phi + c2 * phi_noise
-            # In OU mode we do not transport an eta tied to an old gauge field.
+            # In OU mode we do not transport eta across gauge updates.
             self.eta = None
         else:
             raise ValueError(f"Unknown pseudofermion refresh mode: {self.refresh_mode}")
@@ -273,10 +273,10 @@ class WilsonNf2EOPreconditionedMonomial:
             if self.phi is None:
                 self.phi = noise
             else:
-                # OU update on the EO-preconditioned pseudofermion field.
+                # OU update on EO-preconditioned pseudofermion field:
+                # phi_e <- c1 * phi_e + c2 * S_e^\dagger(U_current) * eta_noise,e.
                 self.phi = c1 * self.phi + c2 * noise
             self.phi = self.model._project_even(self.phi)
-            # In OU mode we keep only phi as the dynamical pseudofermion state.
             self.eta = None
         else:
             raise ValueError(f"Unknown pseudofermion refresh mode: {self.refresh_mode}")

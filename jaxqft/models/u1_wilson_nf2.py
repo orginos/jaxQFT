@@ -124,7 +124,8 @@ class WilsonNf2PseudofermionMonomial:
             if self.phi is None:
                 self.phi = phi_noise
             else:
-                # OU update in pseudofermion-field space.
+                # OU update in pseudofermion-field space:
+                # phi <- c1 * phi + c2 * D^\dagger(U_current) * eta_noise.
                 self.phi = c1 * self.phi + c2 * phi_noise
             self.eta = None
         else:
