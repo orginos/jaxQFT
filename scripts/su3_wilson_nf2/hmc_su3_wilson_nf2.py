@@ -214,6 +214,87 @@ def _run_one_trajectory_hmc_no_ar(q, chain):
     return q1
 
 
+def _cold_start_gauge(theory: SU3WilsonNf2):
+    shape = tuple(int(v) for v in theory.field_shape())
+    eye = np.eye(3, dtype=np.complex64)
+    q = np.broadcast_to(eye, shape).copy()
+    return jax.device_put(q)
+
+
+def _extract_gauge_from_pickle_payload(payload, src_path: str):
+    if isinstance(payload, dict):
+        for key in ("q", "U", "gauge", "links", "cfg"):
+            if key in payload:
+                return np.asarray(payload[key]), f"pickle-dict:{key}"
+        raise ValueError(
+            f"Pickle '{src_path}' is a dict but has no gauge key. "
+            f"Expected one of: q/U/gauge/links/cfg."
+        )
+    if isinstance(payload, np.ndarray):
+        return np.asarray(payload), "pickle-array"
+    raise ValueError(
+        f"Unsupported pickle payload type in '{src_path}': {type(payload).__name__}. "
+        "Expected ndarray or dict containing gauge field."
+    )
+
+
+def _normalize_loaded_gauge(gauge: np.ndarray, expected_shape: tuple[int, ...], nd: int):
+    g = np.asarray(gauge)
+    if g.ndim == nd + 3:
+        # Add missing batch dimension.
+        g = g[None, ...]
+    if g.ndim != nd + 4:
+        raise ValueError(
+            f"Loaded gauge rank mismatch: ndim={g.ndim}, expected {nd+4} "
+            f"(shape {tuple(g.shape)} vs expected {expected_shape})"
+        )
+
+    candidates = [("as-is", g)]
+    # Try BM...IJ -> B...MIJ.
+    if g.shape[1] == nd:
+        candidates.append(("bm-to-bxy", np.moveaxis(g, 1, 1 + nd)))
+    # Try B...MIJ -> BM...IJ.
+    if g.shape[1 + nd] == nd:
+        candidates.append(("bxy-to-bm", np.moveaxis(g, 1 + nd, 1)))
+
+    for tag, cand in candidates:
+        if tuple(cand.shape[1:]) != tuple(expected_shape[1:]):
+            continue
+        if cand.shape[0] == expected_shape[0]:
+            return cand.astype(np.complex64, copy=False), tag
+        if cand.shape[0] == 1 and expected_shape[0] > 1:
+            return np.repeat(cand, expected_shape[0], axis=0).astype(np.complex64, copy=False), f"{tag}+repeat-batch"
+
+    tried = ", ".join(f"{tag}:{tuple(c.shape)}" for tag, c in candidates)
+    raise ValueError(
+        "Loaded gauge shape mismatch after layout normalization. "
+        f"expected={expected_shape} got={tuple(g.shape)} tried=[{tried}]"
+    )
+
+
+def _load_start_gauge(path: str, expected_shape: tuple[int, ...], nd: int, batch_size: int):
+    p = Path(path)
+    ext = p.suffix.lower()
+    if ext == ".lime":
+        raw = decode_scidac_gauge(path, batch_size=int(batch_size))
+        src = "lime"
+    elif ext in (".pkl", ".pickle"):
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+        raw, src = _extract_gauge_from_pickle_payload(payload, path)
+    else:
+        # Fallback: try pickle first, then LIME.
+        try:
+            with open(path, "rb") as f:
+                payload = pickle.load(f)
+            raw, src = _extract_gauge_from_pickle_payload(payload, path)
+        except Exception:
+            raw = decode_scidac_gauge(path, batch_size=int(batch_size))
+            src = "lime"
+    q_arr, norm = _normalize_loaded_gauge(raw, expected_shape=expected_shape, nd=int(nd))
+    return jax.device_put(q_arr), f"{src}/{norm}"
+
+
 def _install_monomial_profiler(theory: SU3WilsonNf2):
     stats: Dict[str, Dict[str, float]] = {}
 
@@ -467,6 +548,12 @@ def main():
     ap.add_argument("--cg-maxiter", type=int, default=500)
     ap.add_argument("--solver-kind", type=str, default="cg", choices=["cg", "bicgstab", "gmres"])
     ap.add_argument("--solver-form", type=str, default="normal", choices=["normal", "split", "eo_split"])
+    ap.add_argument(
+        "--solver-chrono-guess",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable chronological x0 solver warm-start cache (can break strict reversibility; default: off)",
+    )
     ap.add_argument("--preconditioner", type=str, default="none", choices=["none", "jacobi"])
     ap.add_argument("--gmres-restart", type=int, default=32)
     ap.add_argument("--gmres-solve-method", type=str, default="batched")
@@ -478,15 +565,33 @@ def main():
     )
     ap.add_argument("--exp-method", type=str, default="su3", choices=["su3", "expm"])
     ap.add_argument(
+        "--start",
+        type=str,
+        default="hot",
+        choices=["hot", "cold", "gauge"],
+        help="starting gauge configuration mode (ignored on --resume)",
+    )
+    ap.add_argument(
         "--hot-start-scale",
         type=float,
         default=0.2,
-        help="initial algebra amplitude for hot start (ignored on --resume)",
+        help="initial algebra amplitude for hot start (used when --start hot; ignored on --resume)",
+    )
+    ap.add_argument(
+        "--init-gauge",
+        type=str,
+        default="",
+        help="path to starting gauge field (.lime, .pkl/.pickle with array or dict containing q/U/gauge/links/cfg)",
     )
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--layout", type=str, default="BMXYIJ", choices=["BMXYIJ", "BXYMIJ", "auto"])
     ap.add_argument("--layout-bench-iters", type=int, default=3)
-    ap.add_argument("--init-cfg-lime", type=str, default="", help="initialize gauge field from SciDAC/ILDG .lime file")
+    ap.add_argument(
+        "--init-cfg-lime",
+        type=str,
+        default="",
+        help="deprecated alias for --init-gauge with .lime file",
+    )
     ap.add_argument(
         "--init-mom-lime",
         type=str,
@@ -642,6 +747,7 @@ def main():
     cg_maxiter = int(args.cg_maxiter)
     solver_kind = str(args.solver_kind)
     solver_form = str(args.solver_form)
+    solver_chrono_guess = bool(args.solver_chrono_guess)
     preconditioner = str(args.preconditioner)
     gmres_restart = int(args.gmres_restart)
     gmres_solve_method = str(args.gmres_solve_method)
@@ -653,7 +759,9 @@ def main():
     nmd = int(args.nmd)
     selected_layout = str(args.layout)
     exp_method = str(args.exp_method)
+    start_mode = str(args.start).lower()
     hot_start_scale = float(args.hot_start_scale)
+    init_gauge = str(args.init_gauge).strip()
     init_cfg_lime = str(args.init_cfg_lime).strip()
     init_mom_lime = str(args.init_mom_lime).strip()
     init_pf_lime = str(args.init_pf_lime).strip()
@@ -673,6 +781,14 @@ def main():
     pf_gamma = args.pf_gamma
     fermion_bc = _parse_fermion_bc(args.fermion_bc, len(lattice_shape))
 
+    if init_cfg_lime and init_gauge and init_cfg_lime != init_gauge:
+        raise ValueError("--init-gauge and --init-cfg-lime were both provided with different paths; use only one.")
+    if init_cfg_lime and not init_gauge:
+        init_gauge = init_cfg_lime
+    if init_gauge and start_mode != "gauge":
+        print(f"Note: --init-gauge provided; overriding --start {start_mode} -> gauge.")
+        start_mode = "gauge"
+
     if ckpt is not None:
         c = ckpt.get("config", {})
         lattice_shape = tuple(c.get("lattice_shape", lattice_shape))
@@ -683,6 +799,7 @@ def main():
         cg_maxiter = int(c.get("cg_maxiter", cg_maxiter))
         solver_kind = str(c.get("solver_kind", solver_kind))
         solver_form = str(c.get("solver_form", solver_form))
+        solver_chrono_guess = bool(c.get("solver_chrono_guess", solver_chrono_guess))
         preconditioner = str(c.get("preconditioner", preconditioner))
         gmres_restart = int(c.get("gmres_restart", gmres_restart))
         gmres_solve_method = str(c.get("gmres_solve_method", gmres_solve_method))
@@ -694,7 +811,9 @@ def main():
         integrator_name = str(c.get("integrator", integrator_name))
         selected_layout = str(c.get("layout", "BMXYIJ"))
         exp_method = str(c.get("exp_method", exp_method))
+        start_mode = str(c.get("start_mode", start_mode))
         hot_start_scale = float(c.get("hot_start_scale", hot_start_scale))
+        init_gauge = str(c.get("init_gauge", init_gauge))
         include_gauge_monomial = bool(c.get("include_gauge_monomial", include_gauge_monomial))
         include_fermion_monomial = bool(c.get("include_fermion_monomial", include_fermion_monomial))
         fermion_monomial_kind = str(c.get("fermion_monomial_kind", fermion_monomial_kind))
@@ -713,6 +832,9 @@ def main():
         nmd = int(ckpt.get("state", {}).get("nmd", nmd))
         print(f"Resuming from {args.resume}")
         print("  using checkpoint config for shape/model/layout/exp_method/integrator/update/tau/skip")
+        if start_mode == "gauge" and init_gauge:
+            print("  note: --start/--init-gauge options are ignored on --resume (checkpoint state takes precedence)")
+            init_gauge = ""
         if init_cfg_lime or init_mom_lime or init_pf_lime:
             print(
                 "  note: --init-*-lime options are ignored on --resume "
@@ -779,6 +901,7 @@ def main():
         cg_maxiter=cg_maxiter,
         solver_kind=solver_kind,
         solver_form=solver_form,
+        use_solver_guess=solver_chrono_guess,
         preconditioner_kind=preconditioner,
         gmres_restart=gmres_restart,
         gmres_solve_method=gmres_solve_method,
@@ -806,7 +929,29 @@ def main():
     if bool(args.profile_monomials):
         monomial_snapshot = _install_monomial_profiler(theory)
 
-    q = theory.hotStart(scale=hot_start_scale)
+    if ckpt is None:
+        if start_mode == "hot":
+            q = theory.hotStart(scale=hot_start_scale)
+            start_desc = f"hot(scale={hot_start_scale:.6g})"
+        elif start_mode == "cold":
+            q = _cold_start_gauge(theory)
+            start_desc = "cold(identity links)"
+        elif start_mode == "gauge":
+            if not init_gauge:
+                raise ValueError("--start gauge requires --init-gauge PATH (or --init-cfg-lime PATH).")
+            q, gauge_src = _load_start_gauge(
+                init_gauge,
+                expected_shape=tuple(int(v) for v in theory.field_shape()),
+                nd=int(theory.Nd),
+                batch_size=int(batch),
+            )
+            start_desc = f"gauge(path='{init_gauge}', source={gauge_src})"
+        else:
+            raise ValueError(f"Unknown --start mode: {start_mode}")
+    else:
+        # Placeholder; overridden by checkpoint payload below.
+        q = theory.hotStart(scale=hot_start_scale)
+        start_desc = "resume(checkpoint q/state)"
 
     I = _build_integrator(integrator_name, theory, nmd, tau)
     if update_name == "hmc":
@@ -875,15 +1020,8 @@ def main():
             f"  resumed state:"
             f" warmup_noar_done={warmup_noar_done}, warmup_done={warmup_done}, meas_done={meas_done}, nmd={nmd}"
         )
+        start_desc = "resume(checkpoint q/state)"
     else:
-        if init_cfg_lime:
-            q_loaded = decode_scidac_gauge(init_cfg_lime, batch_size=batch)
-            if tuple(q_loaded.shape) != tuple(q.shape):
-                raise ValueError(
-                    f"Loaded cfg shape mismatch: {tuple(q_loaded.shape)} vs expected {tuple(q.shape)}"
-                )
-            q = jax.device_put(np.asarray(q_loaded))
-
         if init_mom_lime:
             p_loaded, p_info = decode_scidac_momentum(init_mom_lime, batch_size=batch)
             if hasattr(chain, "p"):
@@ -966,6 +1104,7 @@ def main():
         "  solver:"
         f" kind={solver_kind}"
         f" form={solver_form}"
+        f" chrono_guess={bool(solver_chrono_guess)}"
         f" preconditioner={preconditioner}"
         f" tol={cg_tol}"
         f" maxiter={cg_maxiter}"
@@ -974,7 +1113,9 @@ def main():
         solver_line += f" gmres_restart={gmres_restart} gmres_solve_method={gmres_solve_method}"
     print(solver_line)
     print(f"  exp_method: {exp_method}")
-    print(f"  hot_start_scale: {hot_start_scale}")
+    print(f"  start: {start_desc}")
+    print(f"  start_mode: {start_mode}")
+    print(f"  hot_start_scale: {hot_start_scale} (used only for --start hot)")
     print(f"  batch: {batch}")
     print(f"  layout: {selected_layout}")
     if update_name == "smd":
@@ -1011,10 +1152,10 @@ def main():
         f" bounds=[{args.nmd_min},{args.nmd_max}]"
     )
     print(f"  checkpoint: save='{args.save}' resume='{args.resume or '<none>'}' every={args.save_every}")
-    if ckpt is None and (init_cfg_lime or init_mom_lime or init_pf_lime):
+    if ckpt is None and (init_gauge or init_mom_lime or init_pf_lime):
         print(
-            "  lime init:"
-            f" cfg='{init_cfg_lime or '<none>'}'"
+            "  init files:"
+            f" gauge='{init_gauge or '<none>'}'"
             f" mom='{init_mom_lime or '<none>'}'"
             f" pf='{init_pf_lime or '<none>'}'"
             f" pf_field_index={init_pf_field_index}"
@@ -1033,12 +1174,15 @@ def main():
         "cg_maxiter": int(cg_maxiter),
         "solver_kind": str(solver_kind),
         "solver_form": str(solver_form),
+        "solver_chrono_guess": bool(solver_chrono_guess),
         "preconditioner": str(preconditioner),
         "gmres_restart": int(gmres_restart),
         "gmres_solve_method": str(gmres_solve_method),
         "fermion_bc": tuple(complex(v) for v in fermion_bc),
         "exp_method": str(exp_method),
+        "start_mode": str(start_mode),
         "hot_start_scale": float(hot_start_scale),
+        "init_gauge": str(init_gauge),
         "batch": int(batch),
         "layout": selected_layout,
         "update": update_name,
@@ -1056,7 +1200,7 @@ def main():
         "pf_refresh": str(pf_refresh),
         "pf_force_mode": str(pf_force_mode),
         "pf_gamma": float(pf_gamma),
-        "init_cfg_lime": str(init_cfg_lime),
+        "init_cfg_lime": str(init_gauge),
         "init_mom_lime": str(init_mom_lime),
         "init_pf_lime": str(init_pf_lime),
         "init_pf_field_index": int(init_pf_field_index),

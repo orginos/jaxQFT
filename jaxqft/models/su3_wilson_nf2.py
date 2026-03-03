@@ -150,11 +150,13 @@ class WilsonNf2PseudofermionMonomial:
         assert self.phi is not None
         phi = self.phi
         if self.model.solver_form == "normal":
-            if self._solve_guess is not None and self._solve_guess.shape == phi.shape:
+            use_guess = bool(getattr(self.model, "use_solver_guess", False))
+            if use_guess and self._solve_guess is not None and self._solve_guess.shape == phi.shape:
                 x = self.model.solve_normal_with_guess(q, phi, self._solve_guess)
             else:
                 x = self.model.solve_normal(q, phi)
-            self._solve_guess = x
+            if use_guess:
+                self._solve_guess = x
             return jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(phi, x))
         if self.model.solver_form in ("split", "eo_split"):
             if self.model.solver_form == "eo_split":
@@ -202,11 +204,13 @@ class WilsonNf2PseudofermionMonomial:
             # Reuse Y from the first split solve: D^\dagger Y = phi, D X = Y.
             x, y = self.model.solve_split_with_intermediate(q, phi)
         else:
-            if self._solve_guess is not None and self._solve_guess.shape == phi.shape:
+            use_guess = bool(getattr(self.model, "use_solver_guess", False))
+            if use_guess and self._solve_guess is not None and self._solve_guess.shape == phi.shape:
                 x = self.model.solve_normal_with_guess(q, phi, self._solve_guess)
             else:
                 x = self.model.solve_normal(q, phi)
-            self._solve_guess = x
+            if use_guess:
+                self._solve_guess = x
             y = self.model.apply_D(q, x)
         return self.model.pseudofermion_force_from_solution(q, x, y)
 
@@ -273,11 +277,13 @@ class WilsonNf2EOPreconditionedMonomial:
         assert self.phi is not None
         phi = self.phi
         if self.model.solver_form == "normal":
-            if self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
+            use_guess = bool(getattr(self.model, "use_solver_guess", False))
+            if use_guess and self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
                 x = self.model.solve_eop_even_normal_with_guess(q, phi, self._eop_solve_guess)
             else:
                 x = self.model.solve_eop_even_normal(q, phi)
-            self._eop_solve_guess = x
+            if use_guess:
+                self._eop_solve_guess = x
             return jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(phi, x))
         if self.model.solver_form in ("split", "eo_split"):
             chi = self.model.solve_eop_even_dagger(q, phi)
@@ -321,11 +327,13 @@ class WilsonNf2EOPreconditionedMonomial:
         if self.model.solver_form in ("split", "eo_split"):
             x_e, y_e = self.model.solve_eop_even_split_with_intermediate(q, phi)
         else:
-            if self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
+            use_guess = bool(getattr(self.model, "use_solver_guess", False))
+            if use_guess and self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
                 x_e = self.model.solve_eop_even_normal_with_guess(q, phi, self._eop_solve_guess)
             else:
                 x_e = self.model.solve_eop_even_normal(q, phi)
-            self._eop_solve_guess = x_e
+            if use_guess:
+                self._eop_solve_guess = x_e
             y_e = self.model.apply_eo_schur_even(q, x_e, normalized=True)
         return self.model.eop_pseudofermion_force_from_solution(q, x_e, y_e)
 
@@ -365,6 +373,7 @@ class SU3WilsonNf2(SU3YangMills):
     pseudofermion_force_mode: str = "autodiff"
     smd_gamma: float = 0.3
     auto_refresh_pseudofermions: bool = True
+    use_solver_guess: bool = False
     jit_dirac_kernels: bool = True
     jit_solvers: bool = True
     requires_trajectory_refresh: bool = field(default=False, init=False)
@@ -2476,6 +2485,135 @@ def _build_integrator(name: str, th: SU3WilsonNf2, nmd: int, tau: float):
     raise ValueError(f"Unknown integrator for epsilon test: {name}")
 
 
+def _snapshot_pf_state(th: SU3WilsonNf2) -> Dict[str, Optional[Array]]:
+    m = th.fermion_monomial
+    if m is None:
+        return {}
+    out = {}
+    for k in ("eta", "phi", "_solve_guess", "_eop_solve_guess"):
+        if hasattr(m, k):
+            v = getattr(m, k)
+            out[k] = None if v is None else jnp.array(v)
+    return out
+
+
+def _restore_pf_state(th: SU3WilsonNf2, state: Dict[str, Optional[Array]]) -> None:
+    m = th.fermion_monomial
+    if m is None:
+        return
+    for k, v in state.items():
+        setattr(m, k, None if v is None else jnp.array(v))
+
+
+def _rel_l2(a: Array, b: Array, eps: float = 1e-30) -> float:
+    return float(jnp.linalg.norm(a - b) / (jnp.linalg.norm(b) + eps))
+
+
+def test_reversibility(
+    th: SU3WilsonNf2,
+    integrator: str = "leapfrog",
+    tau: float = 1.0,
+    nmd: int = 8,
+    n_samples: int = 4,
+    q_scale: float = 0.05,
+) -> Dict[str, float]:
+    ns = max(1, int(n_samples))
+    I = _build_integrator(str(integrator), th, int(nmd), float(tau))
+    rel_q = []
+    rel_p = []
+    abs_q = []
+    abs_p = []
+
+    for _ in range(ns):
+        U0 = th.hot_start(scale=float(q_scale))
+        if bool(getattr(th, "requires_trajectory_refresh", False)):
+            th.prepare_trajectory(U0, traj_length=float(tau))
+        p0 = th.refresh_p()
+        pf_state = _snapshot_pf_state(th)
+
+        p1, U1 = I.integrate(p0, U0)
+        p1 = jax.block_until_ready(p1)
+        U1 = jax.block_until_ready(U1)
+
+        _restore_pf_state(th, pf_state)
+        p2, U2 = I.integrate(-p1, U1)
+        p2 = jax.block_until_ready(p2)
+        U2 = jax.block_until_ready(U2)
+
+        rel_q.append(_rel_l2(U2, U0))
+        rel_p.append(_rel_l2(p2, -p0))
+        abs_q.append(float(jnp.max(jnp.abs(U2 - U0))))
+        abs_p.append(float(jnp.max(jnp.abs(p2 + p0))))
+
+    return {
+        "integrator": str(integrator),
+        "tau": float(tau),
+        "nmd": int(nmd),
+        "n_samples": int(ns),
+        "mean_rel_q_roundtrip": float(np.mean(rel_q)),
+        "max_rel_q_roundtrip": float(np.max(rel_q)),
+        "mean_rel_p_roundtrip": float(np.mean(rel_p)),
+        "max_rel_p_roundtrip": float(np.max(rel_p)),
+        "mean_abs_q_roundtrip": float(np.mean(abs_q)),
+        "max_abs_q_roundtrip": float(np.max(abs_q)),
+        "mean_abs_p_roundtrip": float(np.mean(abs_p)),
+        "max_abs_p_roundtrip": float(np.max(abs_p)),
+    }
+
+
+def test_reproducibility(
+    th: SU3WilsonNf2,
+    integrator: str = "leapfrog",
+    tau: float = 1.0,
+    nmd: int = 8,
+    n_samples: int = 4,
+    q_scale: float = 0.05,
+) -> Dict[str, float]:
+    ns = max(1, int(n_samples))
+    I = _build_integrator(str(integrator), th, int(nmd), float(tau))
+    rel_q = []
+    rel_p = []
+    abs_q = []
+    abs_p = []
+
+    for _ in range(ns):
+        U0 = th.hot_start(scale=float(q_scale))
+        if bool(getattr(th, "requires_trajectory_refresh", False)):
+            th.prepare_trajectory(U0, traj_length=float(tau))
+        p0 = th.refresh_p()
+        pf_state = _snapshot_pf_state(th)
+
+        _restore_pf_state(th, pf_state)
+        p1a, U1a = I.integrate(jnp.array(p0), jnp.array(U0))
+        p1a = jax.block_until_ready(p1a)
+        U1a = jax.block_until_ready(U1a)
+
+        _restore_pf_state(th, pf_state)
+        p1b, U1b = I.integrate(jnp.array(p0), jnp.array(U0))
+        p1b = jax.block_until_ready(p1b)
+        U1b = jax.block_until_ready(U1b)
+
+        rel_q.append(_rel_l2(U1a, U1b))
+        rel_p.append(_rel_l2(p1a, p1b))
+        abs_q.append(float(jnp.max(jnp.abs(U1a - U1b))))
+        abs_p.append(float(jnp.max(jnp.abs(p1a - p1b))))
+
+    return {
+        "integrator": str(integrator),
+        "tau": float(tau),
+        "nmd": int(nmd),
+        "n_samples": int(ns),
+        "mean_rel_q_repeat": float(np.mean(rel_q)),
+        "max_rel_q_repeat": float(np.max(rel_q)),
+        "mean_rel_p_repeat": float(np.mean(rel_p)),
+        "max_rel_p_repeat": float(np.max(rel_p)),
+        "mean_abs_q_repeat": float(np.mean(abs_q)),
+        "max_abs_q_repeat": float(np.max(abs_q)),
+        "mean_abs_p_repeat": float(np.mean(abs_p)),
+        "max_abs_p_repeat": float(np.max(abs_p)),
+    }
+
+
 def test_epsilon2(
     th: SU3WilsonNf2,
     integrator: str = "leapfrog",
@@ -2494,37 +2632,19 @@ def test_epsilon2(
 
     ns = max(1, int(n_samples))
 
-    def _snapshot_pf_state() -> Dict[str, Optional[Array]]:
-        m = th.fermion_monomial
-        if m is None:
-            return {}
-        out = {}
-        for k in ("eta", "phi", "_solve_guess", "_eop_solve_guess"):
-            if hasattr(m, k):
-                v = getattr(m, k)
-                out[k] = None if v is None else jnp.array(v)
-        return out
-
-    def _restore_pf_state(state: Dict[str, Optional[Array]]) -> None:
-        m = th.fermion_monomial
-        if m is None:
-            return
-        for k, v in state.items():
-            setattr(m, k, None if v is None else jnp.array(v))
-
     samples = []
     for _ in range(ns):
         U0 = th.hot_start(scale=float(q_scale))
         if bool(getattr(th, "requires_trajectory_refresh", False)):
             th.prepare_trajectory(U0, traj_length=float(tau))
         p0 = th.refresh_p()
-        samples.append((jnp.array(U0), jnp.array(p0), _snapshot_pf_state()))
+        samples.append((jnp.array(U0), jnp.array(p0), _snapshot_pf_state(th)))
 
     for nmd in nmds:
         I = _build_integrator(str(integrator), th, int(nmd), float(tau))
         vals = []
         for U0, p0, pf_state in samples:
-            _restore_pf_state(pf_state)
+            _restore_pf_state(th, pf_state)
             H0 = th.kinetic(p0) + th.action(U0)
             p1, U1 = I.integrate(p0, U0)
             H1 = th.kinetic(p1) + th.action(U1)
@@ -2657,6 +2777,16 @@ def main():
     ap.add_argument("--eps4-nmd-list", type=str, default="4,6,8,12,16")
     ap.add_argument("--eps4-samples", type=int, default=8)
     ap.add_argument("--eps4-qscale", type=float, default=0.05)
+    ap.add_argument("--rev-integrator", type=str, default="leapfrog", choices=["leapfrog", "minnorm2", "forcegrad", "minnorm4pf4"])
+    ap.add_argument("--rev-tau", type=float, default=1.0)
+    ap.add_argument("--rev-nmd", type=int, default=8)
+    ap.add_argument("--rev-samples", type=int, default=4)
+    ap.add_argument("--rev-qscale", type=float, default=0.05)
+    ap.add_argument("--repro-integrator", type=str, default="leapfrog", choices=["leapfrog", "minnorm2", "forcegrad", "minnorm4pf4"])
+    ap.add_argument("--repro-tau", type=float, default=1.0)
+    ap.add_argument("--repro-nmd", type=int, default=8)
+    ap.add_argument("--repro-samples", type=int, default=4)
+    ap.add_argument("--repro-qscale", type=float, default=0.05)
     ap.add_argument("--auto-refresh-pseudofermions", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--jit-dirac-kernels", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--jit-solvers", action=argparse.BooleanOptionalAction, default=True)
@@ -2665,7 +2795,7 @@ def main():
         "--tests",
         type=str,
         default="all",
-        help="comma-separated: gamma,adjoint,normal,perf,eo,eoperf,eps2,eps4,hamiltonian,pfrefresh,pfid,pfsolve,pfcov,gauge,conventions,forcecmp,eopforce,all",
+        help="comma-separated: gamma,adjoint,normal,perf,eo,eoperf,eps2,eps4,reversibility,reproducibility,hamiltonian,pfrefresh,pfid,pfsolve,pfcov,gauge,conventions,forcecmp,eopforce,all",
     )
     args = ap.parse_args()
 
@@ -2680,6 +2810,8 @@ def main():
             "eoperf",
             "eps2",
             "eps4",
+            "reversibility",
+            "reproducibility",
             "hamiltonian",
             "pfrefresh",
             "pfid",
@@ -2859,6 +2991,46 @@ def main():
             print(f"    std  |dH|: {[f'{x:.3e}' for x in e['std_abs_dh']]}")
             print(f"    log-log slope (expected ~4): {float(e['slope']):.4f}")
             print(f"    fit points used: {int(e['fit_points'])} (floor={float(e['fit_floor']):.3e})")
+
+    if "reversibility" in tests:
+        rv = test_reversibility(
+            th,
+            integrator=str(args.rev_integrator),
+            tau=float(args.rev_tau),
+            nmd=int(args.rev_nmd),
+            n_samples=int(args.rev_samples),
+            q_scale=float(args.rev_qscale),
+        )
+        print("Reversibility test (forward then backward trajectory):")
+        print(f"  integrator / tau / nmd / samples: {rv['integrator']} / {rv['tau']:.6g} / {int(rv['nmd'])} / {int(rv['n_samples'])}")
+        print(f"  mean rel q roundtrip: {rv['mean_rel_q_roundtrip']:.6e}")
+        print(f"  max  rel q roundtrip: {rv['max_rel_q_roundtrip']:.6e}")
+        print(f"  mean rel p roundtrip: {rv['mean_rel_p_roundtrip']:.6e}")
+        print(f"  max  rel p roundtrip: {rv['max_rel_p_roundtrip']:.6e}")
+        print(f"  mean abs q roundtrip: {rv['mean_abs_q_roundtrip']:.6e}")
+        print(f"  max  abs q roundtrip: {rv['max_abs_q_roundtrip']:.6e}")
+        print(f"  mean abs p roundtrip: {rv['mean_abs_p_roundtrip']:.6e}")
+        print(f"  max  abs p roundtrip: {rv['max_abs_p_roundtrip']:.6e}")
+
+    if "reproducibility" in tests:
+        rp = test_reproducibility(
+            th,
+            integrator=str(args.repro_integrator),
+            tau=float(args.repro_tau),
+            nmd=int(args.repro_nmd),
+            n_samples=int(args.repro_samples),
+            q_scale=float(args.repro_qscale),
+        )
+        print("Reproducibility test (same trajectory run twice):")
+        print(f"  integrator / tau / nmd / samples: {rp['integrator']} / {rp['tau']:.6g} / {int(rp['nmd'])} / {int(rp['n_samples'])}")
+        print(f"  mean rel q repeat: {rp['mean_rel_q_repeat']:.6e}")
+        print(f"  max  rel q repeat: {rp['max_rel_q_repeat']:.6e}")
+        print(f"  mean rel p repeat: {rp['mean_rel_p_repeat']:.6e}")
+        print(f"  max  rel p repeat: {rp['max_rel_p_repeat']:.6e}")
+        print(f"  mean abs q repeat: {rp['mean_abs_q_repeat']:.6e}")
+        print(f"  max  abs q repeat: {rp['max_abs_q_repeat']:.6e}")
+        print(f"  mean abs p repeat: {rp['mean_abs_p_repeat']:.6e}")
+        print(f"  max  abs p repeat: {rp['max_abs_p_repeat']:.6e}")
 
     if "hamiltonian" in tests:
         h = test_hamiltonian_monomials(th)

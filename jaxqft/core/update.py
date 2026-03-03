@@ -298,7 +298,8 @@ class SMD:
 
                 ar = jnp.where(acc_flag, 1.0, 0.0)
                 q_next = jnp.where(acc_flag.reshape(qshape), q_prop, q_curr)
-                p_next = jnp.where(acc_flag.reshape(pshape), p_prop, -p_curr)
+                # SMD reject branch must flip the post-OU momentum used by MD.
+                p_next = jnp.where(acc_flag.reshape(pshape), p_prop, -p0)
                 return (q_next, p_next, key_curr), (ar, dH)
 
             (q_out, p_out, key_out), (ar_hist, dH_hist) = jax.lax.scan(
