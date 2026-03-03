@@ -599,7 +599,8 @@ class U1WilsonNf2(U1YangMills):
         re = jax.random.normal(k1, self.fermion_shape(), dtype=jnp.float32)
         k2 = self._split_key()
         im = jax.random.normal(k2, self.fermion_shape(), dtype=jnp.float32)
-        return (re + 1j * im).astype(self.dtype)
+        # Complex unit-variance Gaussian: E[|z|^2]=1.
+        return ((re + 1j * im) / jnp.sqrt(jnp.asarray(2.0, dtype=jnp.float32))).astype(self.dtype)
 
     def sample_pseudofermion(self, U: Array) -> Array:
         chi = self.random_fermion()
