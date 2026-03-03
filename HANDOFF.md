@@ -342,12 +342,15 @@ Last updated: 2026-03-02
 - Free field (m2=1.0, 16x16): SAD matches exact propagator to machine precision.
 - phi^4 (m2=-0.40, lam=2.4, 16x16): 3-6x noise reduction across timeslices.
 - phi^4 (m2=-0.40, lam=2.4, 64x32): Up to 950x noise reduction at t=T/2, ~450,000x effective speedup.
+- phi^4 (m2=-0.55, lam=2.4, 256x128): Peak R~12,000 at t~120.
+- phi^4 (m2=-0.55, lam=2.4, 512x256, B=32, N=40000): Peak R~67,000 at t~252, m_eff = 0.090 ± 0.001 for t=3-20.
 
 ### Known pitfalls (see AGENTS.md for details):
 1. Tangent must accumulate across full Markov chain (not per-trajectory).
 2. Leapfrog must use `jax.lax.scan` (not Python for-loop) for efficient JVP.
 3. Source sign convention: `S = S - J * sum(phi[0])` for positive C(t).
 4. Connected subtraction uses per-chain phi_bar, not global mean.
+5. Cosh m_eff solver overflows for large T — use log-space bisection (fixed in `cosh_meff_solve`).
 
 ## Priority Backlog
 1. Add nested integrator schedules over monomial timescales (Sexton-Weingarten style).
