@@ -137,6 +137,7 @@ r = 1.0
 [solver]
 kind = "cg"               # cg | bicgstab | gmres
 form = "normal"           # normal | split | eo_split
+use_solver_guess = false  # chronological initial guess for iterative solves
 tol = 1e-7
 maxiter = 1000
 preconditioner = "none"   # none | jacobi
@@ -348,6 +349,7 @@ def main():
 
     solver_kind = str(_cfg_get(cfg, "solver.kind", "cg"))
     solver_form = str(_cfg_get(cfg, "solver.form", "normal"))
+    solver_use_guess = bool(_cfg_get(cfg, "solver.use_solver_guess", False))
     solver_tol = float(_cfg_get(cfg, "solver.tol", 1e-8))
     solver_maxiter = int(_cfg_get(cfg, "solver.maxiter", 500))
     preconditioner = str(_cfg_get(cfg, "solver.preconditioner", "none"))
@@ -454,6 +456,7 @@ def main():
         cg_maxiter=solver_maxiter,
         solver_kind=solver_kind,
         solver_form=solver_form,
+        use_solver_guess=solver_use_guess,
         preconditioner_kind=preconditioner,
         gmres_restart=gmres_restart,
         gmres_solve_method=gmres_solve_method,
@@ -613,6 +616,15 @@ def main():
     print(f"  theory: {theory_family}/{theory_name}")
     print(f"  shape: {lattice_shape}")
     print(f"  beta/mass/r: {beta} / {mass} / {wilson_r}")
+    print(
+        "  solver:"
+        f" kind={solver_kind}"
+        f" form={solver_form}"
+        f" use_solver_guess={bool(solver_use_guess)}"
+        f" tol={solver_tol}"
+        f" maxiter={solver_maxiter}"
+        f" preconditioner={preconditioner}"
+    )
     print(f"  hot_start_scale: {hot_start_scale}")
     print(f"  update: {update_name}")
     print(f"  integrator: {integrator_name} (tau={tau}, nmd={nmd})")

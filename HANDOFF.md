@@ -48,6 +48,9 @@ Last updated: 2026-03-03
       - `init_use_loaded_pf_first_traj=true`
     - on `output.resume`, `input.init_*_lime` is ignored (checkpoint state wins).
   - TOML template generation: `--write-template`.
+  - Solver chrono-guess is configurable via TOML:
+    - `[solver].use_solver_guess = true|false`
+    - wired through to `SU3WilsonNf2(use_solver_guess=...)`
 - Monomial Hamiltonian infrastructure:
   - `jaxqft/core/hamiltonian.py` with `Monomial` protocol and `HamiltonianModel`.
   - Initial SU3 Wilson Nf=2 monomial composition implemented in `jaxqft/models/su3_wilson_nf2.py`.
@@ -245,6 +248,15 @@ Last updated: 2026-03-03
   - explicit HMC loop timing profile:
     - `--profile-hmc-components` reports per-trajectory timing for `refresh`, `kinetic`, `action`, `integrate`, and residual `other`
     - `--profile-hmc-every N` controls per-trajectory print frequency
+  - dedicated efficiency benchmark for SU3 Nf=2:
+    - `python scripts/su3_wilson_nf2/bench_efficiency_su3_wilson_nf2.py`
+    - target default case:
+      - shape `8,8,8,16`, `beta=5.7`, `mass=0.01`
+      - EO-preconditioned fermion monomial
+      - force-gradient integrator (`tau=1.0`, `nmd=6`)
+      - single timescale metadata (`gauge_timescale=0`, `fermion_timescale=0`)
+      - target gate `mean_sec_per_traj <= 6.0` (`--selfcheck-fail` exits nonzero on failure)
+    - benchmark default enables chronological solver guess (`--solver-chrono-guess`) to match Chroma-style throughput runs
 - SU2 Wilson Nf=2 full harness checks:
   - `python -m jaxqft.models.su2_wilson_nf2 --tests all --shape 4,4,4,8`
   - `python -m jaxqft.models.su2_wilson_nf2 --tests forcecmp --shape 4,4,4,8 --pf-force-mode analytic`
