@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-03-03
+Last updated: 2026-03-05
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -41,16 +41,49 @@ Last updated: 2026-03-03
     - `measure`
   - Separates restart checkpoints from saved gauge-field configurations.
   - Supports SU3 Wilson LIME initialization from control file:
+    - generic start gauge path:
+      - `[input].init_gauge` accepts `.npy`, `.pkl/.pickle`, or `.lime`
+      - `.pkl/.pickle` may be a raw ndarray or dict with one of `q/U/gauge/links/cfg`
+      - layout normalization handles `BM...` / `B...M` placement and singleton-batch expansion
+    - compatibility alias:
+      - `[input].init_cfg_lime` still works and maps to `init_gauge`
     - `[input].init_cfg_lime`, `[input].init_mom_lime`, `[input].init_pf_lime`
     - optional PF leaf index and checkerboard fix controls:
       - `init_pf_field_index`, `init_pf_cb_fix={none,auto,shiftx1}`
     - one-shot skip of first pseudofermion refresh after load:
       - `init_use_loaded_pf_first_traj=true`
     - on `output.resume`, `input.init_*_lime` is ignored (checkpoint state wins).
+    - on `output.resume`, `input.init_gauge` is also ignored (checkpoint state wins).
   - TOML template generation: `--write-template`.
   - Solver chrono-guess is configurable via TOML:
     - `[solver].use_solver_guess = true|false`
     - wired through to `SU3WilsonNf2(use_solver_guess=...)`
+  - Chronological predictor controls (new):
+    - `[solver].guess_mode = "last" | "poly" | "mre"` (also accepts legacy key `solver_guess_mode`)
+    - `[solver].guess_history = N` (also accepts legacy key `solver_guess_history`)
+    - `last`: previous-solution warm start
+    - `poly`: multi-step polynomial extrapolation from previous solutions
+    - `mre`: multi-step minimal-residual extrapolation (Brower-Orginos-style subspace fit)
+    - wired through to `SU3WilsonNf2(solver_guess_mode=..., solver_guess_history=...)`
+    - current practical benchmark on `8^3x16`, `nmd=16` checkpoint replay:
+      - `last` fastest (`h=1`)
+      - optimized `mre` with `h~5` is clearly faster than `poly(h=5)` at this point
+  - Utility script for “fresh restart from gauge only”:
+    - `scripts/mcmc/extract_checkpoint_gauge.py`
+    - extracts `q` from a checkpoint pickle to `.npy` or `.pkl` for use with `[input].init_gauge`.
+  - Utility script for checkpoint cost profiling:
+    - `scripts/mcmc/profile_checkpoint_inversion.py`
+    - replays short trajectory segments from a checkpoint and reports:
+      - mean trajectory wall time
+      - monomial force/action timing
+      - solver (inversion) timing and fraction of trajectory cost
+    - supports solver/integrator overrides on top of checkpoint state
+      (e.g. `--solver-kind bicgstab`) for apples-to-apples cost comparisons
+    - supports chronological-guess overrides:
+      - `--solver-use-guess/--no-solver-use-guess`
+      - `--solver-guess-mode {last,poly}`
+      - `--solver-guess-history N`
+    - writes JSON (default under `runs/.../profiles/` for checkpoints in `ckpts/`).
 - Monomial Hamiltonian infrastructure:
   - `jaxqft/core/hamiltonian.py` with `Monomial` protocol and `HamiltonianModel`.
   - Initial SU3 Wilson Nf=2 monomial composition implemented in `jaxqft/models/su3_wilson_nf2.py`.
@@ -125,7 +158,20 @@ Last updated: 2026-03-03
   - Measurement registry/execution helpers:
     - `build_inline_measurements(...)`
     - `run_inline_measurements(...)`
-  - Current built-in measurement: `plaquette`.
+  - Built-in measurements:
+    - `plaquette`
+    - `pion_2pt` (point-source pseudoscalar two-point; returns `c_t*`)
+    - `proton_2pt` / `nucleon_2pt` (local proton two-point with parity projector; returns `c_t*`)
+  - Correlator timing instrumentation (per measurement record):
+    - inversion stats: `inv_n_solves`, `inv_solve_total_sec_step`, `inv_solve_total_sec_this_call`,
+      `inv_solve_mean/min/max_sec`, `inv_prop_build_wall_sec`, `inv_cache_hit`
+    - wall timers: `wall_total_sec`, `wall_after_prop_sec`
+  - `scripts/mcmc/mcmc.py` now prints inline inversion timing summary in final results.
+  - New external-ensemble measurement driver:
+    - `scripts/su3_wilson_nf2/measure_cfgs_2pt.py`
+    - scans cfg globs (`.lime`/`.npy`/`.pkl`), measures 2pt functions, writes JSON summary.
+  - Correlator notes for unimproved Wilson workflow:
+    - `docs/notes/two_three_point_wilson.md`
 - SciDAC/ILDG LIME I/O:
   - New module: `jaxqft/io/lime.py`
   - Reads LIME headers/records and decodes SciDAC fields (big-endian, lexicographic site order).

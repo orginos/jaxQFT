@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import math
 import os
 import platform
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -81,6 +82,118 @@ def _extract_cg_num_iters(info: object) -> float:
         return float("nan")
 
 
+def _chrono_predict_from_history(
+    history: List[Array],
+    mode: str,
+    max_hist: int,
+) -> Optional[Array]:
+    if not history:
+        return None
+    keep = max(1, int(max_hist))
+    h = history[-keep:]
+    if not h:
+        return None
+    if len(h) == 1:
+        return h[-1]
+
+    mode_l = str(mode).lower()
+    if mode_l == "last":
+        return h[-1]
+    if mode_l == "poly":
+        # Uniform-step chronological polynomial extrapolation:
+        # x_{k+1} ~= sum_{j=0}^{p-1} (-1)^j C(p, j+1) x_{k-j}.
+        p = len(h)
+        x0 = jnp.zeros_like(h[-1])
+        for j in range(p):
+            cj = float(((-1) ** j) * math.comb(p, j + 1))
+            x0 = x0 + cj * h[-1 - j]
+        return x0.astype(h[-1].dtype)
+    return h[-1]
+
+
+def _chrono_predict_mre(
+    history_x: List[Array],
+    history_y: List[Array],
+    target: Array,
+    max_hist: int,
+    reg: float = 1e-12,
+) -> Optional[Array]:
+    """Minimal-residual extrapolation in stored image subspace.
+
+    Given historical pairs (x_i, y_i) with y_i ~= L x_i for some operator L, find
+    coefficients c minimizing ||target - sum_i c_i y_i||_2 and return
+    x0 = sum_i c_i x_i.
+    """
+    if not history_x or not history_y:
+        return None
+    keep = max(1, int(max_hist))
+    pairs = list(zip(history_x, history_y))[-keep:]
+    if not pairs:
+        return None
+    if len(pairs) == 1:
+        return pairs[-1][0]
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+
+    n = len(xs)
+    G = np.zeros((n, n), dtype=np.complex128)
+    g = np.zeros((n,), dtype=np.complex128)
+    # Damp older history entries to reduce unstable far-history coefficients.
+    gamma = 0.35
+    w = np.asarray([math.exp(-gamma * float((n - 1) - i)) for i in range(n)], dtype=np.float64)
+    for i in range(n):
+        yi = ys[i]
+        wi = float(w[i])
+        g[i] = wi * complex(np.asarray(_vdot_field(yi, target)))
+        for j in range(i, n):
+            gij = wi * float(w[j]) * complex(np.asarray(_vdot_field(yi, ys[j])))
+            G[i, j] = gij
+            G[j, i] = np.conj(gij)
+
+    tr = float(np.trace(G).real)
+    lam = float(reg) * max(1.0, abs(tr) / max(1, n))
+    G_reg = G + lam * np.eye(n, dtype=np.complex128)
+    try:
+        c = np.linalg.solve(G_reg, g)
+    except np.linalg.LinAlgError:
+        c, *_ = np.linalg.lstsq(G_reg, g, rcond=None)
+
+    c = c * w.astype(c.dtype)
+    if not np.all(np.isfinite(c.real)) or not np.all(np.isfinite(c.imag)):
+        return xs[-1]
+    cmax = float(np.max(np.abs(c)))
+    cl1 = float(np.sum(np.abs(c)))
+    if cmax > 2.0 or cl1 > 3.0:
+        return xs[-1]
+
+    x0 = jnp.zeros_like(xs[-1])
+    for ci, xi in zip(c, xs):
+        x0 = x0 + jnp.asarray(ci, dtype=x0.dtype) * xi
+
+    # Trust-region blend: shrink to last solution when coefficient norm grows.
+    beta = 1.0 / max(1.0, cl1)
+    x0 = jnp.asarray(beta, dtype=x0.dtype) * x0 + jnp.asarray(1.0 - beta, dtype=x0.dtype) * xs[-1]
+
+    n_last = float(np.asarray(_field_norm(xs[-1])))
+    n_x0 = float(np.asarray(_field_norm(x0)))
+    if (not np.isfinite(n_x0)) or (n_last > 0.0 and n_x0 > 5.0 * n_last):
+        return xs[-1]
+
+    # Only accept MRE guess when it improves the subspace residual proxy
+    # over the latest history image by a minimal margin.
+    y_comb = jnp.zeros_like(ys[-1])
+    for ci, yi in zip(c, ys):
+        y_comb = y_comb + jnp.asarray(ci, dtype=y_comb.dtype) * yi
+    r_mre = float(np.asarray(_field_norm(target - y_comb)))
+    r_last = float(np.asarray(_field_norm(target - ys[-1])))
+    if (not np.isfinite(r_mre)) or (not np.isfinite(r_last)):
+        return xs[-1]
+    if r_mre >= 0.97 * r_last:
+        return xs[-1]
+
+    return x0.astype(xs[-1].dtype)
+
+
 @dataclass
 class GaugeActionMonomial:
     """Gauge plaquette monomial using the optimized pure-gauge kernels."""
@@ -115,6 +228,8 @@ class WilsonNf2PseudofermionMonomial:
     eta: Optional[Array] = field(default=None, init=False, repr=False)
     phi: Optional[Array] = field(default=None, init=False, repr=False)
     _solve_guess: Optional[Array] = field(default=None, init=False, repr=False)
+    _solve_guess_hist: List[Array] = field(default_factory=list, init=False, repr=False)
+    _solve_image_hist: List[Optional[Array]] = field(default_factory=list, init=False, repr=False)
     _grad_links_ad_fn: Optional[object] = field(default=None, init=False, repr=False)
     _force_ad_fn: Optional[object] = field(default=None, init=False, repr=False)
 
@@ -122,9 +237,61 @@ class WilsonNf2PseudofermionMonomial:
         self.eta = None
         self.phi = None
         self._solve_guess = None
+        self._solve_guess_hist = []
+        self._solve_image_hist = []
 
     def clear_solver_guess(self) -> None:
         self._solve_guess = None
+        self._solve_guess_hist = []
+        self._solve_image_hist = []
+
+    def _guess_history_limit(self) -> int:
+        return max(1, int(getattr(self.model, "solver_guess_history", 1)))
+
+    def _guess_mode(self) -> str:
+        return str(getattr(self.model, "solver_guess_mode", "last")).lower()
+
+    def _predict_solver_guess(self, q: Array, phi: Array) -> Optional[Array]:
+        hist = [x for x in self._solve_guess_hist if x.shape == phi.shape]
+        if not hist and self._solve_guess is not None and self._solve_guess.shape == phi.shape:
+            hist = [self._solve_guess]
+        self._solve_guess_hist = hist[-self._guess_history_limit():]
+        img = list(self._solve_image_hist)
+        if len(img) > len(self._solve_guess_hist):
+            img = img[-len(self._solve_guess_hist):]
+        elif len(img) < len(self._solve_guess_hist):
+            img = [None] * (len(self._solve_guess_hist) - len(img)) + img
+        self._solve_image_hist = img
+        mode = self._guess_mode()
+        if mode in ("last", "poly"):
+            return _chrono_predict_from_history(self._solve_guess_hist, mode, self._guess_history_limit())
+        if mode == "mre":
+            if self.eta is not None:
+                xs: List[Array] = []
+                ys: List[Array] = []
+                for xh, yh in zip(self._solve_guess_hist, self._solve_image_hist):
+                    if yh is None:
+                        continue
+                    if yh.shape != self.eta.shape:
+                        continue
+                    xs.append(xh)
+                    ys.append(yh)
+                x0 = _chrono_predict_mre(xs, ys, self.eta, self._guess_history_limit())
+                if x0 is not None:
+                    return x0
+            # Cheap fallback when eta/images are unavailable (e.g. OU refresh).
+            return _chrono_predict_from_history(self._solve_guess_hist, "poly", self._guess_history_limit())
+        return _chrono_predict_from_history(self._solve_guess_hist, "last", self._guess_history_limit())
+
+    def _update_solver_guess(self, x: Array, y: Optional[Array] = None) -> None:
+        self._solve_guess = x
+        self._solve_guess_hist.append(x)
+        self._solve_image_hist.append(None if y is None else y)
+        keep = self._guess_history_limit()
+        if len(self._solve_guess_hist) > keep:
+            self._solve_guess_hist = self._solve_guess_hist[-keep:]
+        if len(self._solve_image_hist) > keep:
+            self._solve_image_hist = self._solve_image_hist[-keep:]
 
     def refresh(self, q: Array, traj_length: float = 1.0) -> None:
         mode = str(self.refresh_mode).lower()
@@ -149,6 +316,8 @@ class WilsonNf2PseudofermionMonomial:
         else:
             raise ValueError(f"Unknown pseudofermion refresh mode: {self.refresh_mode}")
         self._solve_guess = None
+        self._solve_guess_hist = []
+        self._solve_image_hist = []
 
     def action(self, q: Array) -> Array:
         if self.phi is None:
@@ -157,12 +326,13 @@ class WilsonNf2PseudofermionMonomial:
         phi = self.phi
         if self.model.solver_form == "normal":
             use_guess = bool(getattr(self.model, "use_solver_guess", False))
-            if use_guess and self._solve_guess is not None and self._solve_guess.shape == phi.shape:
-                x = self.model.solve_normal_with_guess(q, phi, self._solve_guess)
+            x0 = self._predict_solver_guess(q, phi) if use_guess else None
+            if use_guess and x0 is not None:
+                x = self.model.solve_normal_with_guess(q, phi, x0)
             else:
                 x = self.model.solve_normal(q, phi)
             if use_guess:
-                self._solve_guess = x
+                self._update_solver_guess(x)
             return jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(phi, x))
         if self.model.solver_form in ("split", "eo_split"):
             if self.model.solver_form == "eo_split":
@@ -211,13 +381,14 @@ class WilsonNf2PseudofermionMonomial:
             x, y = self.model.solve_split_with_intermediate(q, phi)
         else:
             use_guess = bool(getattr(self.model, "use_solver_guess", False))
-            if use_guess and self._solve_guess is not None and self._solve_guess.shape == phi.shape:
-                x = self.model.solve_normal_with_guess(q, phi, self._solve_guess)
+            x0 = self._predict_solver_guess(q, phi) if use_guess else None
+            if use_guess and x0 is not None:
+                x = self.model.solve_normal_with_guess(q, phi, x0)
             else:
                 x = self.model.solve_normal(q, phi)
-            if use_guess:
-                self._solve_guess = x
             y = self.model.apply_D(q, x)
+            if use_guess:
+                self._update_solver_guess(x, y)
         return self.model.pseudofermion_force_from_solution(q, x, y)
 
     def force(self, q: Array) -> Array:
@@ -246,6 +417,8 @@ class WilsonNf2EOPreconditionedMonomial:
     eta: Optional[Array] = field(default=None, init=False, repr=False)
     phi: Optional[Array] = field(default=None, init=False, repr=False)
     _eop_solve_guess: Optional[Array] = field(default=None, init=False, repr=False)
+    _eop_solve_guess_hist: List[Array] = field(default_factory=list, init=False, repr=False)
+    _eop_solve_image_hist: List[Optional[Array]] = field(default_factory=list, init=False, repr=False)
     _grad_links_ad_fn: Optional[object] = field(default=None, init=False, repr=False)
     _force_ad_fn: Optional[object] = field(default=None, init=False, repr=False)
 
@@ -253,9 +426,61 @@ class WilsonNf2EOPreconditionedMonomial:
         self.eta = None
         self.phi = None
         self._eop_solve_guess = None
+        self._eop_solve_guess_hist = []
+        self._eop_solve_image_hist = []
 
     def clear_solver_guess(self) -> None:
         self._eop_solve_guess = None
+        self._eop_solve_guess_hist = []
+        self._eop_solve_image_hist = []
+
+    def _guess_history_limit(self) -> int:
+        return max(1, int(getattr(self.model, "solver_guess_history", 1)))
+
+    def _guess_mode(self) -> str:
+        return str(getattr(self.model, "solver_guess_mode", "last")).lower()
+
+    def _predict_solver_guess(self, q: Array, phi: Array) -> Optional[Array]:
+        hist = [x for x in self._eop_solve_guess_hist if x.shape == phi.shape]
+        if not hist and self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
+            hist = [self._eop_solve_guess]
+        self._eop_solve_guess_hist = hist[-self._guess_history_limit():]
+        img = list(self._eop_solve_image_hist)
+        if len(img) > len(self._eop_solve_guess_hist):
+            img = img[-len(self._eop_solve_guess_hist):]
+        elif len(img) < len(self._eop_solve_guess_hist):
+            img = [None] * (len(self._eop_solve_guess_hist) - len(img)) + img
+        self._eop_solve_image_hist = img
+        mode = self._guess_mode()
+        if mode in ("last", "poly"):
+            return _chrono_predict_from_history(self._eop_solve_guess_hist, mode, self._guess_history_limit())
+        if mode == "mre":
+            if self.eta is not None:
+                xs: List[Array] = []
+                ys: List[Array] = []
+                for xh, yh in zip(self._eop_solve_guess_hist, self._eop_solve_image_hist):
+                    if yh is None:
+                        continue
+                    if yh.shape != self.eta.shape:
+                        continue
+                    xs.append(xh)
+                    ys.append(yh)
+                x0 = _chrono_predict_mre(xs, ys, self.eta, self._guess_history_limit())
+                if x0 is not None:
+                    return x0
+            # Cheap fallback when eta/images are unavailable (e.g. OU refresh).
+            return _chrono_predict_from_history(self._eop_solve_guess_hist, "poly", self._guess_history_limit())
+        return _chrono_predict_from_history(self._eop_solve_guess_hist, "last", self._guess_history_limit())
+
+    def _update_solver_guess(self, x: Array, y: Optional[Array] = None) -> None:
+        self._eop_solve_guess = x
+        self._eop_solve_guess_hist.append(x)
+        self._eop_solve_image_hist.append(None if y is None else y)
+        keep = self._guess_history_limit()
+        if len(self._eop_solve_guess_hist) > keep:
+            self._eop_solve_guess_hist = self._eop_solve_guess_hist[-keep:]
+        if len(self._eop_solve_image_hist) > keep:
+            self._eop_solve_image_hist = self._eop_solve_image_hist[-keep:]
 
     def refresh(self, q: Array, traj_length: float = 1.0) -> None:
         mode = str(self.refresh_mode).lower()
@@ -282,6 +507,8 @@ class WilsonNf2EOPreconditionedMonomial:
         else:
             raise ValueError(f"Unknown pseudofermion refresh mode: {self.refresh_mode}")
         self._eop_solve_guess = None
+        self._eop_solve_guess_hist = []
+        self._eop_solve_image_hist = []
 
     def action(self, q: Array) -> Array:
         if self.phi is None:
@@ -290,12 +517,13 @@ class WilsonNf2EOPreconditionedMonomial:
         phi = self.phi
         if self.model.solver_form == "normal":
             use_guess = bool(getattr(self.model, "use_solver_guess", False))
-            if use_guess and self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
-                x = self.model.solve_eop_even_normal_with_guess(q, phi, self._eop_solve_guess)
+            x0 = self._predict_solver_guess(q, phi) if use_guess else None
+            if use_guess and x0 is not None:
+                x = self.model.solve_eop_even_normal_with_guess(q, phi, x0)
             else:
                 x = self.model.solve_eop_even_normal(q, phi)
             if use_guess:
-                self._eop_solve_guess = x
+                self._update_solver_guess(x)
             return jnp.real(jax.vmap(_vdot_field, in_axes=(0, 0))(phi, x))
         if self.model.solver_form in ("split", "eo_split"):
             chi = self.model.solve_eop_even_dagger(q, phi)
@@ -340,13 +568,14 @@ class WilsonNf2EOPreconditionedMonomial:
             x_e, y_e = self.model.solve_eop_even_split_with_intermediate(q, phi)
         else:
             use_guess = bool(getattr(self.model, "use_solver_guess", False))
-            if use_guess and self._eop_solve_guess is not None and self._eop_solve_guess.shape == phi.shape:
-                x_e = self.model.solve_eop_even_normal_with_guess(q, phi, self._eop_solve_guess)
+            x0 = self._predict_solver_guess(q, phi) if use_guess else None
+            if use_guess and x0 is not None:
+                x_e = self.model.solve_eop_even_normal_with_guess(q, phi, x0)
             else:
                 x_e = self.model.solve_eop_even_normal(q, phi)
-            if use_guess:
-                self._eop_solve_guess = x_e
             y_e = self.model.apply_eo_schur_even(q, x_e, normalized=True)
+            if use_guess:
+                self._update_solver_guess(x_e, y_e)
         return self.model.eop_pseudofermion_force_from_solution(q, x_e, y_e)
 
     def force(self, q: Array) -> Array:
@@ -386,6 +615,8 @@ class SU3WilsonNf2(SU3YangMills):
     smd_gamma: float = 0.3
     auto_refresh_pseudofermions: bool = True
     use_solver_guess: bool = False
+    solver_guess_mode: str = "last"  # {last, poly, mre}
+    solver_guess_history: int = 1
     jit_dirac_kernels: bool = True
     jit_solvers: bool = True
     requires_trajectory_refresh: bool = field(default=False, init=False)
@@ -396,6 +627,8 @@ class SU3WilsonNf2(SU3YangMills):
         self.solver_kind = str(self.solver_kind).lower()
         self.solver_form = str(self.solver_form).lower()
         self.preconditioner_kind = str(self.preconditioner_kind).lower()
+        self.solver_guess_mode = str(self.solver_guess_mode).lower()
+        self.solver_guess_history = int(self.solver_guess_history)
         self.dirac_kernel = str(self.dirac_kernel).lower()
         self.fermion_monomial_kind = str(self.fermion_monomial_kind).lower()
         if self.solver_kind not in ("cg", "bicgstab", "gmres"):
@@ -410,6 +643,10 @@ class SU3WilsonNf2(SU3YangMills):
             raise ValueError("solver_kind=gmres requested, but jax.scipy.sparse.linalg.gmres is unavailable")
         if self.preconditioner_kind not in ("none", "jacobi"):
             raise ValueError("preconditioner_kind must be one of: none, jacobi")
+        if self.solver_guess_mode not in ("last", "poly", "mre"):
+            raise ValueError("solver_guess_mode must be one of: last, poly, mre")
+        if self.solver_guess_history <= 0:
+            raise ValueError("solver_guess_history must be positive")
         if self.dirac_kernel not in ("optimized", "reference"):
             raise ValueError("dirac_kernel must be one of: optimized, reference")
         if self.fermion_monomial_kind not in ("unpreconditioned", "eo_preconditioned"):
@@ -2521,24 +2758,34 @@ def _build_integrator(name: str, th: SU3WilsonNf2, nmd: int, tau: float):
     raise ValueError(f"Unknown integrator for epsilon test: {name}")
 
 
-def _snapshot_pf_state(th: SU3WilsonNf2) -> Dict[str, Optional[Array]]:
+def _snapshot_pf_state(th: SU3WilsonNf2) -> Dict[str, Any]:
     m = th.fermion_monomial
     if m is None:
         return {}
-    out = {}
+    out: Dict[str, Any] = {}
     for k in ("eta", "phi", "_solve_guess", "_eop_solve_guess"):
         if hasattr(m, k):
             v = getattr(m, k)
             out[k] = None if v is None else jnp.array(v)
+    for k in ("_solve_guess_hist", "_eop_solve_guess_hist", "_solve_image_hist", "_eop_solve_image_hist"):
+        if hasattr(m, k):
+            hist = getattr(m, k)
+            if hist is None:
+                out[k] = []
+            else:
+                out[k] = [None if v is None else jnp.array(v) for v in hist]
     return out
 
 
-def _restore_pf_state(th: SU3WilsonNf2, state: Dict[str, Optional[Array]]) -> None:
+def _restore_pf_state(th: SU3WilsonNf2, state: Dict[str, Any]) -> None:
     m = th.fermion_monomial
     if m is None:
         return
     for k, v in state.items():
-        setattr(m, k, None if v is None else jnp.array(v))
+        if isinstance(v, list):
+            setattr(m, k, [None if x is None else jnp.array(x) for x in v])
+        else:
+            setattr(m, k, None if v is None else jnp.array(v))
 
 
 def _rel_l2(a: Array, b: Array, eps: float = 1e-30) -> float:
@@ -2749,6 +2996,25 @@ def main():
     ap.add_argument("--solver-kind", type=str, default="cg", choices=["cg", "bicgstab", "gmres"])
     ap.add_argument("--solver-form", type=str, default="normal", choices=["normal", "split", "eo_split"])
     ap.add_argument("--preconditioner", type=str, default="none", choices=["none", "jacobi"])
+    ap.add_argument(
+        "--solver-chrono-guess",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable chronological x0 guesses for iterative solves",
+    )
+    ap.add_argument(
+        "--solver-guess-mode",
+        type=str,
+        default="last",
+        choices=["last", "poly", "mre"],
+        help="chronological predictor mode: last=copy last solution, poly=polynomial extrapolation, mre=min-residual extrapolation",
+    )
+    ap.add_argument(
+        "--solver-guess-history",
+        type=int,
+        default=1,
+        help="number of previous solutions retained for chronological predictor",
+    )
     ap.add_argument("--gmres-restart", type=int, default=32)
     ap.add_argument("--gmres-solve-method", type=str, default="batched")
     ap.add_argument("--dirac-kernel", type=str, default="optimized", choices=["optimized", "reference"])
@@ -2890,6 +3156,9 @@ def main():
         solver_kind=str(args.solver_kind),
         solver_form=str(args.solver_form),
         preconditioner_kind=str(args.preconditioner),
+        use_solver_guess=bool(args.solver_chrono_guess),
+        solver_guess_mode=str(args.solver_guess_mode),
+        solver_guess_history=int(args.solver_guess_history),
         gmres_restart=int(args.gmres_restart),
         gmres_solve_method=str(args.gmres_solve_method),
         dirac_kernel=str(args.dirac_kernel),
@@ -2929,6 +3198,9 @@ def main():
         f" kind={th.solver_kind}"
         f" form={th.solver_form}"
         f" preconditioner={th.preconditioner_kind}"
+        f" chrono_guess={bool(th.use_solver_guess)}"
+        f" guess_mode={th.solver_guess_mode}"
+        f" guess_history={int(th.solver_guess_history)}"
         f" tol={th.cg_tol}"
         f" maxiter={th.cg_maxiter}"
     )

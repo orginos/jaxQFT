@@ -554,6 +554,19 @@ def main():
         default=False,
         help="enable chronological x0 solver warm-start cache (can break strict reversibility; default: off)",
     )
+    ap.add_argument(
+        "--solver-guess-mode",
+        type=str,
+        default="last",
+        choices=["last", "poly", "mre"],
+        help="chronological predictor mode: last=copy last solution, poly=polynomial extrapolation, mre=min-residual extrapolation",
+    )
+    ap.add_argument(
+        "--solver-guess-history",
+        type=int,
+        default=1,
+        help="number of previous solutions retained for chronological predictor",
+    )
     ap.add_argument("--preconditioner", type=str, default="none", choices=["none", "jacobi"])
     ap.add_argument("--gmres-restart", type=int, default=32)
     ap.add_argument("--gmres-solve-method", type=str, default="batched")
@@ -748,6 +761,8 @@ def main():
     solver_kind = str(args.solver_kind)
     solver_form = str(args.solver_form)
     solver_chrono_guess = bool(args.solver_chrono_guess)
+    solver_guess_mode = str(args.solver_guess_mode)
+    solver_guess_history = int(args.solver_guess_history)
     preconditioner = str(args.preconditioner)
     gmres_restart = int(args.gmres_restart)
     gmres_solve_method = str(args.gmres_solve_method)
@@ -800,6 +815,8 @@ def main():
         solver_kind = str(c.get("solver_kind", solver_kind))
         solver_form = str(c.get("solver_form", solver_form))
         solver_chrono_guess = bool(c.get("solver_chrono_guess", solver_chrono_guess))
+        solver_guess_mode = str(c.get("solver_guess_mode", solver_guess_mode))
+        solver_guess_history = int(c.get("solver_guess_history", solver_guess_history))
         preconditioner = str(c.get("preconditioner", preconditioner))
         gmres_restart = int(c.get("gmres_restart", gmres_restart))
         gmres_solve_method = str(c.get("gmres_solve_method", gmres_solve_method))
@@ -902,6 +919,8 @@ def main():
         solver_kind=solver_kind,
         solver_form=solver_form,
         use_solver_guess=solver_chrono_guess,
+        solver_guess_mode=solver_guess_mode,
+        solver_guess_history=solver_guess_history,
         preconditioner_kind=preconditioner,
         gmres_restart=gmres_restart,
         gmres_solve_method=gmres_solve_method,
@@ -1105,6 +1124,8 @@ def main():
         f" kind={solver_kind}"
         f" form={solver_form}"
         f" chrono_guess={bool(solver_chrono_guess)}"
+        f" guess_mode={solver_guess_mode}"
+        f" guess_history={int(solver_guess_history)}"
         f" preconditioner={preconditioner}"
         f" tol={cg_tol}"
         f" maxiter={cg_maxiter}"
@@ -1175,6 +1196,8 @@ def main():
         "solver_kind": str(solver_kind),
         "solver_form": str(solver_form),
         "solver_chrono_guess": bool(solver_chrono_guess),
+        "solver_guess_mode": str(solver_guess_mode),
+        "solver_guess_history": int(solver_guess_history),
         "preconditioner": str(preconditioner),
         "gmres_restart": int(gmres_restart),
         "gmres_solve_method": str(gmres_solve_method),
