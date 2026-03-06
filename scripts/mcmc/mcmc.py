@@ -105,6 +105,8 @@ from jaxqft.core.update import SMD, hmc
 from jaxqft.io import decode_scidac_gauge, decode_scidac_momentum, decode_scidac_pseudofermion
 from jaxqft.models.su3_wilson_nf2 import SU3WilsonNf2
 from jaxqft.models.su3_ym import SU3YangMills
+from jaxqft.models.u1_wilson_nf2 import U1WilsonNf2
+from jaxqft.models.u1_ym import U1YangMills
 from jaxqft.stats import integrated_autocorr_time
 
 
@@ -112,13 +114,13 @@ TEMPLATE_TOML = """# jaxQFT unified MCMC control file
 control_version = 1
 
 [run]
-theory_family = "su3"
-theory = "su3_wilson_nf2"
+theory_family = "su3"      # su3 | u1
+theory = "su3_wilson_nf2"  # su3_wilson_nf2 | u1_wilson_nf2
 seed = 0
 shape = [8, 8, 8, 16]
 batch = 1
 layout = "BMXYIJ"  # BMXYIJ | BXYMIJ | auto
-exp_method = "su3"
+exp_method = "su3" # su3-only
 hot_start_scale = 0.2
 
 [input]
@@ -134,7 +136,7 @@ init_use_loaded_pf_first_traj = true  # skip one PF refresh after load
 beta = 5.7
 mass = 0.05
 r = 1.0
-fermion_bc = "periodic"   # periodic | antiperiodic-t | "1,1,1,-1"
+fermion_bc = "periodic"   # su3-only: periodic | antiperiodic-t | "1,1,1,-1"
 
 [solver]
 kind = "cg"               # cg | bicgstab | gmres
@@ -202,6 +204,11 @@ every = 1
 #name = "pion_2pt"
 #every = 20
 #source = [0, 0, 0, 0]
+#momenta = [0, 1, 2, 3, 4]
+#mom_axis = 0
+#propagator_backend = "iterative"  # iterative | dense | auto
+#dense_max_dof = 4096
+#source_average = false
 
 # Point-source proton two-point with positive-parity projector (1 + gamma_t)/2.
 #[[measurements.inline]]
@@ -210,6 +217,20 @@ every = 1
 #every = 20
 #source = [0, 0, 0, 0]
 #parity = "+"
+
+# Flavor-singlet eta channel (dense inverse; includes disconnected loops).
+#[[measurements.inline]]
+#type = "eta_2pt"
+#name = "eta_2pt"
+#every = 50
+#source = [0, 0]
+#momenta = [0, 1, 2, 3, 4]
+#mom_axis = 0
+#dense_max_dof = 4096
+#source_average = true
+#n_flavor = 2
+#include_connected = true
+#include_full = true
 """
 
 
@@ -264,7 +285,7 @@ def _default_target_accept(name: str) -> float:
     return 0.90 if _integrator_order(name) == 4 else 0.68
 
 
-def _build_integrator(name: str, theory: SU3WilsonNf2, nmd: int, tau: float):
+def _build_integrator(name: str, theory, nmd: int, tau: float):
     if name == "minnorm2":
         return minnorm2(theory.force, theory.evolveQ, nmd, tau)
     if name == "leapfrog":
@@ -311,19 +332,22 @@ def _extract_gauge_from_pickle_payload(payload, src_path: str):
 
 def _normalize_loaded_gauge(gauge: np.ndarray, expected_shape: tuple[int, ...], nd: int):
     g = np.asarray(gauge)
-    if g.ndim == nd + 3:
+    exp_ndim = int(len(expected_shape))
+    if g.ndim == exp_ndim - 1:
         g = g[None, ...]
-    if g.ndim != nd + 4:
+    if g.ndim != exp_ndim:
         raise ValueError(
-            f"Loaded gauge rank mismatch: ndim={g.ndim}, expected {nd+4} "
+            f"Loaded gauge rank mismatch: ndim={g.ndim}, expected {exp_ndim} "
             f"(shape {tuple(g.shape)} vs expected {expected_shape})"
         )
 
     candidates = [("as-is", g)]
-    if g.shape[1] == nd:
-        candidates.append(("bm-to-bxy", np.moveaxis(g, 1, 1 + nd)))
-    if g.shape[1 + nd] == nd:
-        candidates.append(("bxy-to-bm", np.moveaxis(g, 1 + nd, 1)))
+    mu_axis_bm = 1
+    mu_axis_bxy = 1 + int(nd)
+    if 0 <= mu_axis_bm < g.ndim and g.shape[mu_axis_bm] == nd and 0 <= mu_axis_bxy < g.ndim:
+        candidates.append(("bm-to-bxy", np.moveaxis(g, mu_axis_bm, mu_axis_bxy)))
+    if 0 <= mu_axis_bxy < g.ndim and g.shape[mu_axis_bxy] == nd and 0 <= mu_axis_bm < g.ndim:
+        candidates.append(("bxy-to-bm", np.moveaxis(g, mu_axis_bxy, mu_axis_bm)))
 
     for tag, cand in candidates:
         if tuple(cand.shape[1:]) != tuple(expected_shape[1:]):
@@ -380,6 +404,9 @@ def _save_checkpoint(path: str, q, theory, chain, state: Dict[str, Any], config:
         "config": config,
         "timestamp": time.time(),
     }
+    parent = os.path.dirname(str(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(payload, f)
 
@@ -431,9 +458,15 @@ def main():
 
     theory_family = str(_cfg_get(cfg, "run.theory_family", "su3")).lower()
     theory_name = str(_cfg_get(cfg, "run.theory", "su3_wilson_nf2")).lower()
-    if theory_family != "su3" or theory_name != "su3_wilson_nf2":
+    supported = {
+        ("su3", "su3_wilson_nf2"),
+        ("u1", "u1_wilson_nf2"),
+    }
+    if (theory_family, theory_name) not in supported:
+        opts = ", ".join(sorted(f"{fam}/{th}" for fam, th in supported))
         raise ValueError(
-            "mcmc.py currently supports run.theory_family='su3' and run.theory='su3_wilson_nf2' only"
+            f"Unsupported theory selection: {theory_family}/{theory_name}. "
+            f"Supported: {opts}"
         )
 
     seed = int(_cfg_get(cfg, "run.seed", 0))
@@ -549,49 +582,88 @@ def main():
         init_pf_lime = ""
 
     if layout == "auto" and ckpt is None:
-        timings = SU3YangMills.benchmark_layout(
-            lattice_shape=lattice_shape,
-            beta=beta,
-            batch_size=max(1, batch),
-            n_iter=3,
-            seed=seed,
-            exp_method=exp_method,
-        )
+        if theory_family == "su3":
+            timings = SU3YangMills.benchmark_layout(
+                lattice_shape=lattice_shape,
+                beta=beta,
+                batch_size=max(1, batch),
+                n_iter=3,
+                seed=seed,
+                exp_method=exp_method,
+            )
+        else:
+            timings = U1YangMills.benchmark_layout(
+                lattice_shape=lattice_shape,
+                beta=beta,
+                batch_size=max(1, batch),
+                n_iter=3,
+                seed=seed,
+            )
         layout = min(timings, key=timings.get)
         print("Layout benchmark (s/action):", timings)
         print("Selected layout:", layout)
 
-    theory = SU3WilsonNf2(
-        lattice_shape=lattice_shape,
-        beta=beta,
-        batch_size=batch,
-        layout=layout,
-        seed=seed,
-        exp_method=exp_method,
-        mass=mass,
-        wilson_r=wilson_r,
-        cg_tol=solver_tol,
-        cg_maxiter=solver_maxiter,
-        solver_kind=solver_kind,
-        solver_form=solver_form,
-        use_solver_guess=solver_use_guess,
-        solver_guess_mode=solver_guess_mode,
-        solver_guess_history=solver_guess_history,
-        preconditioner_kind=preconditioner,
-        gmres_restart=gmres_restart,
-        gmres_solve_method=gmres_solve_method,
-        fermion_bc=fermion_bc,
-        include_gauge_monomial=include_gauge,
-        include_fermion_monomial=include_fermion,
-        fermion_monomial_kind=fermion_kind,
-        gauge_timescale=gauge_timescale,
-        fermion_timescale=fermion_timescale,
-        pseudofermion_refresh=pf_refresh,
-        pseudofermion_gamma=pf_gamma,
-        pseudofermion_force_mode=pf_force_mode,
-        smd_gamma=smd_gamma,
-        auto_refresh_pseudofermions=True,
-    )
+    if theory_family == "su3":
+        theory = SU3WilsonNf2(
+            lattice_shape=lattice_shape,
+            beta=beta,
+            batch_size=batch,
+            layout=layout,
+            seed=seed,
+            exp_method=exp_method,
+            mass=mass,
+            wilson_r=wilson_r,
+            cg_tol=solver_tol,
+            cg_maxiter=solver_maxiter,
+            solver_kind=solver_kind,
+            solver_form=solver_form,
+            use_solver_guess=solver_use_guess,
+            solver_guess_mode=solver_guess_mode,
+            solver_guess_history=solver_guess_history,
+            preconditioner_kind=preconditioner,
+            gmres_restart=gmres_restart,
+            gmres_solve_method=gmres_solve_method,
+            fermion_bc=fermion_bc,
+            include_gauge_monomial=include_gauge,
+            include_fermion_monomial=include_fermion,
+            fermion_monomial_kind=fermion_kind,
+            gauge_timescale=gauge_timescale,
+            fermion_timescale=fermion_timescale,
+            pseudofermion_refresh=pf_refresh,
+            pseudofermion_gamma=pf_gamma,
+            pseudofermion_force_mode=pf_force_mode,
+            smd_gamma=smd_gamma,
+            auto_refresh_pseudofermions=True,
+        )
+    else:
+        if solver_use_guess:
+            print("Note: solver.use_solver_guess is currently ignored for u1_wilson_nf2.")
+        theory = U1WilsonNf2(
+            lattice_shape=lattice_shape,
+            beta=beta,
+            batch_size=batch,
+            layout=layout,
+            seed=seed,
+            mass=mass,
+            wilson_r=wilson_r,
+            cg_tol=solver_tol,
+            cg_maxiter=solver_maxiter,
+            solver_kind=solver_kind,
+            solver_form=solver_form,
+            preconditioner_kind=preconditioner,
+            gmres_restart=gmres_restart,
+            gmres_solve_method=gmres_solve_method,
+            include_gauge_monomial=include_gauge,
+            include_fermion_monomial=include_fermion,
+            fermion_monomial_kind=fermion_kind,
+            gauge_timescale=gauge_timescale,
+            fermion_timescale=fermion_timescale,
+            pseudofermion_refresh=pf_refresh,
+            pseudofermion_gamma=pf_gamma,
+            pseudofermion_force_mode=pf_force_mode,
+            smd_gamma=smd_gamma,
+            auto_refresh_pseudofermions=True,
+        )
     theory.kinetic = jax.jit(theory.kinetic)
     if hasattr(theory, "refresh_p_with_key"):
         theory.refresh_p_with_key = jax.jit(theory.refresh_p_with_key)
@@ -738,7 +810,10 @@ def main():
     print(f"  theory: {theory_family}/{theory_name}")
     print(f"  shape: {lattice_shape}")
     print(f"  beta/mass/r: {beta} / {mass} / {wilson_r}")
-    print(f"  fermion_bc: {','.join(str(v) for v in fermion_bc)}")
+    if theory_family == "su3":
+        print(f"  fermion_bc: {','.join(str(v) for v in fermion_bc)}")
+    else:
+        print("  fermion_bc: n/a (u1_wilson_nf2 currently uses periodic fermion BC)")
     print(
         "  solver:"
         f" kind={solver_kind}"
@@ -943,27 +1018,31 @@ def main():
                 f" cache_hit_frac={cache_frac:.3f}"
             )
 
-    plaq = np.asarray(inline_history.get("plaquette.value", []), dtype=np.float64)
-    if plaq.size >= 2:
+    def _print_iat_for_key(series_key: str, label: str):
+        arr = np.asarray(inline_history.get(series_key, []), dtype=np.float64)
+        if arr.size < 2:
+            return
         iat = integrated_autocorr_time(
-            plaq,
+            arr,
             method=str(iat_method),
             max_lag=(None if int(iat_max_lag) <= 0 else int(iat_max_lag)),
         )
         if bool(iat.get("ok", False)):
-            nplaq = int(plaq.size)
-            std_plaq = float(np.std(plaq, ddof=1))
+            ns = int(arr.size)
+            stdv = float(np.std(arr, ddof=1))
             ess = float(iat["ess"])
-            e_iat = float(std_plaq / np.sqrt(max(ess, 1e-12)))
+            e_iat = float(stdv / np.sqrt(max(ess, 1e-12)))
             print(
-                "  plaquette IAT:"
+                f"  {label} IAT:"
                 f" tau_int={float(iat['tau_int']):.3f} samples,"
-                f" ESS={ess:.2f}/{nplaq},"
+                f" ESS={ess:.2f}/{ns},"
                 f" window={int(iat['window'])}, method={iat['method']}"
             )
-            print(f"  plaquette IAT-corrected error: {e_iat}")
+            print(f"  {label} IAT-corrected error: {e_iat}")
         else:
-            print(f"  plaquette IAT: unavailable ({iat.get('message', 'unknown')})")
+            print(f"  {label} IAT: unavailable ({iat.get('message', 'unknown')})")
+
+    _print_iat_for_key("plaquette.value", "plaquette")
 
     if warmup_ar_accepts:
         print(f"  warmup-ar acc (mean): {float(np.nanmean(np.asarray(warmup_ar_accepts, dtype=np.float64))):.6f}")

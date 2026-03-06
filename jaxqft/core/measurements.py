@@ -69,6 +69,23 @@ def _flatten_corr(prefix: str, corr: np.ndarray) -> Dict[str, float]:
     return out
 
 
+def _parse_bool_from_spec(spec: Mapping[str, Any], key: str, default: bool) -> bool:
+    if key not in spec:
+        return bool(default)
+    v = spec.get(key)
+    if isinstance(v, bool):
+        return bool(v)
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        txt = v.strip().lower()
+        if txt in ("1", "true", "yes", "on"):
+            return True
+        if txt in ("0", "false", "no", "off"):
+            return False
+    raise ValueError(f"Invalid boolean value for measurement key '{key}': {v!r}")
+
+
 def _extract_lattice_shape_from_theory(theory) -> Tuple[int, ...]:
     if hasattr(theory, "lattice_shape"):
         shp = tuple(int(v) for v in tuple(theory.lattice_shape))
@@ -80,20 +97,138 @@ def _extract_lattice_shape_from_theory(theory) -> Tuple[int, ...]:
     return tuple(fshp[1:-2])
 
 
+def _fermion_structure(theory) -> Tuple[Tuple[int, ...], int, int, int, int, int]:
+    lattice_shape = _extract_lattice_shape_from_theory(theory)
+    fshp = tuple(int(v) for v in tuple(theory.fermion_shape()))
+    if len(fshp) < 4:
+        raise ValueError(f"Unexpected fermion shape rank: {fshp}")
+    bs = int(fshp[0])
+    ns = int(fshp[-2])
+    nc = int(fshp[-1])
+    vol = int(np.prod(np.asarray(lattice_shape, dtype=np.int64)))
+    nsc = int(ns * nc)
+    ndof = int(vol * nsc)
+    return lattice_shape, bs, ns, nc, vol, ndof
+
+
+def _flat_site_index(coords: Sequence[int], lattice_shape: Sequence[int]) -> int:
+    shp = tuple(int(v) for v in lattice_shape)
+    c = tuple(int(v) % n for v, n in zip(coords, shp))
+    return int(np.ravel_multi_index(c, shp))
+
+
+def _full_dense_inverse(
+    q,
+    theory,
+    context: MeasurementContext,
+    dense_max_dof: int,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    if not hasattr(theory, "apply_D"):
+        raise AttributeError("Theory does not provide apply_D(U, psi); dense inversion is unavailable")
+    if not hasattr(theory, "fermion_shape"):
+        raise AttributeError("Theory does not provide fermion_shape(); dense inversion is unavailable")
+
+    lattice_shape, bs, ns, nc, vol, ndof = _fermion_structure(theory)
+    _ = vol
+    _ = ns
+    _ = nc
+    max_dof = int(dense_max_dof)
+    if max_dof > 0 and int(ndof) > int(max_dof):
+        raise ValueError(
+            f"Dense inversion blocked: ndof={ndof} exceeds dense_max_dof={max_dof}. "
+            "Increase dense_max_dof explicitly if intended."
+        )
+
+    cache_key = f"dense_inv:maxdof={max_dof}"
+    cached = context.cache.get(cache_key)
+    if isinstance(cached, dict) and ("ginv" in cached) and ("timing" in cached):
+        info = dict(cached["timing"])
+        info["inv_cache_hit"] = 1.0
+        info["inv_solve_total_sec_this_call"] = 0.0
+        return np.asarray(cached["ginv"]), info
+
+    ferm_shape = tuple(int(v) for v in tuple(theory.fermion_shape()))
+    fdtype = np.result_type(np.asarray(q).dtype, np.complex64)
+
+    t0 = time.perf_counter()
+    dmat = np.zeros((bs, ndof, ndof), dtype=fdtype)
+    for i in range(ndof):
+        rhs = np.zeros(ferm_shape, dtype=fdtype)
+        rhs.reshape(bs, ndof)[:, i] = 1.0 + 0.0j
+        col = np.asarray(theory.apply_D(q, jax.device_put(rhs)), dtype=fdtype).reshape(bs, ndof)
+        dmat[:, :, i] = col
+    t1 = time.perf_counter()
+
+    ginv = np.zeros_like(dmat)
+    for b in range(bs):
+        ginv[b] = np.linalg.inv(dmat[b])
+    t2 = time.perf_counter()
+
+    build_sec = float(t1 - t0)
+    invert_sec = float(t2 - t1)
+    total_sec = float(t2 - t0)
+    timing = {
+        "inv_backend_dense": 1.0,
+        "inv_dense_ndof": float(ndof),
+        "inv_dense_build_sec": build_sec,
+        "inv_dense_invert_sec": invert_sec,
+        "inv_dense_total_sec": total_sec,
+        "inv_n_solves": 1.0,
+        "inv_solve_total_sec_step": total_sec,
+        "inv_solve_mean_sec": total_sec,
+        "inv_solve_min_sec": total_sec,
+        "inv_solve_max_sec": total_sec,
+        "inv_prop_build_wall_sec": total_sec,
+    }
+    context.cache[cache_key] = {"ginv": ginv, "timing": timing}
+    info = dict(timing)
+    info["inv_cache_hit"] = 0.0
+    info["inv_solve_total_sec_this_call"] = float(total_sec)
+    return ginv, info
+
+
+def _point_source_propagator_from_dense_inverse(
+    ginv: np.ndarray,
+    lattice_shape: Sequence[int],
+    ns: int,
+    nc: int,
+    source: Sequence[int],
+) -> np.ndarray:
+    bs = int(ginv.shape[0])
+    nsc = int(ns * nc)
+    site = _flat_site_index(source, lattice_shape)
+    prop = np.zeros((bs, *tuple(int(v) for v in lattice_shape), ns, nc, ns, nc), dtype=ginv.dtype)
+    for src_spin in range(ns):
+        for src_color in range(nc):
+            col = int(site * nsc + src_spin * nc + src_color)
+            sol = np.asarray(ginv[:, :, col], dtype=ginv.dtype).reshape((bs, *tuple(lattice_shape), ns, nc))
+            prop[..., src_spin, src_color] = sol
+    return prop
+
+
 def _full_point_source_propagator(
     q,
     theory,
     context: MeasurementContext,
     source: Sequence[int],
+    *,
+    backend: str = "iterative",
+    dense_max_dof: int = 4096,
 ) -> Tuple[np.ndarray, Dict[str, float]]:
-    if not hasattr(theory, "solve_direct"):
-        raise AttributeError("Theory does not provide solve_direct(U, rhs) for correlator measurements")
+    backend_key = str(backend).strip().lower()
+    if backend_key in ("iter", "cg", "point"):
+        backend_key = "iterative"
+    if backend_key in ("direct", "exact"):
+        backend_key = "dense"
+    if backend_key not in ("iterative", "dense"):
+        raise ValueError(f"Unsupported propagator backend: {backend!r}")
+
     if not hasattr(theory, "fermion_shape"):
         raise AttributeError("Theory does not provide fermion_shape() for correlator measurements")
 
     lattice_shape = _extract_lattice_shape_from_theory(theory)
     src = _coerce_source(source, lattice_shape)
-    cache_key = f"quark_prop:{','.join(str(v) for v in src)}"
+    cache_key = f"quark_prop:{backend_key}:{','.join(str(v) for v in src)}"
     cached = context.cache.get(cache_key)
     if isinstance(cached, dict) and ("prop" in cached) and ("timing" in cached):
         info = dict(cached["timing"])
@@ -102,40 +237,57 @@ def _full_point_source_propagator(
         return np.asarray(cached["prop"]), info
 
     ferm_shape = tuple(int(v) for v in tuple(theory.fermion_shape()))
-    if len(ferm_shape) < 4:
-        raise ValueError(f"Unexpected fermion shape rank: {ferm_shape}")
     bs = int(ferm_shape[0])
     ns = int(ferm_shape[-2])
     nc = int(ferm_shape[-1])
-    fdtype = np.dtype(getattr(q, "dtype", np.complex64))
-    prop = np.zeros((bs, *lattice_shape, ns, nc, ns, nc), dtype=fdtype)
-    solve_times: List[float] = []
 
-    base_index = (slice(None), *src)
-    t_build0 = time.perf_counter()
-    for src_spin in range(ns):
-        for src_color in range(nc):
-            rhs = np.zeros(ferm_shape, dtype=fdtype)
-            rhs[(*base_index, src_spin, src_color)] = 1.0 + 0.0j
-            ts = time.perf_counter()
-            sol = np.asarray(theory.solve_direct(q, jax.device_put(rhs)), dtype=fdtype)
-            solve_times.append(float(time.perf_counter() - ts))
-            prop[..., src_spin, src_color] = sol
+    if backend_key == "dense":
+        ginv, inv_info = _full_dense_inverse(q=q, theory=theory, context=context, dense_max_dof=int(dense_max_dof))
+        prop = _point_source_propagator_from_dense_inverse(
+            ginv=ginv,
+            lattice_shape=lattice_shape,
+            ns=ns,
+            nc=nc,
+            source=src,
+        )
+        timing = dict(inv_info)
+    else:
+        if not hasattr(theory, "solve_direct"):
+            raise AttributeError("Theory does not provide solve_direct(U, rhs) for correlator measurements")
+        fdtype = np.dtype(getattr(q, "dtype", np.complex64))
+        prop = np.zeros((bs, *lattice_shape, ns, nc, ns, nc), dtype=fdtype)
+        solve_times: List[float] = []
 
-    build_dt = float(time.perf_counter() - t_build0)
-    st = np.asarray(solve_times, dtype=np.float64)
-    timing = {
-        "inv_n_solves": float(st.size),
-        "inv_solve_total_sec_step": float(np.sum(st)) if st.size else 0.0,
-        "inv_solve_mean_sec": float(np.mean(st)) if st.size else 0.0,
-        "inv_solve_min_sec": float(np.min(st)) if st.size else 0.0,
-        "inv_solve_max_sec": float(np.max(st)) if st.size else 0.0,
-        "inv_prop_build_wall_sec": float(build_dt),
-    }
+        base_index = (slice(None), *src)
+        t_build0 = time.perf_counter()
+        for src_spin in range(ns):
+            for src_color in range(nc):
+                rhs = np.zeros(ferm_shape, dtype=fdtype)
+                rhs[(*base_index, src_spin, src_color)] = 1.0 + 0.0j
+                ts = time.perf_counter()
+                sol = np.asarray(theory.solve_direct(q, jax.device_put(rhs)), dtype=fdtype)
+                solve_times.append(float(time.perf_counter() - ts))
+                prop[..., src_spin, src_color] = sol
+
+        build_dt = float(time.perf_counter() - t_build0)
+        st = np.asarray(solve_times, dtype=np.float64)
+        timing = {
+            "inv_backend_dense": 0.0,
+            "inv_n_solves": float(st.size),
+            "inv_solve_total_sec_step": float(np.sum(st)) if st.size else 0.0,
+            "inv_solve_mean_sec": float(np.mean(st)) if st.size else 0.0,
+            "inv_solve_min_sec": float(np.min(st)) if st.size else 0.0,
+            "inv_solve_max_sec": float(np.max(st)) if st.size else 0.0,
+            "inv_prop_build_wall_sec": float(build_dt),
+        }
     context.cache[cache_key] = {"prop": prop, "timing": timing}
     info = dict(timing)
-    info["inv_cache_hit"] = 0.0
-    info["inv_solve_total_sec_this_call"] = float(timing["inv_solve_total_sec_step"])
+    if "inv_cache_hit" not in info:
+        info["inv_cache_hit"] = 0.0
+    if "inv_solve_total_sec_this_call" not in info:
+        info["inv_solve_total_sec_this_call"] = float(timing["inv_solve_total_sec_step"])
+    else:
+        info["inv_solve_total_sec_this_call"] = float(info["inv_solve_total_sec_this_call"])
     return prop, info
 
 
@@ -155,6 +307,252 @@ def _pion_two_point_from_propagator(prop: np.ndarray, source_t: int) -> np.ndarr
         # C_pi(dt) = sum_x tr[S(x,0) S^\dagger(x,0)] (positive-definite).
         corr[dt] = float(np.real(np.sum(np.conjugate(slab) * slab)))
     return corr
+
+
+def _coerce_momenta(momenta: Optional[Sequence[int]]) -> Tuple[int, ...]:
+    if momenta is None:
+        return (0,)
+    vals = tuple(int(v) for v in momenta)
+    if len(vals) == 0:
+        return (0,)
+    return vals
+
+
+def _coerce_momentum_axis(momentum_axis: int, lattice_shape: Sequence[int]) -> int:
+    nd = int(len(tuple(lattice_shape)))
+    if nd <= 1:
+        return 0
+    ax = int(momentum_axis)
+    if ax < 0:
+        ax += (nd - 1)
+    if ax < 0 or ax >= (nd - 1):
+        raise ValueError(
+            f"momentum_axis must be in [0,{nd-2}] for lattice ndim={nd} (time axis is fixed to last axis)"
+        )
+    return ax
+
+
+def _flatten_corr_momentum(
+    prefix: str,
+    corr: np.ndarray,
+    momenta: Sequence[int],
+    *,
+    include_legacy_zero: bool = True,
+) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    moms = tuple(int(v) for v in momenta)
+    arr = np.asarray(corr)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected momentum correlator rank 2 (Nmom, Lt), got shape {arr.shape}")
+    if arr.shape[0] != len(moms):
+        raise ValueError(f"Momentum list size mismatch: len(momenta)={len(moms)} vs corr shape {arr.shape}")
+
+    for ip, p in enumerate(moms):
+        row = np.asarray(arr[ip])
+        for t, v in enumerate(row.reshape(-1)):
+            out[f"{prefix}_p{int(p)}_t{int(t)}_re"] = float(np.real(v))
+            out[f"{prefix}_p{int(p)}_t{int(t)}_im"] = float(np.imag(v))
+        if include_legacy_zero and int(p) == 0:
+            out.update(_flatten_corr(prefix, np.real(row)))
+    return out
+
+
+def _pion_two_point_momentum_from_propagator(
+    prop: np.ndarray,
+    source: Sequence[int],
+    momenta: Sequence[int],
+    momentum_axis: int,
+) -> np.ndarray:
+    nd = int(prop.ndim - 5)
+    if nd < 1:
+        raise ValueError(f"Unexpected propagator rank for pion correlator: {prop.shape}")
+    moms = tuple(int(v) for v in momenta)
+    time_axis = 1 + (nd - 1)
+    lt = int(prop.shape[time_axis])
+    corr = np.zeros((len(moms), lt), dtype=np.complex128)
+
+    source_t = int(source[-1])
+    has_spatial = nd > 1
+    if has_spatial:
+        lattice_shape = tuple(int(v) for v in prop.shape[1 : 1 + nd])
+        mom_ax = _coerce_momentum_axis(momentum_axis, lattice_shape)
+        lmom = int(prop.shape[1 + mom_ax])
+        x0 = int(source[mom_ax]) % lmom
+        shp_spatial = tuple(int(v) for v in prop.shape[1 : 1 + (nd - 1)])
+
+    for t in range(lt):
+        dt = int((t - source_t) % lt)
+        idx = [slice(None)] * prop.ndim
+        idx[time_axis] = t
+        slab = np.asarray(prop[tuple(idx)])
+        vals = np.sum(np.conjugate(slab) * slab, axis=tuple(range(slab.ndim - 4, slab.ndim)))
+        if not has_spatial:
+            s = complex(np.sum(vals))
+            for ip in range(len(moms)):
+                corr[ip, dt] = corr[ip, dt] + s
+            continue
+
+        for ip, p in enumerate(moms):
+            phase = np.exp(1j * (2.0 * np.pi * float(p) / float(lmom)) * (np.arange(lmom) - x0))
+            ph_shape = [1] + [1] * len(shp_spatial)
+            ph_shape[1 + mom_ax] = lmom
+            ph = phase.reshape(ph_shape)
+            corr[ip, dt] = corr[ip, dt] + complex(np.sum(vals * ph))
+    return corr
+
+
+def _site_time_momentum_arrays(lattice_shape: Sequence[int], momentum_axis: int) -> Tuple[np.ndarray, np.ndarray, int, int]:
+    shp = tuple(int(v) for v in lattice_shape)
+    vol = int(np.prod(np.asarray(shp, dtype=np.int64)))
+    coords = np.asarray(np.unravel_index(np.arange(vol, dtype=np.int64), shp), dtype=np.int64).T
+    t = coords[:, -1].astype(np.int64)
+    lt = int(shp[-1])
+    if len(shp) <= 1:
+        x = np.zeros((vol,), dtype=np.int64)
+        lmom = 1
+    else:
+        ax = _coerce_momentum_axis(momentum_axis, shp)
+        x = coords[:, ax].astype(np.int64)
+        lmom = int(shp[ax])
+    return t, x, lt, lmom
+
+
+def _accumulate_pair_correlator(
+    pair_vals: np.ndarray,
+    t_site: np.ndarray,
+    x_site: np.ndarray,
+    lt: int,
+    lmom: int,
+    momenta: Sequence[int],
+    *,
+    source_site: Optional[int],
+    source_average: bool,
+) -> np.ndarray:
+    moms = tuple(int(v) for v in momenta)
+    vol = int(pair_vals.shape[0])
+    if pair_vals.shape != (vol, vol):
+        raise ValueError(f"pair_vals must have shape (V,V), got {pair_vals.shape}")
+    corr = np.zeros((len(moms), int(lt)), dtype=np.complex128)
+
+    if source_average:
+        for y in range(vol):
+            dt = np.asarray((t_site - t_site[y]) % int(lt), dtype=np.int64)
+            vals = np.asarray(pair_vals[:, y])
+            if int(lmom) <= 1:
+                for ip in range(len(moms)):
+                    np.add.at(corr[ip], dt, vals)
+                continue
+            dx = np.asarray(x_site - x_site[y], dtype=np.float64)
+            for ip, p in enumerate(moms):
+                ph = np.exp(1j * (2.0 * np.pi * float(p) / float(lmom)) * dx)
+                np.add.at(corr[ip], dt, vals * ph)
+        corr = corr / float(vol)
+        return corr
+
+    if source_site is None:
+        raise ValueError("source_site is required when source_average=False")
+    y0 = int(source_site) % vol
+    dt = np.asarray((t_site - t_site[y0]) % int(lt), dtype=np.int64)
+    vals = np.asarray(pair_vals[:, y0])
+    if int(lmom) <= 1:
+        for ip in range(len(moms)):
+            np.add.at(corr[ip], dt, vals)
+        return corr
+    dx = np.asarray(x_site - x_site[y0], dtype=np.float64)
+    for ip, p in enumerate(moms):
+        ph = np.exp(1j * (2.0 * np.pi * float(p) / float(lmom)) * dx)
+        np.add.at(corr[ip], dt, vals * ph)
+    return corr
+
+
+def _pion_two_point_momentum_from_dense_inverse(
+    ginv: np.ndarray,
+    lattice_shape: Sequence[int],
+    ns: int,
+    nc: int,
+    momenta: Sequence[int],
+    momentum_axis: int,
+    *,
+    source_site: Optional[int],
+    source_average: bool,
+) -> np.ndarray:
+    shp = tuple(int(v) for v in lattice_shape)
+    vol = int(np.prod(np.asarray(shp, dtype=np.int64)))
+    nsc = int(ns * nc)
+    t_site, x_site, lt, lmom = _site_time_momentum_arrays(shp, momentum_axis)
+
+    corr = np.zeros((len(tuple(momenta)), lt), dtype=np.complex128)
+    for b in range(int(ginv.shape[0])):
+        g4 = np.asarray(ginv[b]).reshape(vol, nsc, vol, nsc)
+        pair_vals = np.sum(np.abs(g4) ** 2, axis=(1, 3))
+        corr = corr + _accumulate_pair_correlator(
+            pair_vals=pair_vals,
+            t_site=t_site,
+            x_site=x_site,
+            lt=lt,
+            lmom=lmom,
+            momenta=momenta,
+            source_site=source_site,
+            source_average=bool(source_average),
+        )
+    return corr
+
+
+def _eta_two_point_components_from_dense_inverse(
+    ginv: np.ndarray,
+    lattice_shape: Sequence[int],
+    ns: int,
+    nc: int,
+    gamma: np.ndarray,
+    momenta: Sequence[int],
+    momentum_axis: int,
+    *,
+    source_site: Optional[int],
+    source_average: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    shp = tuple(int(v) for v in lattice_shape)
+    vol = int(np.prod(np.asarray(shp, dtype=np.int64)))
+    nsc = int(ns * nc)
+    t_site, x_site, lt, lmom = _site_time_momentum_arrays(shp, momentum_axis)
+
+    gam = np.asarray(gamma)
+    g5 = np.asarray(gamma5(gam), dtype=gam.dtype)
+    g5c = np.kron(g5, np.eye(int(nc), dtype=gam.dtype))
+
+    conn = np.zeros((len(tuple(momenta)), lt), dtype=np.complex128)
+    disc = np.zeros((len(tuple(momenta)), lt), dtype=np.complex128)
+
+    for b in range(int(ginv.shape[0])):
+        g4 = np.asarray(ginv[b]).reshape(vol, nsc, vol, nsc)
+        pair_conn = np.sum(np.abs(g4) ** 2, axis=(1, 3))
+        conn = conn + _accumulate_pair_correlator(
+            pair_vals=pair_conn,
+            t_site=t_site,
+            x_site=x_site,
+            lt=lt,
+            lmom=lmom,
+            momenta=momenta,
+            source_site=source_site,
+            source_average=bool(source_average),
+        )
+
+        diag_blocks = g4[np.arange(vol), :, np.arange(vol), :]
+        loops = np.einsum("ab,xba->x", g5c, diag_blocks, optimize=True)
+        pair_disc = np.outer(loops, np.conjugate(loops))
+        disc = disc + _accumulate_pair_correlator(
+            pair_vals=pair_disc,
+            t_site=t_site,
+            x_site=x_site,
+            lt=lt,
+            lmom=lmom,
+            momenta=momenta,
+            source_site=source_site,
+            source_average=bool(source_average),
+        )
+
+    return conn, disc
 
 
 def _proton_two_point_from_propagator(prop: np.ndarray, source_t: int, parity_sign: int, gamma: np.ndarray) -> np.ndarray:
@@ -243,22 +641,168 @@ def _parse_source_from_spec(spec: Mapping[str, Any]) -> Optional[Tuple[int, ...]
     raise ValueError(f"Invalid source spec type: {type(src).__name__}")
 
 
+def _parse_momenta_from_spec(spec: Mapping[str, Any]) -> Tuple[int, ...]:
+    if "momenta" not in spec and "p" not in spec and "mom" not in spec:
+        return (0,)
+    raw = spec.get("momenta", spec.get("p", spec.get("mom")))
+    if raw is None:
+        return (0,)
+    if isinstance(raw, str):
+        toks = [t.strip() for t in raw.split(",") if t.strip()]
+        if not toks:
+            return (0,)
+        return tuple(int(t) for t in toks)
+    if isinstance(raw, Sequence):
+        vals = [int(v) for v in raw]
+        return tuple(vals) if vals else (0,)
+    return (int(raw),)
+
+
+def _parse_propagator_backend_from_spec(spec: Mapping[str, Any], default: str = "iterative") -> str:
+    raw = str(spec.get("propagator_backend", spec.get("propagator", spec.get("inversion", default)))).strip().lower()
+    if raw in ("iter", "cg", "point"):
+        return "iterative"
+    if raw in ("direct", "exact"):
+        return "dense"
+    if raw not in ("iterative", "dense", "auto"):
+        raise ValueError(f"Unsupported propagator backend: {raw!r}")
+    return raw
+
+
 @dataclass
 class PionTwoPointMeasurement:
-    """Connected pseudoscalar two-point function with a point source."""
+    """Connected pseudoscalar two-point function with momentum projection."""
 
     every: int = 1
     name: str = "pion_2pt"
     source: Optional[Tuple[int, ...]] = None
+    momenta: Tuple[int, ...] = (0,)
+    momentum_axis: int = 0
+    propagator_backend: str = "iterative"  # iterative | dense | auto
+    dense_max_dof: int = 4096
+    source_average: bool = False
 
     def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
         t0 = time.perf_counter()
-        source = _coerce_source(self.source, _extract_lattice_shape_from_theory(theory))
-        prop, inv_info = _full_point_source_propagator(q=q, theory=theory, context=context, source=source)
-        t1 = time.perf_counter()
-        corr = _pion_two_point_from_propagator(prop, source_t=int(source[-1]))
+        lattice_shape = _extract_lattice_shape_from_theory(theory)
+        source = _coerce_source(self.source, lattice_shape)
+        moms = _coerce_momenta(self.momenta)
+        mom_axis = _coerce_momentum_axis(self.momentum_axis, lattice_shape)
+        backend = str(self.propagator_backend).strip().lower()
+        if backend in ("iter", "cg", "point"):
+            backend = "iterative"
+        if backend in ("direct", "exact"):
+            backend = "dense"
+        if backend == "auto":
+            _, _, _, _, _, ndof = _fermion_structure(theory)
+            backend = "dense" if int(ndof) <= int(self.dense_max_dof) else "iterative"
+        if backend not in ("iterative", "dense"):
+            raise ValueError(f"Unsupported propagator_backend: {self.propagator_backend!r}")
+        if bool(self.source_average) and backend != "dense":
+            raise ValueError("source_average=True requires propagator_backend=dense (or auto with dense selected)")
+
+        if backend == "dense":
+            ginv, inv_info = _full_dense_inverse(
+                q=q,
+                theory=theory,
+                context=context,
+                dense_max_dof=int(self.dense_max_dof),
+            )
+            t1 = time.perf_counter()
+            source_site = None if bool(self.source_average) else _flat_site_index(source, lattice_shape)
+            corr = _pion_two_point_momentum_from_dense_inverse(
+                ginv=ginv,
+                lattice_shape=lattice_shape,
+                ns=int(theory.fermion_shape()[-2]),
+                nc=int(theory.fermion_shape()[-1]),
+                momenta=moms,
+                momentum_axis=mom_axis,
+                source_site=source_site,
+                source_average=bool(self.source_average),
+            )
+        else:
+            prop, inv_info = _full_point_source_propagator(
+                q=q,
+                theory=theory,
+                context=context,
+                source=source,
+                backend="iterative",
+                dense_max_dof=int(self.dense_max_dof),
+            )
+            t1 = time.perf_counter()
+            corr = _pion_two_point_momentum_from_propagator(
+                prop=prop,
+                source=source,
+                momenta=moms,
+                momentum_axis=mom_axis,
+            )
         t2 = time.perf_counter()
-        out = _flatten_corr("c", corr)
+        out = _flatten_corr_momentum("c", corr, moms, include_legacy_zero=True)
+        out["mom_axis"] = float(mom_axis)
+        out["n_momenta"] = float(len(moms))
+        out["source_average"] = 1.0 if bool(self.source_average) else 0.0
+        out.update(inv_info)
+        out["wall_total_sec"] = float(t2 - t0)
+        out["wall_after_prop_sec"] = float(t2 - t1)
+        return out
+
+
+@dataclass
+class EtaTwoPointMeasurement:
+    """Flavor-singlet pseudoscalar channel with disconnected loops (dense inverse)."""
+
+    every: int = 1
+    name: str = "eta_2pt"
+    source: Optional[Tuple[int, ...]] = None
+    momenta: Tuple[int, ...] = (0,)
+    momentum_axis: int = 0
+    dense_max_dof: int = 4096
+    source_average: bool = True
+    n_flavor: int = 2
+    include_connected: bool = True
+    include_full: bool = True
+
+    def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
+        if not hasattr(theory, "gamma"):
+            raise AttributeError("Theory does not expose gamma matrices required for eta correlator")
+        t0 = time.perf_counter()
+        lattice_shape = _extract_lattice_shape_from_theory(theory)
+        source = _coerce_source(self.source, lattice_shape)
+        moms = _coerce_momenta(self.momenta)
+        mom_axis = _coerce_momentum_axis(self.momentum_axis, lattice_shape)
+        ginv, inv_info = _full_dense_inverse(
+            q=q,
+            theory=theory,
+            context=context,
+            dense_max_dof=int(self.dense_max_dof),
+        )
+        t1 = time.perf_counter()
+        source_site = None if bool(self.source_average) else _flat_site_index(source, lattice_shape)
+        conn, disc = _eta_two_point_components_from_dense_inverse(
+            ginv=ginv,
+            lattice_shape=lattice_shape,
+            ns=int(theory.fermion_shape()[-2]),
+            nc=int(theory.fermion_shape()[-1]),
+            gamma=np.asarray(theory.gamma),
+            momenta=moms,
+            momentum_axis=mom_axis,
+            source_site=source_site,
+            source_average=bool(self.source_average),
+        )
+        t2 = time.perf_counter()
+
+        out: Dict[str, float] = {}
+        if bool(self.include_connected):
+            out.update(_flatten_corr_momentum("conn", conn, moms, include_legacy_zero=False))
+        out.update(_flatten_corr_momentum("disc", disc, moms, include_legacy_zero=False))
+        if bool(self.include_full) and bool(self.include_connected):
+            full = conn - float(int(self.n_flavor)) * disc
+            out.update(_flatten_corr_momentum("full", full, moms, include_legacy_zero=True))
+
+        out["mom_axis"] = float(mom_axis)
+        out["n_momenta"] = float(len(moms))
+        out["source_average"] = 1.0 if bool(self.source_average) else 0.0
+        out["n_flavor"] = float(int(self.n_flavor))
         out.update(inv_info)
         out["wall_total_sec"] = float(t2 - t0)
         out["wall_after_prop_sec"] = float(t2 - t1)
@@ -273,13 +817,29 @@ class ProtonTwoPointMeasurement:
     name: str = "proton_2pt"
     source: Optional[Tuple[int, ...]] = None
     parity_sign: int = +1
+    propagator_backend: str = "iterative"  # iterative | dense | auto
+    dense_max_dof: int = 4096
 
     def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
         if not hasattr(theory, "gamma"):
             raise AttributeError("Theory does not expose gamma matrices required for proton correlator")
         t0 = time.perf_counter()
         source = _coerce_source(self.source, _extract_lattice_shape_from_theory(theory))
-        prop, inv_info = _full_point_source_propagator(q=q, theory=theory, context=context, source=source)
+        backend = str(self.propagator_backend).strip().lower()
+        if backend in ("iter", "cg", "point", "auto"):
+            backend = "iterative"
+        if backend in ("direct", "exact"):
+            backend = "dense"
+        if backend not in ("iterative", "dense"):
+            raise ValueError(f"Unsupported propagator_backend for proton_2pt: {self.propagator_backend!r}")
+        prop, inv_info = _full_point_source_propagator(
+            q=q,
+            theory=theory,
+            context=context,
+            source=source,
+            backend=backend,
+            dense_max_dof=int(self.dense_max_dof),
+        )
         t1 = time.perf_counter()
         corr = _proton_two_point_from_propagator(
             prop,
@@ -308,16 +868,52 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
             continue
         if mtype in ("pion_2pt", "pion2pt", "pion"):
             source = _parse_source_from_spec(spec)
+            moms = _parse_momenta_from_spec(spec)
+            mom_axis = int(spec.get("momentum_axis", spec.get("mom_axis", 0)))
+            backend = _parse_propagator_backend_from_spec(spec, default="iterative")
+            dense_max_dof = int(spec.get("dense_max_dof", 4096))
+            source_average = _parse_bool_from_spec(spec, "source_average", False)
             out.append(
                 PionTwoPointMeasurement(
                     every=every,
                     name=(name or "pion_2pt"),
                     source=source,
+                    momenta=tuple(int(v) for v in moms),
+                    momentum_axis=int(mom_axis),
+                    propagator_backend=str(backend),
+                    dense_max_dof=int(dense_max_dof),
+                    source_average=bool(source_average),
+                )
+            )
+            continue
+        if mtype in ("eta_2pt", "eta2pt", "eta"):
+            source = _parse_source_from_spec(spec)
+            moms = _parse_momenta_from_spec(spec)
+            mom_axis = int(spec.get("momentum_axis", spec.get("mom_axis", 0)))
+            dense_max_dof = int(spec.get("dense_max_dof", 4096))
+            source_average = _parse_bool_from_spec(spec, "source_average", True)
+            n_flavor = int(spec.get("n_flavor", spec.get("nflavor", 2)))
+            include_connected = _parse_bool_from_spec(spec, "include_connected", True)
+            include_full = _parse_bool_from_spec(spec, "include_full", True)
+            out.append(
+                EtaTwoPointMeasurement(
+                    every=every,
+                    name=(name or "eta_2pt"),
+                    source=source,
+                    momenta=tuple(int(v) for v in moms),
+                    momentum_axis=int(mom_axis),
+                    dense_max_dof=int(dense_max_dof),
+                    source_average=bool(source_average),
+                    n_flavor=int(n_flavor),
+                    include_connected=bool(include_connected),
+                    include_full=bool(include_full),
                 )
             )
             continue
         if mtype in ("proton_2pt", "proton2pt", "nucleon_2pt", "nucleon2pt", "proton", "nucleon"):
             source = _parse_source_from_spec(spec)
+            backend = _parse_propagator_backend_from_spec(spec, default="iterative")
+            dense_max_dof = int(spec.get("dense_max_dof", 4096))
             parity_raw = str(spec.get("parity", "+")).strip().lower()
             if parity_raw in ("+", "plus", "pos", "positive", "forward"):
                 parity_sign = +1
@@ -333,6 +929,8 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
                     name=(name or "proton_2pt"),
                     source=source,
                     parity_sign=parity_sign,
+                    propagator_backend=str(backend),
+                    dense_max_dof=int(dense_max_dof),
                 )
             )
             continue

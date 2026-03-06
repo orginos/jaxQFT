@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-03-05
+Last updated: 2026-03-06
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -34,7 +34,7 @@ Last updated: 2026-03-05
   - Backward-compatible alias: `--init-cfg-lime` maps to `--init-gauge`.
   - On `--resume`, `--start/--init-gauge` are ignored and checkpoint state takes precedence.
 - Unified production control (new):
-  - `scripts/mcmc/mcmc.py` is a control-file-driven MCMC entry point (current theory target: `su3_wilson_nf2`).
+  - `scripts/mcmc/mcmc.py` is a control-file-driven MCMC entry point (theory targets: `su3_wilson_nf2`, `u1_wilson_nf2`).
   - Supports phased run control:
     - `warmup_no_ar` (HMC-only, accept/reject disabled)
     - `warmup_ar` (Metropolis enabled, optional `nmd` adaptation)
@@ -55,6 +55,11 @@ Last updated: 2026-03-05
     - on `output.resume`, `input.init_*_lime` is ignored (checkpoint state wins).
     - on `output.resume`, `input.init_gauge` is also ignored (checkpoint state wins).
   - TOML template generation: `--write-template`.
+  - Checkpoint save now auto-creates parent directories (no manual `mkdir` required for nested checkpoint paths).
+  - U1 example run cards now live under `runs/U1-example/`, including:
+    - `mcmc_u1_thermalization_plaquette_8x16_beta4.toml` (plaquette-only, 1000 measurements, thermalization-visible logging)
+    - `mcmc_u1_nf2_beta4_k0p23_8x16_corr.toml` (correlator-focused U1 Nf=2 setup)
+    - `mcmc_u1_nf2_beta4_k0p23_8x16_pion_eta_1000x10.toml` (production correlator run from thermalized gauge, `skip=10`, `measure=1000`, inline `pion_2pt` + `eta_2pt`)
   - Solver chrono-guess is configurable via TOML:
     - `[solver].use_solver_guess = true|false`
     - wired through to `SU3WilsonNf2(use_solver_guess=...)`
@@ -84,6 +89,24 @@ Last updated: 2026-03-05
       - `--solver-guess-mode {last,poly}`
       - `--solver-guess-history N`
     - writes JSON (default under `runs/.../profiles/` for checkpoints in `ckpts/`).
+  - Live run monitoring helper:
+    - `scripts/mcmc/live_plot_plaquette.py`
+    - consumes `mcmc.py` stdout (or tails a log file) and updates a live plaquette-vs-step plot.
+  - Plaquette autocorrelation analysis helper:
+    - `scripts/mcmc/analyze_plaquette_autocorr.py`
+    - parses mcmc logs/CSV, computes ACF with jackknife errors, estimates IAT (IPS/Sokal/Gamma), and plots `rho(t)` and `tau_int(W)` with uncertainty bands.
+  - Two-point offline effective-mass analyzer:
+    - `scripts/mcmc/analyze_2pt_effective_mass.py`
+    - reads `state.inline_records` from `mcmc.py` checkpoint,
+      computes pion/eta correlator means with IAT-adjusted errors,
+      computes cosh effective masses with blocked jackknife errors,
+      and writes a combined PNG + JSON summary.
+  - Momentum-resolved correlated fit + dispersion analyzer:
+    - `scripts/mcmc/fit_2pt_dispersion.py`
+    - reads checkpoint inline correlators, performs correlated cosh fits
+      for each available momentum with automatic fit-window selection
+      based on `chi2/dof`, estimates parameter errors via blocked jackknife,
+      and produces a dispersion plot + JSON fit report.
 - Monomial Hamiltonian infrastructure:
   - `jaxqft/core/hamiltonian.py` with `Monomial` protocol and `HamiltonianModel`.
   - Initial SU3 Wilson Nf=2 monomial composition implemented in `jaxqft/models/su3_wilson_nf2.py`.
@@ -160,7 +183,8 @@ Last updated: 2026-03-05
     - `run_inline_measurements(...)`
   - Built-in measurements:
     - `plaquette`
-    - `pion_2pt` (point-source pseudoscalar two-point; returns `c_t*`)
+    - `pion_2pt` (pseudoscalar two-point; supports momentum projection, `iterative|dense|auto` propagator backend, optional dense source averaging)
+    - `eta_2pt` (flavor-singlet pseudoscalar channel with disconnected loops from dense inverse; outputs connected/disconnected/full correlators)
     - `proton_2pt` / `nucleon_2pt` (local proton two-point with parity projector; returns `c_t*`)
   - Correlator timing instrumentation (per measurement record):
     - inversion stats: `inv_n_solves`, `inv_solve_total_sec_step`, `inv_solve_total_sec_this_call`,
