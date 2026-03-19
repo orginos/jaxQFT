@@ -21,6 +21,8 @@ from .stacked_mg import (
 
 
 def __getattr__(name):
+    if name == "ONSigmaModel":
+        return import_module(".on_sigma", __name__).ONSigmaModel
     if name == "SU3YangMills":
         return import_module(".su3_ym", __name__).SU3YangMills
     if name == "SU2YangMills":
@@ -36,6 +38,7 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
+    "ONSigmaModel",
     "Phi4",
     "init_mgflow",
     "mgflow_g",
