@@ -199,8 +199,24 @@ class ONSigmaModel:
             return jnp.moveaxis(q, 1, -1)
         return q
 
+    def _momentum_component_last(self, p: Array) -> Array:
+        if self.layout == "BN...":
+            return jnp.moveaxis(p, 1, -1)
+        return p
+
+    def _momentum_from_component_last(self, p: Array) -> Array:
+        if self.layout == "BN...":
+            return jnp.moveaxis(p, -1, 1)
+        return p
+
     def _site_dot(self, a: Array, b: Array) -> Array:
         return jnp.sum(a * b, axis=self._field_component_axis())
+
+    def _o3_pair_to_vector_last(self, p_last: Array) -> Array:
+        return jnp.stack((-p_last[..., 2], p_last[..., 1], -p_last[..., 0]), axis=-1)
+
+    def _o3_vector_to_pair_last(self, w_last: Array) -> Array:
+        return jnp.stack((-w_last[..., 2], w_last[..., 1], -w_last[..., 0]), axis=-1)
 
     def _coeffs_to_matrix_flat(self, p_flat: Array) -> Array:
         mats = jnp.zeros((*p_flat.shape[:-1], self.ncomp, self.ncomp), dtype=p_flat.dtype)
@@ -224,12 +240,31 @@ class ONSigmaModel:
 
     def _force_impl(self, q: Array) -> Array:
         nn = self._neighbor_sum(q)
+        if self.ncomp == 3:
+            q_last = self._field_component_last(q)
+            nn_last = self._field_component_last(nn)
+            omega = jnp.cross(q_last, nn_last, axis=-1)
+            coeff_last = self._o3_vector_to_pair_last(omega)
+            return self.beta * self._momentum_from_component_last(coeff_last)
         qf = self._field_to_bsitecomp(q)
         nf = self._field_to_bsitecomp(nn)
         coeffs = nf[..., self._pair_i] * qf[..., self._pair_j] - nf[..., self._pair_j] * qf[..., self._pair_i]
         return self.beta * self._momentum_from_bsitealg(coeffs)
 
     def _evolve_q_rodrigues(self, dt: float, p: Array, q: Array) -> Array:
+        if self.ncomp == 3:
+            p_last = self._momentum_component_last(p)
+            q_last = self._field_component_last(q)
+            omega = self._o3_pair_to_vector_last(p_last)
+            aq = jnp.cross(omega, q_last, axis=-1)
+            aaq = jnp.cross(omega, aq, axis=-1)
+            w = jnp.sqrt(jnp.sum(omega * omega, axis=-1))
+            dt_arr = jnp.asarray(dt, dtype=q.dtype)
+            theta = dt_arr * w
+            s1 = _sinx_over_x(theta)[..., None] * dt_arr
+            s2 = _one_minus_cos_over_x2(theta)[..., None] * (dt_arr ** 2)
+            q_new = q_last + s1 * aq + s2 * aaq
+            return self._field_from_bsitecomp(jnp.reshape(q_new, (q.shape[0], self.Vol, self.ncomp)))
         p_flat = self._momentum_to_bsitealg(p)
         q_flat = self._field_to_bsitecomp(q)
         mats = self._coeffs_to_matrix_flat(p_flat)
@@ -344,7 +379,11 @@ class ONSigmaModel:
         exp_method: str = "auto",
         layouts: Iterable[str] = ("BN...", "B...N"),
         n_iter: int = 5,
+        kernel: str = "all",
     ) -> dict[str, float]:
+        kernel = str(kernel).lower()
+        if kernel not in ("all", "action", "force", "evolveq"):
+            raise ValueError("kernel must be one of: all, action, force, evolveq")
         out: dict[str, float] = {}
         for layout in layouts:
             th = cls(
@@ -358,14 +397,62 @@ class ONSigmaModel:
             )
             q = th.hot_start()
             p = th.refreshP()
-            jax.block_until_ready(th.action(q))
-            jax.block_until_ready(th.force(q))
-            jax.block_until_ready(th.evolveQ(0.1, p, q))
+            if kernel in ("all", "action"):
+                jax.block_until_ready(th.action(q))
+            if kernel in ("all", "force"):
+                jax.block_until_ready(th.force(q))
+            if kernel in ("all", "evolveq"):
+                jax.block_until_ready(th.evolveQ(0.1, p, q))
             tic = time.perf_counter()
             for _ in range(max(1, int(n_iter))):
-                jax.block_until_ready(th.action(q))
-                jax.block_until_ready(th.force(q))
-                jax.block_until_ready(th.evolveQ(0.1, p, q))
+                if kernel in ("all", "action"):
+                    jax.block_until_ready(th.action(q))
+                if kernel in ("all", "force"):
+                    jax.block_until_ready(th.force(q))
+                if kernel in ("all", "evolveq"):
+                    jax.block_until_ready(th.evolveQ(0.1, p, q))
+            toc = time.perf_counter()
+            out[str(layout)] = float((toc - tic) / max(1, int(n_iter)))
+        return out
+
+    @classmethod
+    def benchmark_layout_trajectory(
+        cls,
+        *,
+        lattice_shape: Sequence[int],
+        beta: float,
+        ncomp: int,
+        integrator: str = "minnorm2",
+        nmd: int = 4,
+        tau: float = 1.0,
+        batch_size: int = 1,
+        seed: int = 0,
+        exp_method: str = "auto",
+        layouts: Iterable[str] = ("BN...", "B...N"),
+        n_iter: int = 3,
+    ) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for layout in layouts:
+            th = cls(
+                lattice_shape=lattice_shape,
+                beta=beta,
+                ncomp=ncomp,
+                batch_size=batch_size,
+                layout=layout,
+                seed=seed,
+                exp_method=exp_method,
+            )
+            I = _build_integrator(str(integrator), th, int(nmd), float(tau))
+            q = th.hot_start()
+            p = th.refreshP()
+            p1, q1 = I.integrate(p, q)
+            jax.block_until_ready(p1)
+            jax.block_until_ready(q1)
+            tic = time.perf_counter()
+            for _ in range(max(1, int(n_iter))):
+                p1, q1 = I.integrate(p, q)
+                jax.block_until_ready(p1)
+                jax.block_until_ready(q1)
             toc = time.perf_counter()
             out[str(layout)] = float((toc - tic) / max(1, int(n_iter)))
         return out
@@ -387,6 +474,162 @@ def _build_integrator(name: str, theory: ONSigmaModel, nmd: int, tau: float):
     if nm == "minnorm4pf4":
         return minnorm4pf4(theory.force, theory.evolveQ, int(nmd), float(tau))
     raise ValueError(f"Unknown integrator: {name}")
+
+
+def benchmark_exponentiation(theory: ONSigmaModel, dt: float = 0.1, n_iter: int = 10) -> dict[str, float]:
+    if theory.ncomp != 3:
+        raise ValueError("benchmark_exponentiation is only defined for O(3)")
+
+    th_expm = ONSigmaModel(
+        lattice_shape=theory.lattice_shape,
+        beta=theory.beta,
+        ncomp=theory.ncomp,
+        batch_size=theory.Bs,
+        layout=theory.layout,
+        dtype=theory.dtype,
+        seed=0,
+        exp_method="expm",
+    )
+    th_rod = ONSigmaModel(
+        lattice_shape=theory.lattice_shape,
+        beta=theory.beta,
+        ncomp=theory.ncomp,
+        batch_size=theory.Bs,
+        layout=theory.layout,
+        dtype=theory.dtype,
+        seed=0,
+        exp_method="rodrigues",
+    )
+    q = th_rod.hot_start()
+    p = th_rod.refreshP()
+
+    q_expm = th_expm.evolveQ(float(dt), p, q)
+    q_rod = th_rod.evolveQ(float(dt), p, q)
+    jax.block_until_ready(q_expm)
+    jax.block_until_ready(q_rod)
+
+    t0 = time.perf_counter()
+    for _ in range(max(1, int(n_iter))):
+        jax.block_until_ready(th_expm.evolveQ(float(dt), p, q))
+    t1 = time.perf_counter()
+
+    t2 = time.perf_counter()
+    for _ in range(max(1, int(n_iter))):
+        jax.block_until_ready(th_rod.evolveQ(float(dt), p, q))
+    t3 = time.perf_counter()
+
+    qx = th_expm._field_component_last(q_expm)
+    qr = th_rod._field_component_last(q_rod)
+    unit_expm = float(np.asarray(jnp.max(jnp.abs(jnp.sum(qx * qx, axis=-1) - 1.0))))
+    unit_rod = float(np.asarray(jnp.max(jnp.abs(jnp.sum(qr * qr, axis=-1) - 1.0))))
+    rel = float(np.asarray(jnp.linalg.norm(q_rod - q_expm) / (jnp.linalg.norm(q_expm) + 1e-12)))
+    return {
+        "expm_sec_per_call": float((t1 - t0) / max(1, int(n_iter))),
+        "rodrigues_sec_per_call": float((t3 - t2) / max(1, int(n_iter))),
+        "rodrigues_over_expm": float((t3 - t2) / max(1, int(n_iter)) / (((t1 - t0) / max(1, int(n_iter))) + 1e-16)),
+        "rel_diff_rodrigues_vs_expm": rel,
+        "unit_err_expm": unit_expm,
+        "unit_err_rodrigues": unit_rod,
+    }
+
+
+def kernel_timing(theory: ONSigmaModel, n_iter: int = 10, dt: float = 0.1, mom_axis: int = 0) -> dict[str, float]:
+    nit = max(1, int(n_iter))
+    q = theory.hot_start()
+    p = theory.refreshP()
+
+    p0 = theory.refreshP()
+    jax.block_until_ready(p0)
+    t0 = time.perf_counter()
+    for _ in range(nit):
+        p0 = theory.refreshP()
+        jax.block_until_ready(p0)
+    t1 = time.perf_counter()
+
+    theory.kinetic(p).block_until_ready()
+    t2 = time.perf_counter()
+    for _ in range(nit):
+        theory.kinetic(p).block_until_ready()
+    t3 = time.perf_counter()
+
+    theory.action(q).block_until_ready()
+    t4 = time.perf_counter()
+    for _ in range(nit):
+        theory.action(q).block_until_ready()
+    t5 = time.perf_counter()
+
+    theory.force(q).block_until_ready()
+    t6 = time.perf_counter()
+    for _ in range(nit):
+        theory.force(q).block_until_ready()
+    t7 = time.perf_counter()
+
+    theory.evolveQ(float(dt), p, q).block_until_ready()
+    t8 = time.perf_counter()
+    for _ in range(nit):
+        theory.evolveQ(float(dt), p, q).block_until_ready()
+    t9 = time.perf_counter()
+
+    theory.average_spin(q).block_until_ready()
+    t10 = time.perf_counter()
+    for _ in range(nit):
+        theory.average_spin(q).block_until_ready()
+    t11 = time.perf_counter()
+
+    theory.first_momentum_structure_factor(q, axis=int(mom_axis)).block_until_ready()
+    t12 = time.perf_counter()
+    for _ in range(nit):
+        theory.first_momentum_structure_factor(q, axis=int(mom_axis)).block_until_ready()
+    t13 = time.perf_counter()
+
+    out = {
+        "refresh_p_sec_per_call": float((t1 - t0) / nit),
+        "kinetic_sec_per_call": float((t3 - t2) / nit),
+        "action_sec_per_call": float((t5 - t4) / nit),
+        "force_sec_per_call": float((t7 - t6) / nit),
+        "evolveq_sec_per_call": float((t9 - t8) / nit),
+        "avg_spin_sec_per_call": float((t11 - t10) / nit),
+        "c2p_sec_per_call": float((t13 - t12) / nit),
+    }
+
+    if theory.Nd == 2 and theory.ncomp == 3:
+        theory.topological_charge(q).block_until_ready()
+        t14 = time.perf_counter()
+        for _ in range(nit):
+            theory.topological_charge(q).block_until_ready()
+        t15 = time.perf_counter()
+        out["topology_sec_per_call"] = float((t15 - t14) / nit)
+
+    return out
+
+
+def trajectory_timing(
+    theory: ONSigmaModel,
+    integrators: Iterable[str] = ("leapfrog", "minnorm2", "forcegrad", "minnorm4pf4"),
+    nmd: int = 4,
+    tau: float = 1.0,
+    n_iter: int = 3,
+) -> dict[str, float]:
+    nit = max(1, int(n_iter))
+    out: dict[str, float] = {}
+    q = theory.hot_start()
+    p = theory.refreshP()
+    for name in integrators:
+        key = str(name).strip().lower()
+        if not key:
+            continue
+        I = _build_integrator(key, theory, int(nmd), float(tau))
+        p1, q1 = I.integrate(p, q)
+        jax.block_until_ready(p1)
+        jax.block_until_ready(q1)
+        t0 = time.perf_counter()
+        for _ in range(nit):
+            p1, q1 = I.integrate(p, q)
+            jax.block_until_ready(p1)
+            jax.block_until_ready(q1)
+        t1 = time.perf_counter()
+        out[f"{key}_sec_per_traj"] = float((t1 - t0) / nit)
+    return out
 
 
 def _parse_int_list(s: str) -> tuple[int, ...]:
@@ -820,7 +1063,11 @@ def main():
     ap.add_argument("--selfcheck-fail", action="store_true")
     ap.add_argument("--nmd", type=int, default=4)
     ap.add_argument("--tau", type=float, default=1.0)
+    ap.add_argument("--layout-integrator", type=str, default="minnorm2", choices=["leapfrog", "minnorm2", "forcegrad", "minnorm4pf4"])
     ap.add_argument("--n-iter-timing", type=int, default=10)
+    ap.add_argument("--timing-dt", type=float, default=0.1)
+    ap.add_argument("--timing-mom-axis", type=int, default=0)
+    ap.add_argument("--timing-integrators", type=str, default="leapfrog,minnorm2,forcegrad,minnorm4pf4")
     ap.add_argument("--fd-eps", type=float, default=1.0e-4)
     ap.add_argument("--eps2-integrator", type=str, default="leapfrog", choices=["leapfrog", "minnorm2"])
     ap.add_argument("--eps2-tau", type=float, default=1.0)
@@ -878,17 +1125,50 @@ def main():
     lattice_shape = _parse_shape(args.shape)
     selected_layout = args.layout
     if selected_layout == "auto" or "layout" in tests:
-        bench = ONSigmaModel.benchmark_layout(
+        bench_action = ONSigmaModel.benchmark_layout(
             lattice_shape=lattice_shape,
             beta=float(args.beta),
             ncomp=int(args.ncomp),
             batch_size=int(args.batch_size),
             exp_method=str(args.exp_method),
             n_iter=max(1, int(args.n_iter_timing)),
+            kernel="action",
         )
-        print("Layout benchmark (s for action+force+evolveQ):", bench)
+        bench_force = ONSigmaModel.benchmark_layout(
+            lattice_shape=lattice_shape,
+            beta=float(args.beta),
+            ncomp=int(args.ncomp),
+            batch_size=int(args.batch_size),
+            exp_method=str(args.exp_method),
+            n_iter=max(1, int(args.n_iter_timing)),
+            kernel="force",
+        )
+        bench_evolve = ONSigmaModel.benchmark_layout(
+            lattice_shape=lattice_shape,
+            beta=float(args.beta),
+            ncomp=int(args.ncomp),
+            batch_size=int(args.batch_size),
+            exp_method=str(args.exp_method),
+            n_iter=max(1, int(args.n_iter_timing)),
+            kernel="evolveq",
+        )
+        bench_traj = ONSigmaModel.benchmark_layout_trajectory(
+            lattice_shape=lattice_shape,
+            beta=float(args.beta),
+            ncomp=int(args.ncomp),
+            integrator=str(args.layout_integrator),
+            nmd=int(args.nmd),
+            tau=float(args.tau),
+            batch_size=int(args.batch_size),
+            exp_method=str(args.exp_method),
+            n_iter=max(1, int(args.n_iter_timing)),
+        )
+        print("Layout benchmark action (sec/call):", bench_action)
+        print("Layout benchmark force  (sec/call):", bench_force)
+        print("Layout benchmark evolveQ(sec/call):", bench_evolve)
+        print(f"Layout benchmark {args.layout_integrator} trajectory (sec/traj):", bench_traj)
         if selected_layout == "auto":
-            selected_layout = min(bench, key=bench.get)
+            selected_layout = min(bench_traj, key=bench_traj.get)
             print("Auto-selected layout:", selected_layout)
 
     th = ONSigmaModel(
@@ -910,26 +1190,36 @@ def main():
     smoke_failed = False
 
     if "timing" in tests or "selfcheck" in tests:
-        jax.block_until_ready(th.action(q))
-        jax.block_until_ready(th.force(q))
-        jax.block_until_ready(th.evolveQ(0.1, p, q))
+        kt = kernel_timing(
+            th,
+            n_iter=max(1, int(args.n_iter_timing)),
+            dt=float(args.timing_dt),
+            mom_axis=int(args.timing_mom_axis),
+        )
+        print("Kernel timing:")
+        for key, val in kt.items():
+            print(f"  {key}: {val:.6e}")
 
-        tic = time.perf_counter()
-        for _ in range(max(1, int(args.n_iter_timing))):
-            jax.block_until_ready(th.action(q))
-        t_action = (time.perf_counter() - tic) / max(1, int(args.n_iter_timing))
+        tt = trajectory_timing(
+            th,
+            integrators=_parse_str_list(args.timing_integrators),
+            nmd=int(args.nmd),
+            tau=float(args.tau),
+            n_iter=max(1, int(args.n_iter_timing)),
+        )
+        print("Trajectory timing:")
+        for key, val in tt.items():
+            print(f"  {key}: {val:.6e}")
 
-        tic = time.perf_counter()
-        for _ in range(max(1, int(args.n_iter_timing))):
-            jax.block_until_ready(th.force(q))
-        t_force = (time.perf_counter() - tic) / max(1, int(args.n_iter_timing))
-
-        tic = time.perf_counter()
-        for _ in range(max(1, int(args.n_iter_timing))):
-            jax.block_until_ready(th.evolveQ(0.1, p, q))
-        t_drift = (time.perf_counter() - tic) / max(1, int(args.n_iter_timing))
-
-        print(f"timing: action={t_action:.6e}s force={t_force:.6e}s evolveQ={t_drift:.6e}s")
+        if th.ncomp == 3:
+            exb = benchmark_exponentiation(
+                th,
+                dt=float(args.timing_dt),
+                n_iter=max(1, int(args.n_iter_timing)),
+            )
+            print("O(3) exponentiation benchmark:")
+            for key, val in exb.items():
+                print(f"  {key}: {val:.6e}")
 
     if "unit" in tests or "selfcheck" in tests:
         q1 = th.evolveQ(0.5, p, q)

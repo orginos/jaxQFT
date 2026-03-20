@@ -20,11 +20,19 @@ Last updated: 2026-03-19
     - default drift path:
       - `O(3)`: Rodrigues fast path
       - `O(N>3)`: generic matrix-exponential path
+    - current timing/performance status:
+      - `O(3)` now has a dedicated fast force path using `sigma x nn`
+      - `O(3)` drift now uses a direct Rodrigues cross-product implementation instead of building per-site `3x3` matrices
+      - layout auto-selection can now use full trajectory cost, not just a flat kernel mix
   - Model CLI is the primary test harness:
     - `python3 -m jaxqft.models.on_sigma --tests selfcheck --selfcheck-fail`
     - checks include `layout`, `timing`, `fd`, `autodiff`, `unit`, `topo`,
       `eps2`, `eps4`, `reversibility`, `reproducibility`, `mcmcsmoke`, `selfcheck`
     - `topo` is enabled for `O(3)` in 2D
+    - `timing` now reports:
+      - steady-state kernel timings (`refresh_p`, `kinetic`, `action`, `force`, `evolveQ`, `average_spin`, `C2p`, `Q` when available)
+      - no-AR trajectory timings for selected integrators
+      - `O(3)` exponentiation benchmark (`rodrigues` vs `expm`)
   - Standard production script:
     - `scripts/on/hmc_on.py`
     - supports `--update {hmc,smd,ghmc}` with default `hmc`
@@ -35,6 +43,29 @@ Last updated: 2026-03-19
       - first-momentum structure factor `C2p`
       - second-moment correlation length
       - topological charge / susceptibility for `O(3)` in 2D
+    - JSON output now also contains `torch_compatible_summary`, with the same flat fields used by the old `torchQFT` O(3) summaries
+    - optional production-path timing hooks:
+      - `--benchmark-kernels`
+      - `--benchmark-integrators leapfrog,minnorm2,...`
+    - optional artifact output:
+      - `--artifact-root <dir>`
+      - writes a torch-style run directory:
+        - `summary.json` (flat torch-compatible summary)
+        - `results.json` (full JAX output)
+        - `energy_history.npy`, `av_sigma_history.npy`
+        - `chi_m_raw_history.npy`, `chi_m_history.npy`
+        - `c2p_history.npy`, `q_history.npy` when available
+  - Torch-vs-JAX O(3) comparison harness:
+    - `scripts/on/compare_o3_torch.py`
+    - defaults to vendored reference summaries under `docs/o3_regression/reference/`
+    - falls back to `../torchQFT/o3_hmc_runs` only if the vendored directory is absent
+    - launches matched JAX runs with `scripts/on/hmc_on.py`
+    - compares `xi`, `chi_m`, `c2p`, and `chi_top` in units of the combined statistical error
+    - writes a machine-readable comparison report JSON
+  - One-command vendored regression runner:
+    - `scripts/on/run_o3_regression.py`
+    - reads `docs/o3_regression/reference/manifest.json`
+    - runs the full vendored O(3) regression suite and exits nonzero on mismatch by default
   - Current scope note:
     - this first pass uses the shared update/integrator/statistics infrastructure directly via `scripts/on/hmc_on.py`
     - the unified TOML control-file driver `scripts/mcmc/mcmc.py` is not yet extended to O(N)
@@ -312,7 +343,7 @@ Last updated: 2026-03-19
   - `--cpu-threads`
   - `--cpu-onednn`
 - Local shell note for this handoff:
-  - `python3 -m py_compile jaxqft/models/on_sigma.py scripts/on/hmc_on.py` passed
+  - `python3 -m py_compile jaxqft/models/on_sigma.py scripts/on/hmc_on.py scripts/on/compare_o3_torch.py scripts/on/run_o3_regression.py` passed
   - runtime validation was not completed in this shell because `/opt/homebrew/bin/python3` currently has no `jax` module installed
 
 ## Quick Commands
@@ -320,8 +351,18 @@ Last updated: 2026-03-19
   - `python3 -m jaxqft.models.on_sigma --shape 4,4 --ncomp 3 --layout auto --tests selfcheck --selfcheck-fail`
 - O(3) / O(N) extended self-tests:
   - `python3 -m jaxqft.models.on_sigma --shape 4,4 --ncomp 3 --layout auto --tests eps2,eps4,reversibility,reproducibility,mcmcsmoke --selfcheck-fail`
+- O(3) kernel + trajectory timing:
+  - `python3 -m jaxqft.models.on_sigma --shape 16,16 --ncomp 3 --beta 1.273 --layout auto --tests layout,timing --nmd 3 --tau 1.0 --layout-integrator minnorm2 --timing-integrators leapfrog,minnorm2,forcegrad`
 - O(3) production-style run:
   - `python3 scripts/on/hmc_on.py --shape 64,64 --ncomp 3 --beta 1.468 --layout auto --update hmc --integrator minnorm2 --nmd 3 --tau 1.0 --nwarm 100 --nmeas 200 --nskip 10`
+- O(3) production-path benchmark:
+  - `python3 scripts/on/hmc_on.py --shape 24,24 --ncomp 3 --beta 1.375 --layout auto --update hmc --integrator minnorm2 --nmd 3 --tau 1.0 --nwarm 10 --nmeas 20 --nskip 2 --benchmark-kernels --benchmark-integrators leapfrog,minnorm2,forcegrad`
+- O(3) production run with saved histories:
+  - `python3 scripts/on/hmc_on.py --shape 24,24 --ncomp 3 --beta 1.375 --layout auto --update hmc --integrator minnorm2 --nmd 3 --tau 1.0 --nwarm 100 --nmeas 200 --nskip 15 --artifact-root runs/oN/artifacts`
+- Torch-vs-JAX O(3) comparison:
+  - `python3 scripts/on/compare_o3_torch.py --cases 8@1.05,12@1.187,24@1.375 --fail-on-mismatch`
+- Vendored O(3) regression suite:
+  - `python3 scripts/on/run_o3_regression.py`
 - O(4) smoke run:
   - `python3 scripts/on/hmc_on.py --shape 16,16 --ncomp 4 --beta 1.0 --layout auto --update hmc --integrator minnorm2 --nmd 4 --tau 1.0 --nwarm 10 --nmeas 20 --nskip 2`
 - SU3 production:

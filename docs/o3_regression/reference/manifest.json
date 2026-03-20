@@ -1,0 +1,23 @@
+{
+  "description": "Vendored torchQFT O(3) reference summaries for JAX regression tests.",
+  "copied_on": "2026-03-20",
+  "source_repo": "torchQFT",
+  "source_root": "../torchQFT/o3_hmc_runs",
+  "cases": [
+    {
+      "token": "8@1.05",
+      "local_summary": "docs/o3_regression/reference/o3_8_8_b1.05/summary.json",
+      "source_summary": "../torchQFT/o3_hmc_runs/o3_8_8_b1.05/summary.json"
+    },
+    {
+      "token": "12@1.187",
+      "local_summary": "docs/o3_regression/reference/o3_12_12_b1.187/summary.json",
+      "source_summary": "../torchQFT/o3_hmc_runs/o3_12_12_b1.187/summary.json"
+    },
+    {
+      "token": "24@1.375",
+      "local_summary": "docs/o3_regression/reference/o3_24_24_b1.375/summary.json",
+      "source_summary": "../torchQFT/o3_hmc_runs/o3_24_24_b1.375/summary.json"
+    }
+  ]
+}

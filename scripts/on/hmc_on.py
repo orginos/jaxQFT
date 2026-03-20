@@ -85,7 +85,7 @@ if str(ROOT) not in sys.path:
 
 from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
 from jaxqft.core.update import SMD, hmc
-from jaxqft.models.on_sigma import ONSigmaModel, _correlation_length, _parse_shape
+from jaxqft.models.on_sigma import ONSigmaModel, _correlation_length, _parse_shape, kernel_timing, trajectory_timing
 from jaxqft.stats import integrated_autocorr_time
 
 
@@ -155,6 +155,181 @@ def _analyze(obs2d: np.ndarray) -> dict:
     }
 
 
+def _torch_autocorr_fft_1d(x: np.ndarray) -> np.ndarray:
+    a = np.asarray(x, dtype=np.float64).reshape(-1)
+    if a.size < 2:
+        return np.ones((1,), dtype=np.float64)
+    y = a - np.mean(a)
+    f = np.fft.rfft(y, n=2 * a.size)
+    acf = np.fft.irfft(f * np.conjugate(f))[: a.size]
+    acf /= acf[0]
+    return np.asarray(acf, dtype=np.float64)
+
+
+def _torch_integrated_autocorr_time(x: np.ndarray, c: float = 5.0, max_lag: int | None = None) -> float:
+    acf = _torch_autocorr_fft_1d(x)
+    n = int(acf.size)
+    if max_lag is None:
+        max_lag = max(1, n // 2)
+    tau = 1.0
+    for t in range(1, max_lag):
+        if acf[t] <= 0.0:
+            break
+        tau += 2.0 * float(acf[t])
+        if t > c * tau:
+            break
+    return max(float(tau), 1.0)
+
+
+def _torch_per_stream_tau(obs2d: np.ndarray) -> np.ndarray:
+    arr = np.asarray(obs2d, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError(f"expected 2D observable array, got shape {arr.shape}")
+    return np.asarray([_torch_integrated_autocorr_time(arr[:, b]) for b in range(arr.shape[1])], dtype=np.float64)
+
+
+def _torch_batched_average(obs2d: np.ndarray, tau: np.ndarray) -> tuple[float, float]:
+    arr = np.asarray(obs2d, dtype=np.float64)
+    nmeas, nbatch = arr.shape
+    mean = float(np.mean(arr))
+    if nmeas <= 1 or nbatch <= 0:
+        return mean, float("nan")
+    var_stream = np.var(arr, axis=0, ddof=1)
+    err = float(np.sqrt(np.sum(var_stream * 2.0 * np.asarray(tau, dtype=np.float64) / float(nmeas))) / float(nbatch))
+    return mean, err
+
+
+def _jackknife_over_streams(func, *arrays: np.ndarray) -> dict[str, float]:
+    arrs = [np.asarray(a, dtype=np.float64) for a in arrays]
+    if not arrs:
+        raise ValueError("need at least one array")
+    shape0 = arrs[0].shape
+    if len(shape0) != 2:
+        raise ValueError(f"expected 2D arrays, got shape {shape0}")
+    if any(a.shape != shape0 for a in arrs[1:]):
+        raise ValueError("all arrays must have the same shape")
+    nbatch = int(shape0[1])
+    full = float(func(*[a.reshape(-1) for a in arrs]))
+    if nbatch <= 1:
+        return {"estimate": full, "se": float("nan")}
+    loo = []
+    for b in range(nbatch):
+        vals = [np.delete(a, b, axis=1).reshape(-1) for a in arrs]
+        loo.append(float(func(*vals)))
+    loo_arr = np.asarray(loo, dtype=np.float64)
+    mean_loo = float(np.mean(loo_arr))
+    se = float(np.sqrt((nbatch - 1) / float(nbatch) * np.sum((loo_arr - mean_loo) ** 2)))
+    return {"estimate": full, "se": se}
+
+
+def _torch_compatible_summary(
+    *,
+    lattice_shape: tuple[int, ...],
+    beta: float,
+    nwarm: int,
+    nskip: int,
+    nmeas: int,
+    nmd: int,
+    batch_size: int,
+    vol: int,
+    chi_m_hist: np.ndarray,
+    c2p_hist: np.ndarray,
+    q_hist: np.ndarray | None,
+) -> dict[str, float | None]:
+    tau_chi = _torch_per_stream_tau(chi_m_hist)
+    tau_c2p = _torch_per_stream_tau(c2p_hist)
+    chi_m, chi_m_err = _torch_batched_average(chi_m_hist, tau_chi)
+    c2p, c2p_err = _torch_batched_average(c2p_hist, tau_c2p)
+    xi_jk = _jackknife_over_streams(
+        lambda a, b: _correlation_length(int(lattice_shape[0]), float(np.mean(a)), float(np.mean(b))),
+        chi_m_hist,
+        c2p_hist,
+    )
+
+    out: dict[str, float | None] = {
+        "Lx": int(lattice_shape[0]),
+        "Ly": int(lattice_shape[1]) if len(lattice_shape) > 1 else int(lattice_shape[0]),
+        "beta": float(beta),
+        "Nwarm": int(nwarm),
+        "Nskip": int(nskip),
+        "Nmeas": int(nmeas),
+        "Nmd": int(nmd),
+        "batch_size": int(batch_size),
+        "xi": float(xi_jk["estimate"]),
+        "xi_err": float(xi_jk["se"]),
+        "chi_m": float(chi_m),
+        "chi_m_err": float(chi_m_err),
+        "c2p": float(c2p),
+        "c2p_err": float(c2p_err),
+        "tau_int_chi_m_mean": float(np.mean(tau_chi)),
+        "tau_int_chi_m_std": float(np.std(tau_chi, ddof=1)) if tau_chi.size > 1 else 0.0,
+        "tau_int_c2p_mean": float(np.mean(tau_c2p)),
+        "tau_int_c2p_std": float(np.std(tau_c2p, ddof=1)) if tau_c2p.size > 1 else 0.0,
+    }
+
+    if q_hist is not None:
+        tau_q = _torch_per_stream_tau(q_hist)
+        chi_top_jk = _jackknife_over_streams(
+            lambda q, q2: (float(np.mean(q2)) - float(np.mean(q)) ** 2) / float(vol),
+            q_hist,
+            q_hist ** 2,
+        )
+        out["chi_top"] = float(chi_top_jk["estimate"])
+        out["chi_top_err"] = float(chi_top_jk["se"])
+        out["tau_int_q_mean"] = float(np.mean(tau_q))
+        out["tau_int_q_std"] = float(np.std(tau_q, ddof=1)) if tau_q.size > 1 else 0.0
+    else:
+        out["chi_top"] = None
+        out["chi_top_err"] = None
+        out["tau_int_q_mean"] = None
+        out["tau_int_q_std"] = None
+    return out
+
+
+def _artifact_run_name(ncomp: int, lattice_shape: tuple[int, ...], beta: float) -> str:
+    dims = "_".join(str(int(v)) for v in lattice_shape)
+    return f"o{int(ncomp)}_{dims}_b{beta}"
+
+
+def _save_run_artifacts(
+    *,
+    artifact_root: str,
+    ncomp: int,
+    lattice_shape: tuple[int, ...],
+    beta: float,
+    out: dict,
+    obs_E_arr: np.ndarray | None = None,
+    obs_av_sigma_arr: np.ndarray | None = None,
+    obs_chi_raw_arr: np.ndarray | None = None,
+    obs_chi_conn_arr: np.ndarray | None = None,
+    obs_C2p_arr: np.ndarray | None = None,
+    obs_Q_arr: np.ndarray | None = None,
+) -> Path:
+    run_dir = Path(artifact_root) / _artifact_run_name(int(ncomp), lattice_shape, float(beta))
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    if obs_E_arr is not None:
+        np.save(run_dir / "energy_history.npy", np.asarray(obs_E_arr, dtype=np.float64))
+    if obs_av_sigma_arr is not None:
+        np.save(run_dir / "av_sigma_history.npy", np.asarray(obs_av_sigma_arr, dtype=np.float64))
+    if obs_chi_raw_arr is not None:
+        np.save(run_dir / "chi_m_raw_history.npy", np.asarray(obs_chi_raw_arr, dtype=np.float64))
+    if obs_chi_conn_arr is not None:
+        np.save(run_dir / "chi_m_history.npy", np.asarray(obs_chi_conn_arr, dtype=np.float64))
+    if obs_C2p_arr is not None:
+        np.save(run_dir / "c2p_history.npy", np.asarray(obs_C2p_arr, dtype=np.float64))
+    if obs_Q_arr is not None:
+        np.save(run_dir / "q_history.npy", np.asarray(obs_Q_arr, dtype=np.float64))
+
+    summary = out.get("torch_compatible_summary", None)
+    if isinstance(summary, dict) and summary:
+        with open(run_dir / "summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+    with open(run_dir / "results.json", "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2)
+    return run_dir
+
+
 def _compute_observables(theory: ONSigmaModel, q, mom_axis: int = 0) -> dict[str, np.ndarray]:
     q_np = np.asarray(q, dtype=np.float64)
     action = np.asarray(theory.action(q), dtype=np.float64) / float(theory.Vol)
@@ -197,15 +372,20 @@ def main():
     ap.add_argument("--resume", type=str, default="")
     ap.add_argument("--checkpoint-every", type=int, default=0)
     ap.add_argument("--json-out", type=str, default="")
+    ap.add_argument("--artifact-root", type=str, default="", help="If set, save histories and summaries under artifact-root/oN_*")
     ap.add_argument("--cpu-threads", type=int, default=int(os.environ.get("JAXQFT_CPU_THREADS", "0") or 0))
     ap.add_argument("--cpu-onednn", action=argparse.BooleanOptionalAction, default=None)
+    ap.add_argument("--benchmark-kernels", action="store_true", help="Print steady-state kernel timings before the run")
+    ap.add_argument("--benchmark-integrators", type=str, default="", help="Comma-separated integrators to benchmark as no-AR trajectories")
+    ap.add_argument("--benchmark-iter", type=int, default=5)
+    ap.add_argument("--benchmark-dt", type=float, default=0.1)
     args = ap.parse_args()
 
     lattice_shape = _parse_shape(args.shape)
     update_name = "smd" if str(args.update).lower() == "ghmc" else str(args.update).lower()
     selected_layout = str(args.layout)
     if selected_layout == "auto":
-        bench = ONSigmaModel.benchmark_layout(
+        bench_action = ONSigmaModel.benchmark_layout(
             lattice_shape=lattice_shape,
             beta=float(args.beta),
             ncomp=int(args.ncomp),
@@ -213,9 +393,45 @@ def main():
             seed=int(args.seed),
             exp_method=str(args.exp_method),
             n_iter=5,
+            kernel="action",
         )
-        print("Layout benchmark (s for action+force+evolveQ):", bench)
-        selected_layout = min(bench, key=bench.get)
+        bench_force = ONSigmaModel.benchmark_layout(
+            lattice_shape=lattice_shape,
+            beta=float(args.beta),
+            ncomp=int(args.ncomp),
+            batch_size=int(args.batch_size),
+            seed=int(args.seed),
+            exp_method=str(args.exp_method),
+            n_iter=5,
+            kernel="force",
+        )
+        bench_evolve = ONSigmaModel.benchmark_layout(
+            lattice_shape=lattice_shape,
+            beta=float(args.beta),
+            ncomp=int(args.ncomp),
+            batch_size=int(args.batch_size),
+            seed=int(args.seed),
+            exp_method=str(args.exp_method),
+            n_iter=5,
+            kernel="evolveq",
+        )
+        bench_traj = ONSigmaModel.benchmark_layout_trajectory(
+            lattice_shape=lattice_shape,
+            beta=float(args.beta),
+            ncomp=int(args.ncomp),
+            integrator=str(args.integrator),
+            nmd=int(args.nmd),
+            tau=float(args.tau),
+            batch_size=int(args.batch_size),
+            seed=int(args.seed),
+            exp_method=str(args.exp_method),
+            n_iter=max(1, int(args.benchmark_iter)),
+        )
+        print("Layout benchmark action (sec/call):", bench_action)
+        print("Layout benchmark force  (sec/call):", bench_force)
+        print("Layout benchmark evolveQ(sec/call):", bench_evolve)
+        print(f"Layout benchmark {args.integrator} trajectory (sec/traj):", bench_traj)
+        selected_layout = min(bench_traj, key=bench_traj.get)
         print("Auto-selected layout:", selected_layout)
 
     theory = ONSigmaModel(
@@ -292,6 +508,29 @@ def main():
         f" warmup_no_ar={args.warmup_no_ar} nwarm={args.nwarm} nmeas={args.nmeas} nskip={args.nskip}"
     )
 
+    if bool(args.benchmark_kernels):
+        kt = kernel_timing(
+            theory,
+            n_iter=max(1, int(args.benchmark_iter)),
+            dt=float(args.benchmark_dt),
+            mom_axis=int(args.mom_axis),
+        )
+        print("Kernel timing:")
+        for key, val in kt.items():
+            print(f"  {key}: {val:.6e}")
+
+    if str(args.benchmark_integrators).strip():
+        tt = trajectory_timing(
+            theory,
+            integrators=[v.strip() for v in str(args.benchmark_integrators).split(",") if v.strip()],
+            nmd=int(args.nmd),
+            tau=float(args.tau),
+            n_iter=max(1, int(args.benchmark_iter)),
+        )
+        print("Trajectory timing:")
+        for key, val in tt.items():
+            print(f"  {key}: {val:.6e}")
+
     def maybe_save_checkpoint(reason: str):
         if not args.save:
             return
@@ -310,6 +549,23 @@ def main():
         Path(args.save).parent.mkdir(parents=True, exist_ok=True)
         _save_checkpoint(args.save, q, theory, chain, state, config)
 
+    out = {
+        "shape": list(lattice_shape),
+        "ncomp": int(theory.ncomp),
+        "beta": float(theory.beta),
+        "layout": str(theory.layout),
+        "exp_method": str(theory.exp_method),
+        "update": str(update_name),
+        "integrator": str(args.integrator),
+        "nmd": int(args.nmd),
+        "tau": float(args.tau),
+        "batch_size": int(args.batch_size),
+        "warmup_no_ar": int(args.warmup_no_ar),
+        "nwarm": int(args.nwarm),
+        "nmeas": int(args.nmeas),
+        "nskip": int(args.nskip),
+    }
+
     for k in range(int(warmup_noar_done), int(args.warmup_no_ar)):
         q = _run_one_trajectory_hmc_no_ar(q, chain)
         warmup_noar_done = k + 1
@@ -322,9 +578,13 @@ def main():
     for k in range(int(warmup_done), int(args.nwarm)):
         q = _run_one_trajectory(q, chain)
         warmup_done = k + 1
+    warmup_ms_per_traj = None
     if int(args.nwarm) > 0:
-        print(f"warmup time/trajectory: {(time.perf_counter() - tic) * 1e3 / max(1, int(args.nwarm) - int(warmup_done == 0)):.3f} ms")
+        warmup_ms_per_traj = (time.perf_counter() - tic) * 1e3 / max(1, int(args.nwarm) - int(warmup_done == 0))
+        print(f"warmup time/trajectory: {warmup_ms_per_traj:.3f} ms")
     print(f"warmup acceptance: {chain.calc_Acceptance():.6f}")
+    out["warmup_acceptance"] = float(chain.calc_Acceptance())
+    out["warmup_ms_per_trajectory"] = None if warmup_ms_per_traj is None else float(warmup_ms_per_traj)
     chain.reset_Acceptance()
 
     tic = time.perf_counter()
@@ -350,10 +610,34 @@ def main():
         meas_done = k + 1
         if int(args.checkpoint_every) > 0 and meas_done % int(args.checkpoint_every) == 0:
             maybe_save_checkpoint("measurement")
-    print(
-        "measurement time/trajectory:"
-        f" {(time.perf_counter() - tic) * 1e3 / max(1, int(args.nmeas) * int(args.nskip)):.3f} ms"
-    )
+    meas_ms_per_traj = None
+    if int(args.nmeas) > 0:
+        meas_ms_per_traj = (time.perf_counter() - tic) * 1e3 / max(1, int(args.nmeas) * int(args.nskip))
+        print(f"measurement time/trajectory: {meas_ms_per_traj:.3f} ms")
+    else:
+        print("measurement time/trajectory: skipped (nmeas=0)")
+    out["measurement_ms_per_trajectory"] = None if meas_ms_per_traj is None else float(meas_ms_per_traj)
+
+    if int(args.nmeas) <= 0:
+        out["acceptance"] = float(chain.calc_Acceptance())
+        out["status"] = "benchmark_only"
+        if args.artifact_root:
+            run_dir = Path(args.artifact_root) / _artifact_run_name(int(theory.ncomp), tuple(int(v) for v in lattice_shape), float(theory.beta))
+            out["artifact_dir"] = str(run_dir)
+            _save_run_artifacts(
+                artifact_root=str(args.artifact_root),
+                ncomp=int(theory.ncomp),
+                lattice_shape=tuple(int(v) for v in lattice_shape),
+                beta=float(theory.beta),
+                out=out,
+            )
+        if args.json_out:
+            Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.json_out, "w", encoding="utf-8") as f:
+                json.dump(out, f, indent=2)
+            print(f"Results saved to {args.json_out}")
+        maybe_save_checkpoint("final")
+        return
 
     obs_E_arr = np.asarray(obs_E, dtype=np.float64)
     obs_av_sigma_arr = np.asarray(obs_av_sigma, dtype=np.float64)
@@ -375,28 +659,16 @@ def main():
     print(f"acc   : {chain.calc_Acceptance():.6f}")
     print("m_sigma:", av_sigma_mean.tolist())
 
-    out = {
-        "shape": list(lattice_shape),
-        "ncomp": int(theory.ncomp),
-        "beta": float(theory.beta),
-        "layout": str(theory.layout),
-        "exp_method": str(theory.exp_method),
-        "update": str(update_name),
-        "integrator": str(args.integrator),
-        "nmd": int(args.nmd),
-        "tau": float(args.tau),
-        "batch_size": int(args.batch_size),
-        "warmup_no_ar": int(args.warmup_no_ar),
-        "nwarm": int(args.nwarm),
-        "nmeas": int(args.nmeas),
-        "nskip": int(args.nskip),
-        "acceptance": float(chain.calc_Acceptance()),
-        "m_sigma": av_sigma_mean.tolist(),
-        "E": res_E,
-        "chi_m": res_chi,
-        "C2p": res_c2p,
-        "xi": float(xi),
-    }
+    out.update(
+        {
+            "acceptance": float(chain.calc_Acceptance()),
+            "m_sigma": av_sigma_mean.tolist(),
+            "E": res_E,
+            "chi_m": res_chi,
+            "C2p": res_c2p,
+            "xi": float(xi),
+        }
+    )
 
     if obs_Q:
         obs_Q_arr = np.asarray(obs_Q, dtype=np.float64)
@@ -407,6 +679,38 @@ def main():
         print(f"chi_t : {chi_top:.6e}")
         out["Q"] = res_Q
         out["chi_top"] = chi_top
+
+    compat = _torch_compatible_summary(
+        lattice_shape=tuple(int(v) for v in lattice_shape),
+        beta=float(theory.beta),
+        nwarm=int(args.nwarm),
+        nskip=int(args.nskip),
+        nmeas=int(args.nmeas),
+        nmd=int(args.nmd),
+        batch_size=int(args.batch_size),
+        vol=int(theory.Vol),
+        chi_m_hist=obs_chi_conn,
+        c2p_hist=obs_C2p_arr,
+        q_hist=np.asarray(obs_Q, dtype=np.float64) if obs_Q else None,
+    )
+    out["torch_compatible_summary"] = compat
+    if args.artifact_root:
+        run_dir = Path(args.artifact_root) / _artifact_run_name(int(theory.ncomp), tuple(int(v) for v in lattice_shape), float(theory.beta))
+        out["artifact_dir"] = str(run_dir)
+        _save_run_artifacts(
+            artifact_root=str(args.artifact_root),
+            ncomp=int(theory.ncomp),
+            lattice_shape=tuple(int(v) for v in lattice_shape),
+            beta=float(theory.beta),
+            out=out,
+            obs_E_arr=obs_E_arr,
+            obs_av_sigma_arr=obs_av_sigma_arr,
+            obs_chi_raw_arr=obs_chi_raw_arr,
+            obs_chi_conn_arr=obs_chi_conn,
+            obs_C2p_arr=obs_C2p_arr,
+            obs_Q_arr=np.asarray(obs_Q, dtype=np.float64) if obs_Q else None,
+        )
+        print(f"Run artifacts saved to {run_dir}")
 
     if args.json_out:
         Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
