@@ -206,6 +206,7 @@ every = 1
 #source = [0, 0, 0, 0]
 #momenta = [0, 1, 2, 3, 4]
 #mom_axis = 0
+#average_pm = true           # average +p and -p into a real cosine projection
 #propagator_backend = "iterative"  # iterative | dense | auto
 #dense_max_dof = 4096
 #source_average = false

@@ -402,13 +402,31 @@ def _test_pion_measurements(fixture: DDReferenceFixture, *, tol: float) -> str:
             "boundary_width": int(fixture.boundary_width),
         }
     ]
+    pm_specs = [
+        {
+            "type": "pion_2pt_dd",
+            "name": "pion_pm",
+            "source": list(source),
+            "momenta": [1],
+            "source_average": False,
+            "average_pm": True,
+            "boundary_slices": list(fixture.boundary_slices),
+            "boundary_width": int(fixture.boundary_width),
+        }
+    ]
     point_vals = _run_measurements(fixture, point_specs)["pion_point"]
     avg_vals = _run_measurements(fixture, avg_specs)["pion_avg"]
+    pm_vals = _run_measurements(fixture, pm_specs)["pion_pm"]
     point_ref = _manual_pion_from_full_inverse(fixture, moms, source=source, source_average=False)
     avg_ref = _manual_pion_from_full_inverse(fixture, moms, source=source, source_average=True)
+    pm_ref = 0.5 * (
+        _manual_pion_from_full_inverse(fixture, (1,), source=source, source_average=False)
+        + _manual_pion_from_full_inverse(fixture, (-1,), source=source, source_average=False)
+    )
     d1 = _assert_close("pion_point", _extract_corr(point_vals, "c", moms, lt), point_ref, atol=tol, rtol=tol)
     d2 = _assert_close("pion_avg", _extract_corr(avg_vals, "c", moms, lt), avg_ref, atol=tol, rtol=tol)
-    return f"{d1}; {d2}"
+    d3 = _assert_close("pion_pm", _extract_corr(pm_vals, "c", (1,), lt), pm_ref, atol=tol, rtol=tol)
+    return f"{d1}; {d2}; {d3}"
 
 
 def _test_eta_measurements(fixture: DDReferenceFixture, *, tol: float) -> str:
@@ -589,6 +607,29 @@ def _test_iterative_pion_backend() -> str:
             "dense_max_dof": 256,
         }
     ]
+    specs_pm_pair = [
+        {
+            "type": "pion_2pt",
+            "name": "pion_pm_pair",
+            "source": [0, 0],
+            "momenta": [1, -1],
+            "source_average": False,
+            "propagator_backend": "dense",
+            "dense_max_dof": 256,
+        }
+    ]
+    specs_pm_avg = [
+        {
+            "type": "pion_2pt",
+            "name": "pion_pm_avg",
+            "source": [0, 0],
+            "momenta": [1],
+            "source_average": False,
+            "propagator_backend": "iterative",
+            "dense_max_dof": 256,
+            "average_pm": True,
+        }
+    ]
     dense_theory = _make_theory((4, 4), batch_size=1, seed=7, mass=0.1, solver_kind="gmres")
     vals_dense = run_inline_measurements(
         build_inline_measurements(specs_dense),
@@ -613,14 +654,43 @@ def _test_iterative_pion_backend() -> str:
         theory=cg_theory,
         context=MeasurementContext(),
     )[0]["values"]
+    vals_pm_pair = run_inline_measurements(
+        build_inline_measurements(specs_pm_pair),
+        step=0,
+        q=q,
+        theory=dense_theory,
+        context=MeasurementContext(),
+    )[0]["values"]
+    vals_pm_gmres = run_inline_measurements(
+        build_inline_measurements(specs_pm_avg),
+        step=0,
+        q=q,
+        theory=gmres_theory,
+        context=MeasurementContext(),
+    )[0]["values"]
+    vals_pm_cg = run_inline_measurements(
+        build_inline_measurements(specs_pm_avg),
+        step=0,
+        q=q,
+        theory=cg_theory,
+        context=MeasurementContext(),
+    )[0]["values"]
     corr_dense = _extract_corr(vals_dense, "c", (0, 1), 4)
     corr_gmres = _extract_corr(vals_gmres, "c", (0, 1), 4)
     corr_cg = _extract_corr(vals_cg, "c", (0, 1), 4)
+    corr_pm_pair = _extract_corr(vals_pm_pair, "c", (1, -1), 4)
+    corr_pm_ref = 0.5 * (corr_pm_pair[0:1] + corr_pm_pair[1:2])
+    corr_pm_gmres = _extract_corr(vals_pm_gmres, "c", (1,), 4)
+    corr_pm_cg = _extract_corr(vals_pm_cg, "c", (1,), 4)
     d1 = _assert_close("iterative_pion_gmres_vs_dense", corr_gmres, corr_dense, atol=1e-5, rtol=1e-5)
     d2 = _assert_close("iterative_pion_cg_vs_dense", corr_cg, corr_dense, atol=1e-5, rtol=1e-5)
+    d3 = _assert_close("iterative_pion_pm_gmres", corr_pm_gmres, corr_pm_ref, atol=1e-5, rtol=1e-5)
+    d4 = _assert_close("iterative_pion_pm_cg", corr_pm_cg, corr_pm_ref, atol=1e-5, rtol=1e-5)
     if float(vals_cg.get("inv_used_normal_equations", -1.0)) != 1.0:
         raise AssertionError("Expected iterative CG correlator path to report inv_used_normal_equations=1")
-    return f"{d1}; {d2}"
+    if float(vals_pm_cg.get("average_pm", -1.0)) != 1.0:
+        raise AssertionError("Expected average_pm metadata flag on cosine-projected correlator")
+    return f"{d1}; {d2}; {d3}; {d4}"
 
 
 def _run_test(name: str, fn: Callable[[], str], results: List[TestResult]) -> None:

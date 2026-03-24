@@ -130,10 +130,12 @@ def _extract_by_momentum(
     chan = str(channel)
     pat_re = re.compile(rf"^{re.escape(chan)}_p(?P<p>-?\d+)_t(?P<t>\d+)_re$")
     pat_im = re.compile(rf"^{re.escape(chan)}_p(?P<p>-?\d+)_t(?P<t>\d+)_im$")
+    pat_valid = re.compile(rf"^{re.escape(chan)}_valid_t(?P<t>\d+)$")
     legacy_re = re.compile(rf"^{re.escape(chan)}_t(?P<t>\d+)$") if chan in ("c", "full", "conn", "disc") else None
 
     by_p_step: Dict[int, Dict[int, Dict[int, float]]] = {}
     imag_abs_max: Dict[int, float] = {}
+    valid_times_by_step: Dict[int, set[int]] = {}
 
     for rec in records:
         if str(rec.get("name", "")) != str(measurement):
@@ -144,6 +146,11 @@ def _extract_by_momentum(
         step = int(rec.get("step", -1))
         for k, v in vals.items():
             key = str(k)
+            m_valid = pat_valid.match(key)
+            if m_valid is not None:
+                valid_times_by_step.setdefault(step, set()).add(int(m_valid.group("t")))
+                continue
+
             m_re = pat_re.match(key)
             if m_re is not None:
                 p = int(m_re.group("p"))
@@ -170,18 +177,28 @@ def _extract_by_momentum(
     samples_by_p: Dict[int, np.ndarray] = {}
     steps_by_p: Dict[int, np.ndarray] = {}
     meta_by_p: Dict[int, Dict[str, float]] = {}
+    valid_support: Optional[List[int]] = None
+    if valid_times_by_step:
+        support_sets = [set(v) for v in valid_times_by_step.values() if v]
+        if support_sets:
+            valid_support = sorted(set.intersection(*support_sets))
 
     for p in sorted(by_p_step.keys()):
         by_step = by_p_step[p]
-        t_extent = 1 + max(max(tm.keys()) for tm in by_step.values() if tm)
+        if valid_support is not None:
+            support_times = list(valid_support)
+        else:
+            t_extent = 1 + max(max(tm.keys()) for tm in by_step.values() if tm)
+            support_times = list(range(int(t_extent)))
         rows: List[np.ndarray] = []
         kept_steps: List[int] = []
         dropped = 0
         for step in sorted(by_step.keys()):
-            row = np.full((t_extent,), np.nan, dtype=np.float64)
-            for t, val in by_step[step].items():
-                if 0 <= int(t) < t_extent:
-                    row[int(t)] = float(val)
+            row = np.full((len(support_times),), np.nan, dtype=np.float64)
+            vals_step = by_step[step]
+            for i, t in enumerate(support_times):
+                if int(t) in vals_step:
+                    row[i] = float(vals_step[int(t)])
             if np.all(np.isfinite(row)):
                 rows.append(row)
                 kept_steps.append(int(step))
@@ -192,11 +209,13 @@ def _extract_by_momentum(
         samples_by_p[p] = np.asarray(rows, dtype=np.float64)
         steps_by_p[p] = np.asarray(kept_steps, dtype=np.int64)
         meta_by_p[p] = {
-            "t_extent": float(t_extent),
+            "t_extent": float(len(support_times)),
             "n_total": float(len(by_step)),
             "n_kept": float(len(rows)),
             "n_dropped_incomplete": float(dropped),
             "imag_abs_max": float(imag_abs_max.get(p, 0.0)),
+            "support_times": [int(t) for t in support_times],
+            "has_explicit_valid_mask": 1.0 if valid_support is not None else 0.0,
         }
 
     if not samples_by_p:
@@ -504,8 +523,9 @@ def _minimize_chi2_two_exp(
 def _fit_window_correlated(
     blocks: np.ndarray,
     *,
-    tmin: int,
-    tmax: int,
+    support_times: np.ndarray,
+    idx_min: int,
+    idx_max: int,
     t_extent: int,
     n_exp: int,
     e_min: float,
@@ -515,12 +535,18 @@ def _fit_window_correlated(
 ) -> Optional[Dict[str, float]]:
     b = np.asarray(blocks, dtype=np.float64)
     n_blocks = int(b.shape[0])
-    t_idx = np.arange(int(tmin), int(tmax) + 1, dtype=np.int64)
-    n_pts = int(t_idx.size)
+    times = np.asarray(support_times, dtype=np.int64).reshape(-1)
+    i0 = int(idx_min)
+    i1 = int(idx_max)
+    if i0 < 0 or i1 < i0 or i1 >= int(times.size):
+        return None
+    col_idx = np.arange(i0, i1 + 1, dtype=np.int64)
+    t_coords = np.asarray(times[col_idx], dtype=np.int64)
+    n_pts = int(t_coords.size)
     n_params = 2 * int(max(1, n_exp))
     if n_pts <= n_params:
         return None
-    yb = b[:, t_idx]
+    yb = b[:, col_idx]
     y = np.mean(yb, axis=0)
     cov_blocks = np.cov(yb, rowvar=False, ddof=1)
     if np.ndim(cov_blocks) == 0:
@@ -531,7 +557,7 @@ def _fit_window_correlated(
     if int(n_exp) == 1:
         e_star, chi2, amp = _minimize_chi2_energy(
             y=y,
-            t=t_idx.astype(np.float64),
+            t=t_coords.astype(np.float64),
             t_extent=int(t_extent),
             winv=winv,
             e_min=float(e_min),
@@ -544,12 +570,12 @@ def _fit_window_correlated(
         if dof <= 0:
             return None
         chi2_dof = float(chi2 / float(dof))
-        yfit = amp * _model_cosh(t=t_idx.astype(np.float64), t_extent=int(t_extent), energy=float(e_star))
+        yfit = amp * _model_cosh(t=t_coords.astype(np.float64), t_extent=int(t_extent), energy=float(e_star))
         return {
             "fit_model": "1exp",
             "n_exp": 1.0,
-            "tmin": float(tmin),
-            "tmax": float(tmax),
+            "tmin": float(t_coords[0]),
+            "tmax": float(t_coords[-1]),
             "npts": float(n_pts),
             "amp": float(amp),
             "energy": float(e_star),
@@ -558,13 +584,15 @@ def _fit_window_correlated(
             "dof": float(dof),
             "cov_reg_eps": float(eps),
             "yfit": np.asarray(yfit, dtype=np.float64),
-            "t_idx": np.asarray(t_idx, dtype=np.int64),
+            "t_idx": np.asarray(t_coords, dtype=np.int64),
+            "support_idx_min": float(i0),
+            "support_idx_max": float(i1),
         }
 
     if int(n_exp) == 2:
         e0, e1, chi2, a0, a1 = _minimize_chi2_two_exp(
             y=y,
-            t=t_idx.astype(np.float64),
+            t=t_coords.astype(np.float64),
             t_extent=int(t_extent),
             winv=winv,
             e_min=float(e_min),
@@ -577,7 +605,7 @@ def _fit_window_correlated(
         if dof <= 0:
             return None
         chi2_dof = float(chi2 / float(dof))
-        t_float = t_idx.astype(np.float64)
+        t_float = t_coords.astype(np.float64)
         yfit = (
             a0 * _model_cosh(t=t_float, t_extent=int(t_extent), energy=float(e0))
             + a1 * _model_cosh(t=t_float, t_extent=int(t_extent), energy=float(e1))
@@ -585,8 +613,8 @@ def _fit_window_correlated(
         return {
             "fit_model": "2exp",
             "n_exp": 2.0,
-            "tmin": float(tmin),
-            "tmax": float(tmax),
+            "tmin": float(t_coords[0]),
+            "tmax": float(t_coords[-1]),
             "npts": float(n_pts),
             "amp": float(a0),
             "energy": float(e0),
@@ -597,7 +625,9 @@ def _fit_window_correlated(
             "dof": float(dof),
             "cov_reg_eps": float(eps),
             "yfit": np.asarray(yfit, dtype=np.float64),
-            "t_idx": np.asarray(t_idx, dtype=np.int64),
+            "t_idx": np.asarray(t_coords, dtype=np.int64),
+            "support_idx_min": float(i0),
+            "support_idx_max": float(i1),
         }
 
     raise ValueError(f"Unsupported n_exp={n_exp}; expected 1 or 2")
@@ -606,6 +636,7 @@ def _fit_window_correlated(
 def _select_window(
     blocks: np.ndarray,
     *,
+    support_times: np.ndarray,
     t_extent: int,
     tmin_min: int,
     tmax_max: int,
@@ -623,13 +654,20 @@ def _select_window(
     e_grid: int,
     cov_reg: float,
 ) -> Tuple[Optional[Dict[str, float]], List[Dict[str, float]]]:
+    support = np.asarray(support_times, dtype=np.int64).reshape(-1)
+    if support.size == 0:
+        return None, []
+    valid = np.where((support >= int(tmin_min)) & (support <= int(tmax_max)))[0]
+    if valid.size == 0:
+        return None, []
+    idx_lo = int(valid[0])
+    idx_hi = int(valid[-1])
+
     def _scan(n_exp: int, min_pts_local: int) -> List[Dict[str, float]]:
         out: List[Dict[str, float]] = []
-        t_lo = max(0, int(tmin_min))
-        t_hi = min(int(tmax_max), int(t_extent) - 1)
         total = 0
-        for tmin in range(t_lo, t_hi + 1):
-            n_here = int(t_hi - (tmin + int(min_pts_local) - 1) + 1)
+        for i0 in range(idx_lo, idx_hi + 1):
+            n_here = int(idx_hi - (i0 + int(min_pts_local) - 1) + 1)
             if n_here > 0:
                 total += n_here
 
@@ -641,13 +679,14 @@ def _select_window(
                 f"[{progress_prefix}] scan {stage}: windows={total} min_points={int(min_pts_local)}",
                 flush=True,
             )
-        for tmin in range(t_lo, t_hi + 1):
-            for tmax in range(tmin + int(min_pts_local) - 1, t_hi + 1):
+        for i0 in range(idx_lo, idx_hi + 1):
+            for i1 in range(i0 + int(min_pts_local) - 1, idx_hi + 1):
                 done += 1
                 fit = _fit_window_correlated(
                     blocks,
-                    tmin=int(tmin),
-                    tmax=int(tmax),
+                    support_times=support,
+                    idx_min=int(i0),
+                    idx_max=int(i1),
                     t_extent=int(t_extent),
                     n_exp=int(n_exp),
                     e_min=float(e_min),
@@ -744,8 +783,9 @@ def _select_window(
 def _jackknife_fit_errors(
     blocks: np.ndarray,
     *,
-    best_tmin: int,
-    best_tmax: int,
+    support_times: np.ndarray,
+    best_idx_min: int,
+    best_idx_max: int,
     t_extent: int,
     n_exp: int,
     e_min: float,
@@ -769,8 +809,9 @@ def _jackknife_fit_errors(
         loo = np.delete(b, j, axis=0)
         fit = _fit_window_correlated(
             loo,
-            tmin=int(best_tmin),
-            tmax=int(best_tmax),
+            support_times=np.asarray(support_times, dtype=np.int64),
+            idx_min=int(best_idx_min),
+            idx_max=int(best_idx_max),
             t_extent=int(t_extent),
             n_exp=int(n_exp),
             e_min=float(e_min),
@@ -927,6 +968,22 @@ def _setup_matplotlib(no_gui: bool):
     return plt
 
 
+def _temporal_extent_from_payload(payload: Mapping, meta_by_p: Mapping[int, Mapping[str, float]]) -> int:
+    cfg = payload.get("config", {})
+    if isinstance(cfg, Mapping):
+        run_cfg = cfg.get("run", {})
+        if isinstance(run_cfg, Mapping):
+            raw_shape = run_cfg.get("shape", None)
+            if isinstance(raw_shape, (list, tuple)) and raw_shape:
+                return int(raw_shape[-1])
+    tmax = -1
+    for meta in meta_by_p.values():
+        support = meta.get("support_times", [])
+        if isinstance(support, (list, tuple)) and support:
+            tmax = max(tmax, max(int(v) for v in support))
+    return int(max(1, tmax + 1))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Correlated 2pt fits + dispersion from checkpoint inline records")
     ap.add_argument("--input", type=str, required=True, help="checkpoint .pkl from scripts/mcmc/mcmc.py")
@@ -993,6 +1050,7 @@ def main() -> int:
     outdir.mkdir(parents=True, exist_ok=True)
     png_path = outdir / f"{args.prefix}_{args.measurement}_{args.channel}.png"
     json_path = outdir / f"{args.prefix}_{args.measurement}_{args.channel}.json"
+    cov_path = outdir / f"{args.prefix}_{args.measurement}_{args.channel}_covariance.npz"
 
     payload, records = _load_checkpoint(ckpt_path)
     if not records:
@@ -1028,19 +1086,39 @@ def main() -> int:
 
     fit_results: List[Dict[str, float]] = []
     candidate_tables: Dict[str, List[Dict[str, float]]] = {}
+    covariance_payload: Dict[str, np.ndarray] = {}
+    t_extent_full = _temporal_extent_from_payload(payload, meta_by_p)
     for p in sorted(samples_by_p.keys()):
         s = np.asarray(samples_by_p[p], dtype=np.float64)
-        t_extent = int(s.shape[1])
+        support_times = np.asarray(meta_by_p[p].get("support_times", list(range(int(s.shape[1])))), dtype=np.int64)
+        if int(support_times.size) != int(s.shape[1]):
+            raise ValueError(
+                f"Support-size mismatch for p={int(p)}: meta has {int(support_times.size)} times, samples have {int(s.shape[1])} columns"
+            )
+        t_extent = int(t_extent_full)
         if bool(args.progress):
             print(
-                f"[p={int(p)}] start: n_samples={int(s.shape[0])} T={t_extent} measurement={args.measurement}/{args.channel}",
+                f"[p={int(p)}] start: n_samples={int(s.shape[0])} T={t_extent}"
+                f" n_support={int(support_times.size)} measurement={args.measurement}/{args.channel}",
                 flush=True,
             )
         blocks = _block_means(s, block_size=block_size)
+        cov_blocks = np.cov(blocks, rowvar=False, ddof=1)
+        if np.ndim(cov_blocks) == 0:
+            cov_blocks = np.asarray([[float(cov_blocks)]], dtype=np.float64)
+        cov_mean = np.asarray(cov_blocks, dtype=np.float64) / float(int(blocks.shape[0]))
+        covariance_payload[f"p{int(p)}_times"] = np.asarray(support_times, dtype=np.int64)
+        covariance_payload[f"p{int(p)}_mean"] = np.asarray(np.mean(blocks, axis=0), dtype=np.float64)
+        covariance_payload[f"p{int(p)}_cov_blocks"] = np.asarray(cov_blocks, dtype=np.float64)
+        covariance_payload[f"p{int(p)}_cov_mean"] = np.asarray(cov_mean, dtype=np.float64)
+
         tmax_default = (t_extent // 2) - 1
-        tmax_max = int(args.tmax_max) if int(args.tmax_max) >= 0 else int(tmax_default)
+        support_half = support_times[support_times <= int(tmax_default)]
+        tmax_auto = int(support_half[-1]) if support_half.size > 0 else int(support_times[-1])
+        tmax_max = int(args.tmax_max) if int(args.tmax_max) >= 0 else int(tmax_auto)
         best, candidates = _select_window(
             blocks,
+            support_times=support_times,
             t_extent=t_extent,
             tmin_min=int(args.tmin_min),
             tmax_max=int(tmax_max),
@@ -1065,8 +1143,9 @@ def main() -> int:
         n_exp_fit = int(best.get("n_exp", 1.0))
         jk = _jackknife_fit_errors(
             blocks,
-            best_tmin=int(best["tmin"]),
-            best_tmax=int(best["tmax"]),
+            support_times=support_times,
+            best_idx_min=int(best["support_idx_min"]),
+            best_idx_max=int(best["support_idx_max"]),
             t_extent=t_extent,
             n_exp=n_exp_fit,
             e_min=float(args.e_min),
@@ -1084,6 +1163,10 @@ def main() -> int:
                 "tmin": float(best["tmin"]),
                 "tmax": float(best["tmax"]),
                 "npts": float(best["npts"]),
+                "support_idx_min": float(best["support_idx_min"]),
+                "support_idx_max": float(best["support_idx_max"]),
+                "support_times": np.asarray(support_times, dtype=np.int64).astype(int).tolist(),
+                "window_times": np.asarray(best["t_idx"], dtype=np.int64).astype(int).tolist(),
                 "energy": float(best["energy"]),
                 "energy_err": float(jk["energy_err"]),
                 "amp": float(best["amp"]),
@@ -1119,6 +1202,9 @@ def main() -> int:
                     "tmin": float(c["tmin"]),
                     "tmax": float(c["tmax"]),
                     "npts": float(c["npts"]),
+                    "support_idx_min": float(c.get("support_idx_min", float("nan"))),
+                    "support_idx_max": float(c.get("support_idx_max", float("nan"))),
+                    "window_times": np.asarray(c.get("t_idx", []), dtype=np.int64).astype(int).tolist(),
                     "energy": float(c["energy"]),
                     "amp": float(c["amp"]),
                     "energy_1": float(c.get("energy_1", float("nan"))),
@@ -1290,8 +1376,10 @@ def main() -> int:
         "momentum_meta": {str(k): v for k, v in meta_by_p.items()},
         "output_png": (str(png_path) if bool(png_written) else ""),
         "output_json": str(json_path),
+        "output_covariance_npz": str(cov_path),
     }
     json_path.write_text(json.dumps(out, indent=2, sort_keys=True), encoding="utf-8")
+    np.savez(cov_path, **covariance_payload)
 
     print("Dispersion Fit Summary")
     print(f"  checkpoint: {ckpt_path}")
@@ -1324,6 +1412,7 @@ def main() -> int:
     else:
         print("  saved figure: skipped (matplotlib unavailable)")
     print(f"  saved json:   {json_path}")
+    print(f"  saved covariance: {cov_path}")
 
     if (plt is not None) and (not args.no_gui):
         plt.show()

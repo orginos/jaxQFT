@@ -105,6 +105,74 @@ Last updated: 2026-03-24
         - `python3 scripts/u1_ym/validate_phase2_dd.py`
       - current result:
         - `7/7 passed` in the local JAX CPU environment
+- Phase-2 quenched multilevel DD pion measurement (new):
+  - scope:
+    - measurement-only implementation; existing level-0 HMC/SMD production paths stay unchanged
+    - meant for quenched `U1WilsonNf2(include_fermion_monomial=False)` gauge backgrounds
+    - implements the user-requested estimator
+      - `X_n(t) = <<C_fact(t)>>_1(U_n) + [C_exact(t;U_n) - C_fact(t;U_n)]`
+      - where the level-1 average is internal to the measurement and the fit covariance is built from the corrected level-0 samples `{X_n}`
+  - core code:
+    - `jaxqft/core/multilevel_quenched.py`
+      - two-slab DD geometry for source/sink separation
+      - projector support on the union of the two frozen slabs
+      - projector choices:
+        - `full`
+        - `probe`
+        - `laplace` / `distillation` (covariant Laplacian modes)
+      - dense restricted-domain block algebra for the factorized pion building blocks
+    - `jaxqft/core/measurements.py`
+      - new inline measurement type:
+        - `pion_2pt_ml_dd`
+      - aliases:
+        - `dd_pion_2pt_ml`
+        - `pion2pt_ml_dd`
+        - `dd_pion2pt_ml`
+        - `pion_2pt_2lvl`
+      - output channels:
+        - `approx_l0`
+        - `bias`
+        - `approx_ml`
+        - `corrected`
+        - `exact`
+      - only valid cross-domain times are emitted, together with `*_valid_t*`
+  - validation:
+    - `scripts/u1_wilson_nf2/validate_phase2_multilevel.py`
+    - coverage:
+      - projector construction (`full`, `probe`, `laplace`)
+      - source/sink domain locality under DD splicing
+      - pair-average identity for independently level-1-averaged source/sink blocks
+      - level-0 bias identity `approx_l0 + bias = exact`
+    - command:
+      - `python3 scripts/u1_wilson_nf2/validate_phase2_multilevel.py`
+    - current result:
+      - `4/4 passed` in the local JAX CPU environment
+  - analysis support (new):
+    - `scripts/mcmc/fit_2pt_dispersion.py`
+      - now understands sparse support from `channel_valid_t*`
+      - fits on the actual supported time coordinates rather than assuming dense `t=0..T-1`
+      - writes a covariance sidecar:
+        - `<prefix>_<measurement>_<channel>_covariance.npz`
+      - per momentum `p`, the sidecar contains:
+        - `p{p}_times`
+        - `p{p}_mean`
+        - `p{p}_cov_blocks`
+        - `p{p}_cov_mean`
+      - for multilevel fitting, `p{p}_cov_mean` is the covariance of the blocked corrected level-0 mean and is the matrix to use in correlated fits
+    - `scripts/mcmc/inspect_2pt_correlators.py`
+      - now also respects sparse support times from `*_valid_t*`
+  - end-to-end smoke command:
+    - temporary control file used locally:
+      - `/tmp/phase2_ml_smoke.toml`
+    - run:
+      - `python3 scripts/mcmc/mcmc.py --config /tmp/phase2_ml_smoke.toml`
+    - fit corrected multilevel channel:
+      - `python3 scripts/mcmc/fit_2pt_dispersion.py --input /tmp/phase2_ml_smoke_ckpt.pkl --measurement pion_2pt_ml_dd --channel corrected --min-points 3 --tmin-min 3 --tmax-max 5 --max-p-fit 1 --outdir /tmp/phase2_ml_analysis --prefix phase2_ml_smoke --no-gui`
+    - current smoke result:
+      - fitter completed successfully on sparse valid times `t={3,4,5}`
+      - wrote:
+        - `/tmp/phase2_ml_analysis/phase2_ml_smoke_pion_2pt_ml_dd_corrected.json`
+        - `/tmp/phase2_ml_analysis/phase2_ml_smoke_pion_2pt_ml_dd_corrected_covariance.npz`
 - Phase-3 DD exact-reference determinant factorization (new):
   - `jaxqft/models/u1_wilson_nf2_dd.py`
   - `U1WilsonNf2DDReference` is an opt-in tiny-lattice reference theory for U(1) Wilson Nf=2 with a frozen-boundary time-slab decomposition.
@@ -213,11 +281,34 @@ Last updated: 2026-03-24
         - spot checks on the same generic core path for tiny `4x4` Wilson measurements also passed for:
           - `SU2WilsonNf2`: iterative `gmres` vs dense `|Δ|_max ~ 1.4e-06`, iterative `cg`-normal-equation vs dense `|Δ|_max ~ 3.3e-05`
           - `SU3WilsonNf2`: iterative `gmres` vs dense `|Δ|_max ~ 3.1e-06`, iterative `cg`-normal-equation vs dense `|Δ|_max ~ 4.7e-05`
+      - nonzero-momentum pion improvement added:
+        - `pion_2pt` and `pion_2pt_dd` now accept `average_pm = true`
+        - this stores `0.5 * (C(+p) + C(-p))`, i.e. a real cosine projection for the requested positive momentum
+        - intended use:
+          - fixed-source nonzero-momentum pion spectroscopy where the raw `exp(ipx)` correlator develops an unwanted imaginary component / sign-changing real tail at finite statistics
+        - U1 quenched spectrum and pilot run cards now set `average_pm = true`
+        - phase-1 validation coverage was extended to check:
+          - DD pion cosine projection against explicit `(+p,-p)` dense references
+          - standard iterative/dense cosine projection agreement for both `gmres` and `cg`-normal-equation paths
+        - current validation result:
+          - `python3 scripts/u1_wilson_nf2/validate_phase1_dd.py` -> `13/13 passed`
       - conclusion:
         - antiperiodic-in-time U1 fermion BC support is now implemented and is the default for `U1WilsonNf2` / `scripts/mcmc/mcmc.py` when `physics.fermion_bc` is omitted
         - before a 32x64 DD-vs-non-DD spectroscopy study, we still likely need at least one of:
           - multi-source / averaged iterative pion measurements for cleaner plateaus
           - a scalable DD measurement driver (the current exact-Schur DD observable path is still dense-reference-only)
+      - correlator-inspection helper added:
+        - `scripts/mcmc/inspect_2pt_correlators.py`
+        - plots semilog-y `|Re C_p(t)|` / `|Im C_p(t)|` by momentum together with signal-to-noise `|Re C_p(t)| / sigma_Re`
+        - writes a JSON summary with:
+          - sign changes of `Re C_p(t)`
+          - first negative timeslice
+          - `max |Im| / |Re|` contamination
+          - block size / sample count metadata
+        - example:
+          - `python3 scripts/mcmc/inspect_2pt_correlators.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pion_spectrum_ckpt.pkl --measurement pion_2pt --channel c --outdir runs/U1-example/analysis --prefix u1_k0p2530_16x32`
+        - note:
+          - requires `matplotlib` in the active Python environment
   - Solver chrono-guess is configurable via TOML:
     - `[solver].use_solver_guess = true|false`
     - wired through to `SU3WilsonNf2(use_solver_guess=...)`

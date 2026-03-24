@@ -12,6 +12,14 @@ import numpy as np
 from jaxqft.fermions import gamma5
 
 from .domain_decomposition import TimeSlabDecomposition
+from .integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
+from .multilevel_quenched import (
+    build_projector_basis,
+    build_two_level_pion_geometry,
+    compute_factorized_pion_blocks,
+    factorized_pion_corr_from_blocks,
+)
+from .update import HMC, SMD
 
 
 @dataclass
@@ -86,6 +94,13 @@ def _parse_bool_from_spec(spec: Mapping[str, Any], key: str, default: bool) -> b
         if txt in ("0", "false", "no", "off"):
             return False
     raise ValueError(f"Invalid boolean value for measurement key '{key}': {v!r}")
+
+
+def _parse_bool_from_spec_aliases(spec: Mapping[str, Any], keys: Sequence[str], default: bool) -> bool:
+    for key in keys:
+        if key in spec:
+            return _parse_bool_from_spec(spec, key, default)
+    return bool(default)
 
 
 def _extract_lattice_shape_from_theory(theory) -> Tuple[int, ...]:
@@ -422,11 +437,58 @@ def _flatten_corr_momentum(
     return out
 
 
+def _flatten_corr_momentum_masked(
+    prefix: str,
+    corr: np.ndarray,
+    momenta: Sequence[int],
+    valid_mask: Sequence[bool],
+) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    moms = tuple(int(v) for v in momenta)
+    arr = np.asarray(corr)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected momentum correlator rank 2 (Nmom, Lt), got shape {arr.shape}")
+    if arr.shape[0] != len(moms):
+        raise ValueError(f"Momentum list size mismatch: len(momenta)={len(moms)} vs corr shape {arr.shape}")
+    mask = np.asarray(valid_mask, dtype=bool).reshape(-1)
+    if arr.shape[1] != mask.size:
+        raise ValueError(f"Valid-mask size mismatch: corr shape {arr.shape} vs mask size {mask.size}")
+    for t, ok in enumerate(mask.tolist()):
+        if ok:
+            out[f"{prefix}_valid_t{int(t)}"] = 1.0
+    for ip, p in enumerate(moms):
+        row = np.asarray(arr[ip])
+        for t, ok in enumerate(mask.tolist()):
+            if not ok:
+                continue
+            v = row[t]
+            out[f"{prefix}_p{int(p)}_t{int(t)}_re"] = float(np.real(v))
+            out[f"{prefix}_p{int(p)}_t{int(t)}_im"] = float(np.imag(v))
+    return out
+
+
+def _build_md_integrator(name: str, theory, nmd: int, tau: float):
+    key = str(name).strip().lower()
+    if key == "minnorm2":
+        return minnorm2(theory.force, theory.evolve_q, int(nmd), float(tau))
+    if key == "leapfrog":
+        return leapfrog(theory.force, theory.evolve_q, int(nmd), float(tau))
+    if key == "forcegrad":
+        return force_gradient(theory.force, theory.evolve_q, int(nmd), float(tau))
+    if key == "minnorm4pf4":
+        return minnorm4pf4(theory.force, theory.evolve_q, int(nmd), float(tau))
+    raise ValueError(f"Unknown integrator: {name!r}")
+
+
 def _pion_two_point_momentum_from_propagator(
     prop: np.ndarray,
     source: Sequence[int],
     momenta: Sequence[int],
     momentum_axis: int,
+    *,
+    average_pm: bool = False,
 ) -> np.ndarray:
     nd = int(prop.ndim - 5)
     if nd < 1:
@@ -458,7 +520,8 @@ def _pion_two_point_momentum_from_propagator(
             continue
 
         for ip, p in enumerate(moms):
-            phase = np.exp(1j * (2.0 * np.pi * float(p) / float(lmom)) * (np.arange(lmom) - x0))
+            theta = (2.0 * np.pi * float(p) / float(lmom)) * (np.arange(lmom) - x0)
+            phase = np.cos(theta) if bool(average_pm) else np.exp(1j * theta)
             ph_shape = [1] + [1] * len(shp_spatial)
             ph_shape[1 + mom_ax] = lmom
             ph = phase.reshape(ph_shape)
@@ -492,6 +555,7 @@ def _accumulate_pair_correlator(
     *,
     source_site: Optional[int],
     source_average: bool,
+    average_pm: bool = False,
 ) -> np.ndarray:
     moms = tuple(int(v) for v in momenta)
     vol = int(pair_vals.shape[0])
@@ -509,7 +573,8 @@ def _accumulate_pair_correlator(
                 continue
             dx = np.asarray(x_site - x_site[y], dtype=np.float64)
             for ip, p in enumerate(moms):
-                ph = np.exp(1j * (2.0 * np.pi * float(p) / float(lmom)) * dx)
+                theta = (2.0 * np.pi * float(p) / float(lmom)) * dx
+                ph = np.cos(theta) if bool(average_pm) else np.exp(1j * theta)
                 np.add.at(corr[ip], dt, vals * ph)
         corr = corr / float(vol)
         return corr
@@ -525,7 +590,8 @@ def _accumulate_pair_correlator(
         return corr
     dx = np.asarray(x_site - x_site[y0], dtype=np.float64)
     for ip, p in enumerate(moms):
-        ph = np.exp(1j * (2.0 * np.pi * float(p) / float(lmom)) * dx)
+        theta = (2.0 * np.pi * float(p) / float(lmom)) * dx
+        ph = np.cos(theta) if bool(average_pm) else np.exp(1j * theta)
         np.add.at(corr[ip], dt, vals * ph)
     return corr
 
@@ -540,6 +606,7 @@ def _pion_two_point_momentum_from_dense_inverse(
     *,
     source_site: Optional[int],
     source_average: bool,
+    average_pm: bool = False,
 ) -> np.ndarray:
     shp = tuple(int(v) for v in lattice_shape)
     vol = int(np.prod(np.asarray(shp, dtype=np.int64)))
@@ -559,6 +626,7 @@ def _pion_two_point_momentum_from_dense_inverse(
             momenta=momenta,
             source_site=source_site,
             source_average=bool(source_average),
+            average_pm=bool(average_pm),
         )
     return corr
 
@@ -722,6 +790,7 @@ def _pion_two_point_momentum_from_dd_exact_schur_inverse(
     *,
     source_site: Optional[int],
     source_average: bool,
+    average_pm: bool = False,
 ) -> np.ndarray:
     shp = tuple(int(v) for v in lattice_shape)
     nsc = int(ns * nc)
@@ -749,6 +818,7 @@ def _pion_two_point_momentum_from_dd_exact_schur_inverse(
             momenta=momenta,
             source_site=src_local,
             source_average=bool(source_average),
+            average_pm=bool(average_pm),
         )
     return corr
 
@@ -962,6 +1032,7 @@ class PionTwoPointMeasurement:
     propagator_backend: str = "iterative"  # iterative | dense | auto
     dense_max_dof: int = 4096
     source_average: bool = False
+    average_pm: bool = False
 
     def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
         t0 = time.perf_counter()
@@ -1000,6 +1071,7 @@ class PionTwoPointMeasurement:
                 momentum_axis=mom_axis,
                 source_site=source_site,
                 source_average=bool(self.source_average),
+                average_pm=bool(self.average_pm),
             )
         else:
             prop, inv_info = _full_point_source_propagator(
@@ -1016,12 +1088,14 @@ class PionTwoPointMeasurement:
                 source=source,
                 momenta=moms,
                 momentum_axis=mom_axis,
+                average_pm=bool(self.average_pm),
             )
         t2 = time.perf_counter()
         out = _flatten_corr_momentum("c", corr, moms, include_legacy_zero=True)
         out["mom_axis"] = float(mom_axis)
         out["n_momenta"] = float(len(moms))
         out["source_average"] = 1.0 if bool(self.source_average) else 0.0
+        out["average_pm"] = 1.0 if bool(self.average_pm) else 0.0
         out.update(inv_info)
         out["wall_total_sec"] = float(t2 - t0)
         out["wall_after_prop_sec"] = float(t2 - t1)
@@ -1101,6 +1175,7 @@ class DDPionTwoPointMeasurement:
     momentum_axis: int = 0
     dense_max_dof: int = 4096
     source_average: bool = False
+    average_pm: bool = False
     boundary_slices: Tuple[int, ...] = (0,)
     boundary_width: int = 1
 
@@ -1130,6 +1205,7 @@ class DDPionTwoPointMeasurement:
             momentum_axis=mom_axis,
             source_site=source_site,
             source_average=bool(self.source_average),
+            average_pm=bool(self.average_pm),
         )
         t2 = time.perf_counter()
 
@@ -1137,6 +1213,7 @@ class DDPionTwoPointMeasurement:
         out["mom_axis"] = float(mom_axis)
         out["n_momenta"] = float(len(moms))
         out["source_average"] = 1.0 if bool(self.source_average) else 0.0
+        out["average_pm"] = 1.0 if bool(self.average_pm) else 0.0
         out["dd_n_boundary_slices"] = float(len(tuple(decomp.boundary_slices)))
         out["dd_boundary_width"] = float(int(decomp.boundary_width))
         out.update(inv_info)
@@ -1215,6 +1292,209 @@ class DDEtaTwoPointMeasurement:
 
 
 @dataclass
+class DDTwoLevelFactorizedPionMeasurement:
+    """Two-level quenched DD pion estimator with projector factorization and bias correction."""
+
+    every: int = 1
+    name: str = "pion_2pt_ml_dd"
+    source: Optional[Tuple[int, ...]] = None
+    momenta: Tuple[int, ...] = (0,)
+    momentum_axis: int = 0
+    average_pm: bool = False
+    boundary_slices: Tuple[int, ...] = (0,)
+    boundary_width: int = 1
+    source_margin: int = 1
+    projector_kind: str = "full"  # full | probe | laplace
+    projector_nvec: int = 0
+    probe_stride: int = 2
+    dense_max_domain_dof: int = 1024
+    exact_backend: str = "iterative"
+    exact_dense_max_dof: int = 4096
+    level1_ncfg: int = 8
+    level1_warmup: int = 2
+    level1_skip: int = 2
+    level1_update: str = "hmc"  # hmc | smd | ghmc
+    level1_integrator: str = "minnorm2"
+    level1_nmd: int = 4
+    level1_tau: float = 0.5
+    level1_gamma: float = 0.3
+    level1_seed: int = 0
+
+    def _build_level1_chain(self, dd_theory, *, seed: int):
+        integ = _build_md_integrator(self.level1_integrator, dd_theory, int(self.level1_nmd), float(self.level1_tau))
+        upd = str(self.level1_update).strip().lower()
+        if upd == "hmc":
+            chain = HMC(dd_theory, integ, verbose=False, seed=int(seed), use_fast_jit=False)
+
+            def evolve(q_cur, nstep: int):
+                return chain.evolve(q_cur, int(nstep))
+
+            return chain, evolve
+        if upd in ("smd", "ghmc"):
+            chain = SMD(
+                dd_theory,
+                integ,
+                gamma=float(self.level1_gamma),
+                accept_reject=True,
+                verbose=False,
+                seed=int(seed),
+                use_fast_jit=False,
+            )
+
+            def evolve(q_cur, nstep: int):
+                return chain.evolve(q_cur, int(nstep), warmup=False)
+
+            return chain, evolve
+        raise ValueError(f"Unsupported level1_update for {self.name}: {self.level1_update!r}")
+
+    def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
+        if bool(getattr(theory, "include_fermion_monomial", False)):
+            raise ValueError(
+                f"{self.name} expects a quenched gauge background (include_fermion_monomial=False), "
+                "because the level-1 updates are pure-gauge conditional updates."
+            )
+        if not hasattr(theory, "gamma") or not hasattr(theory, "apply_D"):
+            raise AttributeError(f"{self.name} requires a Wilson-fermion theory exposing gamma and apply_D")
+
+        from jaxqft.models import U1TimeSlabDDTheory
+
+        t0 = time.perf_counter()
+        lattice_shape = _extract_lattice_shape_from_theory(theory)
+        source = _coerce_source(self.source, lattice_shape)
+        moms = _coerce_momenta(self.momenta)
+        mom_axis = _coerce_momentum_axis(self.momentum_axis, lattice_shape)
+        ns = int(theory.fermion_shape()[-2])
+        nc = int(theory.fermion_shape()[-1])
+        nsc = int(ns * nc)
+        geom = build_two_level_pion_geometry(
+            lattice_shape=lattice_shape,
+            boundary_slices=tuple(int(v) for v in self.boundary_slices),
+            boundary_width=int(self.boundary_width),
+            source=source,
+            nsc=nsc,
+            source_margin=int(self.source_margin),
+            momentum_axis=int(mom_axis),
+        )
+
+        phi = build_projector_basis(
+            q=q,
+            theory=theory,
+            geometry=geom,
+            ns=ns,
+            nc=nc,
+            kind=str(self.projector_kind),
+            nvec=int(self.projector_nvec),
+            probe_stride=int(self.probe_stride),
+        )
+
+        # Level-0 factorized approximation and exact bias.
+        src0, sink0 = compute_factorized_pion_blocks(
+            q=q,
+            theory=theory,
+            geometry=geom,
+            phi_overlap=phi,
+            dense_max_domain_dof=int(self.dense_max_domain_dof),
+        )
+        approx0_bs, valid_mask = factorized_pion_corr_from_blocks(
+            source_blocks=src0,
+            sink_blocks=sink0,
+            geometry=geom,
+            momenta=moms,
+            average_pm=bool(self.average_pm),
+        )
+        approx0 = np.sum(np.asarray(approx0_bs), axis=0)
+
+        backend = str(self.exact_backend).strip().lower()
+        if backend in ("iter", "cg", "point", "auto"):
+            backend = "iterative"
+        if backend in ("direct", "exact"):
+            backend = "dense"
+        prop, inv_info = _full_point_source_propagator(
+            q=q,
+            theory=theory,
+            context=context,
+            source=source,
+            backend=backend,
+            dense_max_dof=int(self.exact_dense_max_dof),
+        )
+        exact = _pion_two_point_momentum_from_propagator(
+            prop=prop,
+            source=source,
+            momenta=moms,
+            momentum_axis=int(mom_axis),
+            average_pm=bool(self.average_pm),
+        )
+        bias = np.asarray(exact, dtype=np.complex128) - np.asarray(approx0, dtype=np.complex128)
+
+        # Level-1 conditional averages.
+        call_key = f"{self.name}:calls"
+        call_idx = int(context.state.get(call_key, 0))
+        context.state[call_key] = call_idx + 1
+        dd_theory = U1TimeSlabDDTheory(
+            theory,
+            boundary_slices=tuple(int(v) for v in self.boundary_slices),
+            boundary_width=int(self.boundary_width),
+        )
+        chain, evolve = self._build_level1_chain(dd_theory, seed=int(self.level1_seed) + call_idx)
+        q_cur = q
+        if int(self.level1_warmup) > 0:
+            q_cur = evolve(q_cur, int(self.level1_warmup))
+
+        src_sum = None
+        sink_sum = None
+        sample_count = max(1, int(self.level1_ncfg))
+        for m in range(sample_count):
+            if m > 0 and int(self.level1_skip) > 0:
+                q_cur = evolve(q_cur, int(self.level1_skip))
+            src_m, sink_m = compute_factorized_pion_blocks(
+                q=q_cur,
+                theory=theory,
+                geometry=geom,
+                phi_overlap=phi,
+                dense_max_domain_dof=int(self.dense_max_domain_dof),
+            )
+            src_sum = np.asarray(src_m) if src_sum is None else (src_sum + np.asarray(src_m))
+            sink_sum = np.asarray(sink_m) if sink_sum is None else (sink_sum + np.asarray(sink_m))
+
+        src_mean = src_sum / float(sample_count)
+        sink_mean = sink_sum / float(sample_count)
+        approx_ml_bs, valid_mask_ml = factorized_pion_corr_from_blocks(
+            source_blocks=src_mean,
+            sink_blocks=sink_mean,
+            geometry=geom,
+            momenta=moms,
+            average_pm=bool(self.average_pm),
+        )
+        if not np.array_equal(np.asarray(valid_mask_ml, dtype=bool), np.asarray(valid_mask, dtype=bool)):
+            raise RuntimeError("Internal multilevel valid-mask mismatch")
+        approx_ml = np.sum(np.asarray(approx_ml_bs), axis=0)
+        corrected = approx_ml + bias
+        t1 = time.perf_counter()
+
+        out: Dict[str, float] = {}
+        out.update(_flatten_corr_momentum_masked("approx_l0", approx0, moms, valid_mask))
+        out.update(_flatten_corr_momentum_masked("bias", bias, moms, valid_mask))
+        out.update(_flatten_corr_momentum_masked("approx_ml", approx_ml, moms, valid_mask))
+        out.update(_flatten_corr_momentum_masked("corrected", corrected, moms, valid_mask))
+        out.update(_flatten_corr_momentum_masked("exact", exact, moms, valid_mask))
+        out["mom_axis"] = float(mom_axis)
+        out["n_momenta"] = float(len(moms))
+        out["average_pm"] = 1.0 if bool(self.average_pm) else 0.0
+        out["dd_n_boundary_slices"] = float(len(tuple(self.boundary_slices)))
+        out["dd_boundary_width"] = float(int(self.boundary_width))
+        out["dd_source_domain_index"] = float(int(geom.source_domain_index))
+        out["dd_sink_domain_index"] = float(int(geom.sink_domain_index))
+        out["dd_source_time"] = float(int(source[-1]))
+        out["dd_n_overlap_sites"] = float(int(geom.overlap_sites.size))
+        out["dd_n_projectors"] = float(int(phi.shape[1]))
+        out["dd_n_level1_samples"] = float(sample_count)
+        out["dd_level1_acceptance"] = float(chain.calc_acceptance())
+        out.update(inv_info)
+        out["wall_total_sec"] = float(t1 - t0)
+        return out
+
+
+@dataclass
 class ProtonTwoPointMeasurement:
     """Local proton two-point function with (1 +/- gamma_t)/2 projection."""
 
@@ -1278,6 +1558,7 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
             backend = _parse_propagator_backend_from_spec(spec, default="iterative")
             dense_max_dof = int(spec.get("dense_max_dof", 4096))
             source_average = _parse_bool_from_spec(spec, "source_average", False)
+            average_pm = _parse_bool_from_spec_aliases(spec, ("average_pm", "pm_average", "average_plus_minus"), False)
             out.append(
                 PionTwoPointMeasurement(
                     every=every,
@@ -1288,6 +1569,7 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
                     propagator_backend=str(backend),
                     dense_max_dof=int(dense_max_dof),
                     source_average=bool(source_average),
+                    average_pm=bool(average_pm),
                 )
             )
             continue
@@ -1321,6 +1603,7 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
             mom_axis = int(spec.get("momentum_axis", spec.get("mom_axis", 0)))
             dense_max_dof = int(spec.get("dense_max_dof", 4096))
             source_average = _parse_bool_from_spec(spec, "source_average", False)
+            average_pm = _parse_bool_from_spec_aliases(spec, ("average_pm", "pm_average", "average_plus_minus"), False)
             boundary_slices = _parse_boundary_slices_from_spec(spec)
             boundary_width = int(spec.get("boundary_width", spec.get("bw", 1)))
             out.append(
@@ -1332,6 +1615,7 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
                     momentum_axis=int(mom_axis),
                     dense_max_dof=int(dense_max_dof),
                     source_average=bool(source_average),
+                    average_pm=bool(average_pm),
                     boundary_slices=tuple(int(v) for v in boundary_slices),
                     boundary_width=int(boundary_width),
                 )
@@ -1362,6 +1646,42 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
                     include_full=bool(include_full),
                     boundary_slices=tuple(int(v) for v in boundary_slices),
                     boundary_width=int(boundary_width),
+                )
+            )
+            continue
+        if mtype in ("pion_2pt_ml_dd", "dd_pion_2pt_ml", "pion2pt_ml_dd", "dd_pion2pt_ml", "pion_2pt_2lvl"):
+            source = _parse_source_from_spec(spec)
+            moms = _parse_momenta_from_spec(spec)
+            mom_axis = int(spec.get("momentum_axis", spec.get("mom_axis", 0)))
+            boundary_slices = _parse_boundary_slices_from_spec(spec)
+            boundary_width = int(spec.get("boundary_width", spec.get("bw", 1)))
+            average_pm = _parse_bool_from_spec_aliases(spec, ("average_pm", "pm_average", "average_plus_minus"), False)
+            out.append(
+                DDTwoLevelFactorizedPionMeasurement(
+                    every=every,
+                    name=(name or "pion_2pt_ml_dd"),
+                    source=source,
+                    momenta=tuple(int(v) for v in moms),
+                    momentum_axis=int(mom_axis),
+                    average_pm=bool(average_pm),
+                    boundary_slices=tuple(int(v) for v in boundary_slices),
+                    boundary_width=int(boundary_width),
+                    source_margin=int(spec.get("source_margin", 1)),
+                    projector_kind=str(spec.get("projector_kind", spec.get("projector", "full"))),
+                    projector_nvec=int(spec.get("projector_nvec", spec.get("nvec", 0))),
+                    probe_stride=int(spec.get("probe_stride", spec.get("projector_stride", 2))),
+                    dense_max_domain_dof=int(spec.get("dense_max_domain_dof", 1024)),
+                    exact_backend=str(spec.get("exact_backend", "iterative")),
+                    exact_dense_max_dof=int(spec.get("exact_dense_max_dof", spec.get("dense_max_dof", 4096))),
+                    level1_ncfg=int(spec.get("level1_ncfg", spec.get("n1", 8))),
+                    level1_warmup=int(spec.get("level1_warmup", 2)),
+                    level1_skip=int(spec.get("level1_skip", 2)),
+                    level1_update=str(spec.get("level1_update", "hmc")),
+                    level1_integrator=str(spec.get("level1_integrator", "minnorm2")),
+                    level1_nmd=int(spec.get("level1_nmd", 4)),
+                    level1_tau=float(spec.get("level1_tau", 0.5)),
+                    level1_gamma=float(spec.get("level1_gamma", 0.3)),
+                    level1_seed=int(spec.get("level1_seed", 0)),
                 )
             )
             continue
