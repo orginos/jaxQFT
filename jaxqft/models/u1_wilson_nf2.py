@@ -303,6 +303,7 @@ class U1WilsonNf2(U1YangMills):
     preconditioner_kind: str = "none"  # {none, jacobi}
     gmres_restart: int = 32
     gmres_solve_method: str = "batched"
+    fermion_bc: Optional[Tuple[complex, ...]] = None  # boundary phases per direction, default: antiperiodic in time
     dirac_kernel: str = "optimized"  # {optimized, reference}
     include_gauge_monomial: bool = True
     include_fermion_monomial: bool = True
@@ -351,6 +352,8 @@ class U1WilsonNf2(U1YangMills):
         if self.pseudofermion_gamma is None:
             self.pseudofermion_gamma = float(self.smd_gamma) if mode == "ou" else 0.3
 
+        self.fermion_bc = self._normalize_fermion_bc(self.fermion_bc)
+        self._fermion_bc_link_factor, self._fermion_bc_active = self._build_fermion_bc_link_factor()
         self.dirac = WilsonDiracOperator(ndim=self.Nd, mass=self.mass, wilson_r=self.wilson_r, dtype=self.dtype)
         self._m0 = float(self.mass + self.wilson_r * self.Nd)
         self._mask_even, self._mask_odd = self._build_parity_masks()
@@ -455,6 +458,53 @@ class U1WilsonNf2(U1YangMills):
         o = jnp.asarray(odd.reshape((1, *self.lattice_shape, 1, 1)))
         return e, o
 
+    def _normalize_fermion_bc(self, bc: Optional[Tuple[complex, ...]]) -> Tuple[complex, ...]:
+        if bc is None:
+            vals = [1.0 + 0.0j] * self.Nd
+            vals[-1] = -1.0 + 0.0j
+        elif isinstance(bc, str):
+            vals = list(_parse_fermion_bc(bc, self.Nd))
+        else:
+            vals = [complex(v) for v in bc]
+        if len(vals) != self.Nd:
+            raise ValueError(f"fermion_bc must have Nd={self.Nd} entries; got {len(vals)}")
+        return tuple(vals)
+
+    def _build_fermion_bc_link_factor(self) -> Tuple[Array, bool]:
+        phases = np.asarray(self.fermion_bc, dtype=np.complex64)
+        active = bool(np.any(np.abs(phases - (1.0 + 0.0j)) > 1e-12))
+        if self.layout == "BMXYIJ":
+            fac = np.ones((self.Nd, *self.lattice_shape), dtype=np.complex64)
+            for mu in range(self.Nd):
+                p = phases[mu]
+                if np.abs(p - (1.0 + 0.0j)) <= 1e-12:
+                    continue
+                sl = [slice(None)] * (self.Nd + 1)
+                sl[0] = mu
+                sl[1 + mu] = int(self.lattice_shape[mu]) - 1
+                fac[tuple(sl)] *= p
+        else:
+            fac = np.ones((*self.lattice_shape, self.Nd), dtype=np.complex64)
+            for mu in range(self.Nd):
+                p = phases[mu]
+                if np.abs(p - (1.0 + 0.0j)) <= 1e-12:
+                    continue
+                sl = [slice(None)] * (self.Nd + 1)
+                sl[mu] = int(self.lattice_shape[mu]) - 1
+                sl[self.Nd] = mu
+                fac[tuple(sl)] *= p
+        return jnp.asarray(fac, dtype=self.dtype), active
+
+    def _links_with_fermion_bc(self, U: Array) -> Array:
+        if not bool(self._fermion_bc_active):
+            return U
+        fac = self._fermion_bc_link_factor.astype(U.dtype)
+        if U.ndim == self.Nd + 2:
+            return U * fac[None, ...]
+        if U.ndim == self.Nd + 1:
+            return U * fac
+        raise ValueError(f"Unexpected link tensor rank for fermion BC application: ndim={U.ndim}")
+
     def _project_even(self, psi: Array) -> Array:
         if psi.ndim == self.Nd + 2:
             return psi * self._mask_even[0].astype(psi.dtype)
@@ -474,8 +524,9 @@ class U1WilsonNf2(U1YangMills):
         return jnp.conj(U)
 
     def apply_D_with_kernel(self, U: Array, psi: Array, kernel: str, use_sparse_gamma: bool = True) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         return self.dirac.apply(
-            U,
+            U_links,
             psi,
             take_mu=self._take_mu,
             roll_site=self._roll_site,
@@ -489,8 +540,9 @@ class U1WilsonNf2(U1YangMills):
         return self.apply_D_with_kernel(U, psi, kernel=self.dirac_kernel, use_sparse_gamma=True)
 
     def apply_Ddag(self, U: Array, psi: Array) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         return self.dirac.apply(
-            U,
+            U_links,
             psi,
             take_mu=self._take_mu,
             roll_site=self._roll_site,
@@ -501,8 +553,9 @@ class U1WilsonNf2(U1YangMills):
         )
 
     def apply_offdiag(self, U: Array, psi: Array) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         return self.dirac.apply_dslash(
-            U,
+            U_links,
             psi,
             take_mu=self._take_mu,
             roll_site=self._roll_site,
@@ -513,8 +566,9 @@ class U1WilsonNf2(U1YangMills):
         )
 
     def apply_offdiag_dagger(self, U: Array, psi: Array) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         return self.dirac.apply_dslash(
-            U,
+            U_links,
             psi,
             take_mu=self._take_mu,
             roll_site=self._roll_site,
@@ -565,8 +619,9 @@ class U1WilsonNf2(U1YangMills):
         return self._m0 * xo - (1.0 / self._m0) * z_odd
 
     def apply_normal_with_kernel(self, U: Array, psi: Array, kernel: str, use_sparse_gamma: bool = True) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         return self.dirac.apply_normal(
-            U,
+            U_links,
             psi,
             take_mu=self._take_mu,
             roll_site=self._roll_site,
@@ -582,8 +637,9 @@ class U1WilsonNf2(U1YangMills):
         return self.apply_D_with_kernel(U, psi, kernel=self.dirac_kernel, use_sparse_gamma=False)
 
     def apply_Ddag_dense(self, U: Array, psi: Array) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         return self.dirac.apply(
-            U,
+            U_links,
             psi,
             take_mu=self._take_mu,
             roll_site=self._roll_site,
@@ -946,9 +1002,10 @@ class U1WilsonNf2(U1YangMills):
         }
 
     def pseudofermion_force_from_solution(self, U: Array, X: Array, Y: Array) -> Array:
+        U_links = self._links_with_fermion_bc(U)
         links_force = []
         for mu in range(self.Nd):
-            U_mu = self._take_mu(U, mu)
+            U_mu = self._take_mu(U_links, mu)
             X_xpmu = self._roll_site(X, -1, mu)
             Y_xpmu = self._roll_site(Y, -1, mu)
 
@@ -1003,6 +1060,35 @@ def _parse_shape(s: str) -> Tuple[int, ...]:
     if not vals:
         raise ValueError("shape must contain at least one dimension")
     return tuple(vals)
+
+
+def _parse_fermion_bc(s: str, nd: int) -> Tuple[complex, ...]:
+    txt = str(s).strip().lower()
+    if txt in ("", "periodic", "p"):
+        return tuple([1.0 + 0.0j] * int(nd))
+    if txt in ("antiperiodic-t", "anti-t", "ap-t", "apt", "chroma"):
+        vals = [1.0 + 0.0j] * int(nd)
+        vals[-1] = -1.0 + 0.0j
+        return tuple(vals)
+    toks = [v.strip() for v in str(s).split(",") if v.strip()]
+    vals = []
+    for t in toks:
+        tj = t.replace("I", "j").replace("i", "j")
+        vals.append(complex(tj))
+    if len(vals) != int(nd):
+        raise ValueError(f"fermion_bc must have Nd={nd} entries; got {len(vals)}")
+    return tuple(vals)
+
+
+def _format_fermion_bc(vals: Tuple[complex, ...]) -> str:
+    out = []
+    for z in vals:
+        zc = complex(z)
+        if abs(zc.imag) < 1e-12:
+            out.append(f"{zc.real:.12g}")
+        else:
+            out.append(f"({zc.real:.12g}{zc.imag:+.12g}j)")
+    return ",".join(out)
 
 
 def _gauge_transform_fermion(psi: Array, Omega: Array) -> Array:
@@ -1348,6 +1434,18 @@ def test_dirac_conventions(th: U1WilsonNf2) -> Dict[str, float]:
     for mu in range(th.Nd):
         psi_xpmu = th._roll_site(psi0, -1, mu)
         psi_xmmu = th._roll_site(psi0, +1, mu)
+        bc_mu = complex(th.fermion_bc[mu])
+        if abs(bc_mu - (1.0 + 0.0j)) > 1e-12:
+            fwd_mask = np.ones((1, *th.lattice_shape, 1, 1), dtype=np.complex64)
+            bwd_mask = np.ones((1, *th.lattice_shape, 1, 1), dtype=np.complex64)
+            fwd_sl = [slice(None)] * (th.Nd + 3)
+            bwd_sl = [slice(None)] * (th.Nd + 3)
+            fwd_sl[1 + mu] = int(th.lattice_shape[mu]) - 1
+            bwd_sl[1 + mu] = 0
+            fwd_mask[tuple(fwd_sl)] *= bc_mu
+            bwd_mask[tuple(bwd_sl)] *= np.conj(bc_mu)
+            psi_xpmu = psi_xpmu * jnp.asarray(fwd_mask, dtype=psi_xpmu.dtype)
+            psi_xmmu = psi_xmmu * jnp.asarray(bwd_mask, dtype=psi_xmmu.dtype)
         fwd = th.dirac.spin_project(psi_xpmu, mu, coeff=-1, use_sparse=False)
         bwd = th.dirac.spin_project(psi_xmmu, mu, coeff=+1, use_sparse=False)
         D_ref = D_ref - 0.5 * (fwd + bwd)
@@ -1708,6 +1806,12 @@ def main():
     ap.add_argument("--dirac-kernel", type=str, default="optimized", choices=["optimized", "reference"])
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--layout", type=str, default="BM...IJ")
+    ap.add_argument(
+        "--fermion-bc",
+        type=str,
+        default="antiperiodic-t",
+        help="fermion boundary phases per direction (comma list), e.g. 1,-1 or aliases: periodic, antiperiodic-t",
+    )
     ap.add_argument("--include-gauge-monomial", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--include-fermion-monomial", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument(
@@ -1784,6 +1888,7 @@ def main():
         }
 
     shape = _parse_shape(args.shape)
+    fermion_bc = _parse_fermion_bc(args.fermion_bc, len(shape))
     pf_gamma = args.pf_gamma
     if pf_gamma is None:
         pf_gamma = float(args.smd_gamma) if str(args.pf_refresh).lower() == "ou" else 0.3
@@ -1802,6 +1907,7 @@ def main():
         preconditioner_kind=str(args.preconditioner),
         gmres_restart=int(args.gmres_restart),
         gmres_solve_method=str(args.gmres_solve_method),
+        fermion_bc=fermion_bc,
         dirac_kernel=str(args.dirac_kernel),
         include_gauge_monomial=bool(args.include_gauge_monomial),
         include_fermion_monomial=bool(args.include_fermion_monomial),
@@ -1823,6 +1929,7 @@ def main():
     print(f"  Nd: {th.Nd}")
     print(f"  spin_dim: {th.Ns}")
     print(f"  fermion_shape: {th.fermion_shape()}")
+    print(f"  fermion_bc: {_format_fermion_bc(tuple(th.fermion_bc))}")
     print(f"  monomials: {', '.join(th.hamiltonian.monomial_names())}")
     print(f"  fermion monomial kind: {th.fermion_monomial_kind}")
     print(f"  monomial timescales: gauge={th.gauge_timescale}, fermion={th.fermion_timescale}")

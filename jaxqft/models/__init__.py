@@ -29,12 +29,16 @@ def __getattr__(name):
         return import_module(".su2_ym", __name__).SU2YangMills
     if name == "U1YangMills":
         return import_module(".u1_ym", __name__).U1YangMills
+    if name == "U1TimeSlabDDTheory":
+        return import_module(".u1_ym_dd", __name__).U1TimeSlabDDTheory
     if name == "SU3WilsonNf2":
         return import_module(".su3_wilson_nf2", __name__).SU3WilsonNf2
     if name == "SU2WilsonNf2":
         return import_module(".su2_wilson_nf2", __name__).SU2WilsonNf2
     if name == "U1WilsonNf2":
         return import_module(".u1_wilson_nf2", __name__).U1WilsonNf2
+    if name == "U1WilsonNf2DDReference":
+        return import_module(".u1_wilson_nf2_dd", __name__).U1WilsonNf2DDReference
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
@@ -54,7 +58,9 @@ __all__ = [
     "SU3YangMills",
     "SU2YangMills",
     "U1YangMills",
+    "U1TimeSlabDDTheory",
     "SU3WilsonNf2",
     "SU2WilsonNf2",
     "U1WilsonNf2",
+    "U1WilsonNf2DDReference",
 ]

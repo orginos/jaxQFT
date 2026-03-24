@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-03-19
+Last updated: 2026-03-24
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -75,6 +75,78 @@ Last updated: 2026-03-19
     - `scripts/su3_ym/hmc_su3_ym.py`, `scripts/su3_ym/bench_hmc_su3.py`
     - `scripts/su2_ym/hmc_su2_ym.py`, `scripts/su2_ym/bench_hmc_su2.py`
     - `scripts/u1_ym/hmc_u1_ym.py`, `scripts/u1_ym/bench_hmc_u1.py`
+  - Phase-2 DD pure-gauge conditional updates (new):
+    - `jaxqft/models/u1_ym_dd.py`
+    - `U1TimeSlabDDTheory` wraps a U(1) gauge theory with frozen time-slab boundaries.
+    - active-link rule:
+      - spatial links are active when their base time slice is in the DD interior
+      - temporal links are active only when both time endpoints lie in the DD interior
+    - wrapper behavior:
+      - masked momentum refresh
+      - masked drift (`evolve_q`) so frozen links remain exactly unchanged
+      - masked gauge force
+      - active-plaquette action whose trajectory-to-trajectory action differences match the full gauge action for DD-restricted proposals
+    - compatible with:
+      - `U1YangMills`
+      - gauge-only `U1WilsonNf2(include_fermion_monomial=False)`
+    - runnable driver:
+      - `scripts/u1_ym/hmc_u1_ym_dd.py`
+      - example:
+        - `python3 scripts/u1_ym/hmc_u1_ym_dd.py --shape 8,8 --boundary-slices 2,6 --boundary-width 1 --ntraj 3 --nmd 4 --tau 0.5 --update hmc`
+    - validation:
+      - `scripts/u1_ym/validate_phase2_dd.py`
+      - coverage:
+        - link-mask geometry
+        - directional FD force/action consistency on active directions
+        - DD action-shift equality with the full action for DD proposals
+        - exact frozen-link invariance under drift, HMC, and SMD
+        - compatibility with gauge-only `U1WilsonNf2`
+      - command:
+        - `python3 scripts/u1_ym/validate_phase2_dd.py`
+      - current result:
+        - `7/7 passed` in the local JAX CPU environment
+- Phase-3 DD exact-reference determinant factorization (new):
+  - `jaxqft/models/u1_wilson_nf2_dd.py`
+  - `U1WilsonNf2DDReference` is an opt-in tiny-lattice reference theory for U(1) Wilson Nf=2 with a frozen-boundary time-slab decomposition.
+  - scope:
+    - keeps the existing `U1WilsonNf2` production paths unchanged
+    - expects a gauge-only base theory: `U1WilsonNf2(include_fermion_monomial=False)`
+    - uses dense exact fermion algebra only; this is a correctness/reference path, not a scalable production algorithm
+  - implemented exact factorization:
+    - partitions the dense Wilson Dirac matrix into boundary and interior blocks
+    - identifies disconnected periodic interior domains from `TimeSlabDecomposition`
+    - factors
+      - `det D = det D_bb * (prod_i det D_i) * det R_b`
+    - with:
+      - local exact determinant monomials for each disconnected interior domain
+      - exact boundary correction monomial on the frozen-boundary degrees of freedom
+      - DD conditional gauge monomial from `U1TimeSlabDDTheory`
+  - current Hamiltonian content:
+    - conditional DD gauge action
+    - `sum_i (-2 log|det D_i|)`
+    - `-2 log|det R_b|` when `include_correction_monomial=True`
+    - the frozen-boundary factor `-2 log|det D_bb|` is tracked separately as a proposal-independent constant and is not included in the conditional Hamiltonian
+  - important note:
+    - this is not yet the paper-faithful multiboson/polynomial correction algorithm
+    - it is the exact dense reference infrastructure that the future multiboson boundary correction should replace without changing the outer DD theory/update interface
+  - runnable reference driver:
+    - `scripts/u1_wilson_nf2/hmc_u1_wilson_nf2_dd_reference.py`
+    - example:
+      - `python3 scripts/u1_wilson_nf2/hmc_u1_wilson_nf2_dd_reference.py --shape 4,4 --boundary-slices 1,3 --boundary-width 1 --ntraj 2 --nmd 2 --tau 0.3 --dense-max-dof 256`
+  - validation:
+    - `scripts/u1_wilson_nf2/validate_phase3_dd.py`
+    - covers:
+      - exact determinant factorization identity on hot and cold tiny lattices
+      - monomial action-breakdown sum consistency
+      - exact split of the full fermion action into boundary constant plus DD factorized pieces
+      - equality of conditional and full exact action differences for DD-restricted proposals
+      - exact frozen-link invariance under DD HMC
+      - nontrivial finite boundary-correction determinant
+      - exact invariance of the frozen-boundary determinant factor under DD proposals
+    - example:
+      - `python3 scripts/u1_wilson_nf2/validate_phase3_dd.py`
+    - current result:
+      - `8/8 passed` in the local JAX CPU environment
 - Update algorithms:
   - `HMC` and `SMD` (`GHMC` alias) in `jaxqft/core/update.py`.
   - Production scripts support `--update {hmc,smd,ghmc}` with default `hmc`.
@@ -117,6 +189,35 @@ Last updated: 2026-03-19
     - `mcmc_u1_thermalization_plaquette_8x16_beta4.toml` (plaquette-only, 1000 measurements, thermalization-visible logging)
     - `mcmc_u1_nf2_beta4_k0p23_8x16_corr.toml` (correlator-focused U1 Nf=2 setup)
     - `mcmc_u1_nf2_beta4_k0p23_8x16_pion_eta_1000x10.toml` (production correlator run from thermalized gauge, `skip=10`, `measure=1000`, inline `pion_2pt` + `eta_2pt`)
+    - reduced-volume quenched spectrum cards for debugging the 32x64 correlator pathology:
+      - `mcmc_u1_quenched_beta8_k0p2530_16x32_pion_spectrum.toml`
+      - `mcmc_u1_quenched_beta8_k0p2550_16x32_pion_spectrum.toml`
+    - quenched 32x64 pilot cards for pion-mass tuning near the literature `m_pi L ~ 4-5` window:
+      - `mcmc_u1_quenched_beta8_k0p2530_32x64_pion_pilot.toml`
+      - `mcmc_u1_quenched_beta8_k0p2550_32x64_pion_pilot.toml`
+    - current pilot status:
+      - literature anchor used: Della Morte–Luz scaling study (`L/a=32`, `beta=8`, `kappa=0.2530`)
+      - local quenched periodic-BC point-source pilot at `beta=8`, `kappa=0.2530` gives a rough correlated-fit estimate `E_pi(p=0) ~ 0.209`, but with poor `chi2/dof ~ 60`, so it is not yet a trustworthy production tuning point
+      - local quenched periodic-BC point-source pilot at `beta=8`, `kappa=0.2550` gives unstable tail-dominated fits, so the present single-source baseline is not clean enough for a serious DD signal/noise comparison
+      - critical measurement bug found and fixed:
+        - the iterative `pion_2pt` / point-propagator path was calling `solve_direct(D x = rhs)` with whatever `[solver].kind` the run card specified
+        - for the quenched spectrum cards, `[solver].kind = "cg"` is valid only if the code solves the normal equations `D^dagger D x = D^dagger rhs`
+        - the old code was instead feeding `cg` the non-Hermitian operator `D` directly
+        - on the saved `16x32` `kappa=0.2530` gauge field, the direct-solve relative residuals were:
+          - broken `cg` on `D x = rhs`: `1.13e+03`
+          - `gmres` on `D x = rhs`: `1.03e-07`
+          - dense reference: `6.53e-08`
+        - for the same gauge field, the corresponding single-configuration `p=0` correlator from broken `cg` was qualitatively wrong, while `gmres` matched dense to visible precision
+        - `jaxqft/core/measurements.py` now routes iterative propagator measurements with `solver.kind = "cg"` through `apply_Ddag(rhs)` + `solve_normal(...)`
+        - the quenched U1 spectrum / pilot run cards remain on `solver.kind = "cg"` and now use the correct normal-equation propagator path
+        - spot checks on the same generic core path for tiny `4x4` Wilson measurements also passed for:
+          - `SU2WilsonNf2`: iterative `gmres` vs dense `|Δ|_max ~ 1.4e-06`, iterative `cg`-normal-equation vs dense `|Δ|_max ~ 3.3e-05`
+          - `SU3WilsonNf2`: iterative `gmres` vs dense `|Δ|_max ~ 3.1e-06`, iterative `cg`-normal-equation vs dense `|Δ|_max ~ 4.7e-05`
+      - conclusion:
+        - antiperiodic-in-time U1 fermion BC support is now implemented and is the default for `U1WilsonNf2` / `scripts/mcmc/mcmc.py` when `physics.fermion_bc` is omitted
+        - before a 32x64 DD-vs-non-DD spectroscopy study, we still likely need at least one of:
+          - multi-source / averaged iterative pion measurements for cleaner plateaus
+          - a scalable DD measurement driver (the current exact-Schur DD observable path is still dense-reference-only)
   - Solver chrono-guess is configurable via TOML:
     - `[solver].use_solver_guess = true|false`
     - wired through to `SU3WilsonNf2(use_solver_guess=...)`
@@ -164,6 +265,9 @@ Last updated: 2026-03-19
       for each available momentum with automatic fit-window selection
       based on `chi2/dof`, estimates parameter errors via blocked jackknife,
       and produces a dispersion plot + JSON fit report.
+    - headless mode now degrades gracefully when `matplotlib` is unavailable:
+      - `--no-gui` still writes the JSON report and prints the selected fit summary
+      - PNG output is skipped instead of crashing with `ModuleNotFoundError`
 - Monomial Hamiltonian infrastructure:
   - `jaxqft/core/hamiltonian.py` with `Monomial` protocol and `HamiltonianModel`.
   - Initial SU3 Wilson Nf=2 monomial composition implemented in `jaxqft/models/su3_wilson_nf2.py`.
@@ -242,15 +346,45 @@ Last updated: 2026-03-19
     - `plaquette`
     - `pion_2pt` (pseudoscalar two-point; supports momentum projection, `iterative|dense|auto` propagator backend, optional dense source averaging)
     - `eta_2pt` (flavor-singlet pseudoscalar channel with disconnected loops from dense inverse; outputs connected/disconnected/full correlators)
+    - `pion_2pt_dd` / `dd_pion_2pt` (phase-1 quenched DD observable: exact interior Schur-complement pion correlator on a time-slab decomposition; requires `boundary_slices`, optional `boundary_width`, keeps standard `source` / `source_average` conventions but restricts sources to the DD interior)
+    - `eta_2pt_dd` / `dd_eta_2pt` (phase-1 quenched DD singlet observable: exact interior Schur-complement connected/disconnected/full correlators on the DD interior)
     - `proton_2pt` / `nucleon_2pt` (local proton two-point with parity projector; returns `c_t*`)
+  - Generic DD geometry helper:
+    - `jaxqft/core/domain_decomposition.py`
+    - `TimeSlabDecomposition` currently implements time-slab boundaries with time fixed to the last lattice axis.
+    - now also provides site boundary/interior masks plus active/frozen link masks for `BMXYIJ` and `BXYMIJ` layouts.
+    - periodic interior components now respect wrap-around connectivity, which is required for exact DD determinant factorization on a torus.
+    - phase 1 is measurement-only: existing HMC/SMD/GHMC action/force/update paths are unchanged.
   - Correlator timing instrumentation (per measurement record):
     - inversion stats: `inv_n_solves`, `inv_solve_total_sec_step`, `inv_solve_total_sec_this_call`,
       `inv_solve_mean/min/max_sec`, `inv_prop_build_wall_sec`, `inv_cache_hit`
     - wall timers: `wall_total_sec`, `wall_after_prop_sec`
+    - DD exact-Schur stats: `dd_dense_build_sec`, `dd_boundary_invert_sec`, `dd_schur_build_sec`,
+      `dd_schur_invert_sec`, `dd_total_sec`, `dd_cache_hit`, `dd_matrix_cache_hit`
   - `scripts/mcmc/mcmc.py` now prints inline inversion timing summary in final results.
   - New external-ensemble measurement driver:
     - `scripts/su3_wilson_nf2/measure_cfgs_2pt.py`
     - scans cfg globs (`.lime`/`.npy`/`.pkl`), measures 2pt functions, writes JSON summary.
+  - New DD validation harness:
+    - `scripts/u1_wilson_nf2/check_dd_quenched_measurements.py`
+    - tiny-lattice check that the exact Schur complement equals the interior block of the full dense inverse, then smoke-runs `pion_2pt_dd` and `eta_2pt_dd`.
+    - example:
+      - `python3 scripts/u1_wilson_nf2/check_dd_quenched_measurements.py --shape 8,8 --boundary-slices 2,6 --boundary-width 1`
+    - default `matrix_tol` relaxed to `5e-6` after runtime checks; the current complex64 path shows `O(1e-7)` single-batch agreement on typical tiny lattices.
+  - New broader phase-1 DD suite:
+    - `scripts/u1_wilson_nf2/validate_phase1_dd.py`
+    - covers:
+      - geometry partition/invalidation
+      - periodic wrap-around interior-component grouping on the torus
+      - exact Schur identity on hot/cold/multi-batch tiny lattices
+      - `pion_2pt_dd` / `eta_2pt_dd` against manual reference correlators built from the full inverse interior block
+      - `include_connected=False` output mode
+      - shared-step DD cache hits
+      - expected error paths (`source` on boundary, too-small `dense_max_dof`)
+    - example:
+      - `python3 scripts/u1_wilson_nf2/validate_phase1_dd.py`
+    - current result:
+      - `12/12 passed` in the local JAX CPU environment
   - Correlator notes for unimproved Wilson workflow:
     - `docs/notes/two_three_point_wilson.md`
 - SciDAC/ILDG LIME I/O:
@@ -273,10 +407,11 @@ Last updated: 2026-03-19
 - Fermion building blocks:
   - `jaxqft/fermions/gamma.py`, `jaxqft/fermions/wilson.py`.
   - Wilson hop convention aligned with Chroma dslash (`forward: r-\gamma_\mu`, `backward: r+\gamma_\mu` for undaggered branch).
-  - Fermion boundary phases are now supported in SU3 Wilson Nf=2 via `fermion_bc` (e.g. `1,1,1,-1`):
+  - Fermion boundary phases are now supported in SU3 and U1 Wilson Nf=2 via `fermion_bc` (e.g. `1,1,1,-1` or `1,-1`):
     - implemented as a precomputed link-factor tensor
     - applied to links once per operator/solve input gauge field (no boundary-branching inside hot dslash loops)
     - wired consistently through `D`, `D^\dagger`, Schur operators, and pseudofermion force kernels
+    - `U1WilsonNf2` now defaults to `antiperiodic-t` when `fermion_bc` is omitted; `SU3WilsonNf2` keeps its existing explicit/default behavior
   - `WilsonDiracOperator` now exposes explicit `apply_diag` + `apply_dslash` decomposition.
   - Wilson color multiply now has specialized small-Nc kernels:
     - SU3 (`3x3`) and SU2 (`2x2`) paths in `WilsonDiracOperator.color_mul_left`
@@ -447,8 +582,13 @@ Last updated: 2026-03-19
   - `python -m jaxqft.models.su3_wilson_nf2 --tests pfid --shape 4,4,4,8 --fermion-monomial-kind eo_preconditioned`
 - U1 Wilson Nf=2 (2D default) full harness checks:
   - `python -m jaxqft.models.u1_wilson_nf2 --tests all --shape 8,8`
+  - default fermion BC is now antiperiodic in the last direction (`fermion_bc: 1,-1`); override with `--fermion-bc periodic` if needed
+  - BC + smoke validation used locally:
+    - `python -m jaxqft.models.u1_wilson_nf2 --shape 8,8 --tests gamma,adjoint,normal,gauge,conventions,mcmcsmoke --mcmcsmoke-noar 1 --mcmcsmoke-warmup 4 --mcmcsmoke-meas 8 --mcmcsmoke-repro-steps 2 --selfcheck-fail`
   - `python -m jaxqft.models.u1_wilson_nf2 --tests forcecmp --shape 8,8 --pf-force-mode analytic`
   - `python -m jaxqft.models.u1_wilson_nf2 --tests eopforce --shape 8,8 --fermion-monomial-kind eo_preconditioned --pf-force-mode analytic`
+  - unified MCMC default-BC smoke used locally (with `physics.fermion_bc` omitted):
+    - `python scripts/mcmc/mcmc.py --config /tmp/u1_bc_default_smoke.toml`
  - Cross-model Wilson benchmark matrix:
    - `python scripts/wilson/bench_wilson_matrix.py --kernel-iters 20 --solve-iters 3`
    - includes U1/SU2/SU3 eager-vs-jit with solver variants
@@ -537,12 +677,13 @@ Last updated: 2026-03-19
 5. Cosh m_eff solver overflows for large T — use log-space bisection (fixed in `cosh_meff_solve`).
 
 ## Priority Backlog
-1. Add nested integrator schedules over monomial timescales (Sexton-Weingarten style).
-2. Add Hasenbusch-preconditioned monomials for SU3 Wilson Nf=2.
-3. Add RHMC monomials for odd-flavor support.
-4. Add backend abstraction for fermion operators/solvers (`jax` default, `quda` optional later).
-5. Multi-device/domain decomposition across spacetime dimensions (not batch-only).
-6. Keep benchmark baselines per model/lattice/backend in versioned docs.
+1. Replace the phase-3 exact dense DD boundary correction with the paper-faithful polynomial/multiboson correction, keeping the current DD theory interface stable.
+2. Add nested integrator schedules over monomial timescales (Sexton-Weingarten style).
+3. Add Hasenbusch-preconditioned monomials for SU3 Wilson Nf=2.
+4. Add RHMC monomials for odd-flavor support.
+5. Add backend abstraction for fermion operators/solvers (`jax` default, `quda` optional later).
+6. Multi-device/domain decomposition across spacetime dimensions (not batch-only).
+7. Keep benchmark baselines per model/lattice/backend in versioned docs.
 
 ## Session Resume Protocol
 1. Read `AGENTS.md` and this `HANDOFF.md`.

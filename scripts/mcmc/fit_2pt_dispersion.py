@@ -913,11 +913,16 @@ def _setup_matplotlib(no_gui: bool):
         xdg.mkdir(parents=True, exist_ok=True)
         os.environ["XDG_CACHE_HOME"] = str(xdg)
 
-    if no_gui:
-        import matplotlib
+    try:
+        if no_gui:
+            import matplotlib
 
-        matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+            matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        if no_gui:
+            return None
+        raise
 
     return plt
 
@@ -1169,70 +1174,73 @@ def main() -> int:
     disp_mc = _derive_m_c_from_dispersion(disp_fit)
 
     plt = _setup_matplotlib(no_gui=bool(args.no_gui))
-    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 4.8))
+    png_written = False
+    if plt is not None:
+        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(12, 4.8))
 
-    ax0.errorbar(p_int, en, yerr=en_err, fmt="o", ms=5, capsize=3, color="#1f77b4")
-    ax0.set_xlabel("momentum index p")
-    ax0.set_ylabel("E(p)")
-    ax0.set_title(f"{args.measurement}:{args.channel} energies")
-    ax0.grid(True, alpha=0.25)
+        ax0.errorbar(p_int, en, yerr=en_err, fmt="o", ms=5, capsize=3, color="#1f77b4")
+        ax0.set_xlabel("momentum index p")
+        ax0.set_ylabel("E(p)")
+        ax0.set_title(f"{args.measurement}:{args.channel} energies")
+        ax0.grid(True, alpha=0.25)
 
-    if np.any(~fit_mask):
+        if np.any(~fit_mask):
+            ax1.errorbar(
+                p2_hat[~fit_mask],
+                e2[~fit_mask],
+                yerr=e2_err[~fit_mask],
+                fmt="o",
+                ms=4,
+                capsize=2,
+                color="#bdbdbd",
+                label="excluded points",
+            )
         ax1.errorbar(
-            p2_hat[~fit_mask],
-            e2[~fit_mask],
-            yerr=e2_err[~fit_mask],
+            p2_hat_fit,
+            e2_fit,
+            yerr=e2_err_fit,
             fmt="o",
-            ms=4,
-            capsize=2,
-            color="#bdbdbd",
-            label="excluded points",
+            ms=5,
+            capsize=3,
+            color="#d62728",
+            label="fit points",
         )
-    ax1.errorbar(
-        p2_hat_fit,
-        e2_fit,
-        yerr=e2_err_fit,
-        fmt="o",
-        ms=5,
-        capsize=3,
-        color="#d62728",
-        label="fit points",
-    )
-    if bool(disp_fit.get("ok", False)):
-        xline = np.linspace(float(np.min(p2_hat_fit)), float(np.max(p2_hat_fit)), 200)
-        yline = float(disp_fit["intercept"]) + float(disp_fit["slope"]) * xline
-        ax1.plot(xline, yline, "-", color="#9467bd", lw=1.4, label="weighted linear fit")
-        lbl = (
-            f"E^2 = m^2 + c^2 p_hat^2\n"
-            f"m={float(disp_mc['m']):.4f}±{float(disp_mc['m_err']):.4f}\n"
-            f"c={float(disp_mc['c']):.4f}±{float(disp_mc['c_err']):.4f}\n"
-            f"chi2/dof={float(disp_fit['chi2_dof']):.3f}"
-        )
-        ax1.text(
-            0.03,
-            0.97,
-            lbl,
-            transform=ax1.transAxes,
-            va="top",
-            ha="left",
-            fontsize=9,
-            bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none"},
-        )
-    ax1.set_xlabel(r"$\hat{p}^{\,2}$")
-    ax1.set_ylabel(r"$E^2$")
-    ax1.set_title("Dispersion relation")
-    ax1.grid(True, alpha=0.25)
-    ax1.legend(loc="best")
+        if bool(disp_fit.get("ok", False)):
+            xline = np.linspace(float(np.min(p2_hat_fit)), float(np.max(p2_hat_fit)), 200)
+            yline = float(disp_fit["intercept"]) + float(disp_fit["slope"]) * xline
+            ax1.plot(xline, yline, "-", color="#9467bd", lw=1.4, label="weighted linear fit")
+            lbl = (
+                f"E^2 = m^2 + c^2 p_hat^2\n"
+                f"m={float(disp_mc['m']):.4f}±{float(disp_mc['m_err']):.4f}\n"
+                f"c={float(disp_mc['c']):.4f}±{float(disp_mc['c_err']):.4f}\n"
+                f"chi2/dof={float(disp_fit['chi2_dof']):.3f}"
+            )
+            ax1.text(
+                0.03,
+                0.97,
+                lbl,
+                transform=ax1.transAxes,
+                va="top",
+                ha="left",
+                fontsize=9,
+                bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none"},
+            )
+        ax1.set_xlabel(r"$\hat{p}^{\,2}$")
+        ax1.set_ylabel(r"$E^2$")
+        ax1.set_title("Dispersion relation")
+        ax1.grid(True, alpha=0.25)
+        ax1.legend(loc="best")
 
-    subtitle = (
-        f"block={block_size}"
-        + (f" (auto tau_ref~{tau_ref:.2f})" if np.isfinite(tau_ref) else "")
-        + f" | n_mom={len(fit_results)}"
-    )
-    fig.suptitle(str(args.title))
-    fig.text(0.5, 0.01, subtitle, ha="center", va="bottom", fontsize=9)
-    fig.tight_layout(rect=[0.0, 0.03, 1.0, 0.95])
-    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+        subtitle = (
+            f"block={block_size}"
+            + (f" (auto tau_ref~{tau_ref:.2f})" if np.isfinite(tau_ref) else "")
+            + f" | n_mom={len(fit_results)}"
+        )
+        fig.suptitle(str(args.title))
+        fig.text(0.5, 0.01, subtitle, ha="center", va="bottom", fontsize=9)
+        fig.tight_layout(rect=[0.0, 0.03, 1.0, 0.95])
+        fig.savefig(png_path, dpi=150, bbox_inches="tight")
+        png_written = True
 
     out = {
         "input_checkpoint": str(ckpt_path),
@@ -1280,7 +1288,7 @@ def main() -> int:
             "derived_mc": disp_mc,
         },
         "momentum_meta": {str(k): v for k, v in meta_by_p.items()},
-        "output_png": str(png_path),
+        "output_png": (str(png_path) if bool(png_written) else ""),
         "output_json": str(json_path),
     }
     json_path.write_text(json.dumps(out, indent=2, sort_keys=True), encoding="utf-8")
@@ -1311,10 +1319,13 @@ def main() -> int:
         )
     else:
         print("  dispersion linear fit: insufficient valid points")
-    print(f"  saved figure: {png_path}")
+    if bool(png_written):
+        print(f"  saved figure: {png_path}")
+    else:
+        print("  saved figure: skipped (matplotlib unavailable)")
     print(f"  saved json:   {json_path}")
 
-    if not args.no_gui:
+    if (plt is not None) and (not args.no_gui):
         plt.show()
     return 0
 

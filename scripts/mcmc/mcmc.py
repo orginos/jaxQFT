@@ -136,7 +136,7 @@ init_use_loaded_pf_first_traj = true  # skip one PF refresh after load
 beta = 5.7
 mass = 0.05
 r = 1.0
-fermion_bc = "periodic"   # su3-only: periodic | antiperiodic-t | "1,1,1,-1"
+fermion_bc = "periodic"  # periodic | antiperiodic-t | "1,1,1,-1"; if omitted: periodic for su3, antiperiodic-t for u1
 
 [solver]
 kind = "cg"               # cg | bicgstab | gmres
@@ -493,7 +493,8 @@ def main():
     beta = float(_cfg_get(cfg, "physics.beta", 5.8))
     mass = float(_cfg_get(cfg, "physics.mass", 0.05))
     wilson_r = float(_cfg_get(cfg, "physics.r", 1.0))
-    fermion_bc = _parse_fermion_bc(_cfg_get(cfg, "physics.fermion_bc", "periodic"), nd=len(lattice_shape))
+    fermion_bc_default = "antiperiodic-t" if (theory_family, theory_name) == ("u1", "u1_wilson_nf2") else "periodic"
+    fermion_bc = _parse_fermion_bc(_cfg_get(cfg, "physics.fermion_bc", fermion_bc_default), nd=len(lattice_shape))
 
     solver_kind = str(_cfg_get(cfg, "solver.kind", "cg"))
     solver_form = str(_cfg_get(cfg, "solver.form", "normal"))
@@ -653,6 +654,7 @@ def main():
             preconditioner_kind=preconditioner,
             gmres_restart=gmres_restart,
             gmres_solve_method=gmres_solve_method,
+            fermion_bc=fermion_bc,
             include_gauge_monomial=include_gauge,
             include_fermion_monomial=include_fermion,
             fermion_monomial_kind=fermion_kind,
@@ -810,10 +812,7 @@ def main():
     print(f"  theory: {theory_family}/{theory_name}")
     print(f"  shape: {lattice_shape}")
     print(f"  beta/mass/r: {beta} / {mass} / {wilson_r}")
-    if theory_family == "su3":
-        print(f"  fermion_bc: {','.join(str(v) for v in fermion_bc)}")
-    else:
-        print("  fermion_bc: n/a (u1_wilson_nf2 currently uses periodic fermion BC)")
+    print(f"  fermion_bc: {','.join(str(v) for v in tuple(theory.fermion_bc))}")
     print(
         "  solver:"
         f" kind={solver_kind}"

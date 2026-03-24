@@ -21,6 +21,7 @@ from .integrators import (
 from .update import HMC, SMD, ghmc, hmc, smd
 from .hmc_sampler import HMCSampler, hmc_sampler
 from .hamiltonian import Monomial, HamiltonianModel
+from .domain_decomposition import TimeSlabDecomposition
 from .measurements import (
     InlineMeasurement,
     MeasurementContext,
@@ -55,6 +56,7 @@ __all__ = [
     "hmc_sampler",
     "Monomial",
     "HamiltonianModel",
+    "TimeSlabDecomposition",
     "InlineMeasurement",
     "MeasurementContext",
     "PlaquetteMeasurement",

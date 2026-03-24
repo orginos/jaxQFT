@@ -11,6 +11,8 @@ import numpy as np
 
 from jaxqft.fermions import gamma5
 
+from .domain_decomposition import TimeSlabDecomposition
+
 
 @dataclass
 class MeasurementContext:
@@ -187,6 +189,55 @@ def _full_dense_inverse(
     return ginv, info
 
 
+def _full_dense_dirac_matrix(
+    q,
+    theory,
+    context: MeasurementContext,
+    dense_max_dof: int,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    if not hasattr(theory, "apply_D"):
+        raise AttributeError("Theory does not provide apply_D(U, psi); dense DD observables are unavailable")
+    if not hasattr(theory, "fermion_shape"):
+        raise AttributeError("Theory does not provide fermion_shape(); dense DD observables are unavailable")
+
+    _, bs, ns, nc, _, ndof = _fermion_structure(theory)
+    _ = ns
+    _ = nc
+    max_dof = int(dense_max_dof)
+    if max_dof > 0 and int(ndof) > int(max_dof):
+        raise ValueError(
+            f"Dense inversion blocked: ndof={ndof} exceeds dense_max_dof={max_dof}. "
+            "Increase dense_max_dof explicitly if intended."
+        )
+
+    cache_key = f"dense_dirac:maxdof={max_dof}"
+    cached = context.cache.get(cache_key)
+    if isinstance(cached, dict) and ("dmat" in cached) and ("timing" in cached):
+        info = dict(cached["timing"])
+        info["dirac_cache_hit"] = 1.0
+        return np.asarray(cached["dmat"]), info
+
+    ferm_shape = tuple(int(v) for v in tuple(theory.fermion_shape()))
+    fdtype = np.result_type(np.asarray(q).dtype, np.complex64)
+    t0 = time.perf_counter()
+    dmat = np.zeros((bs, ndof, ndof), dtype=fdtype)
+    for i in range(ndof):
+        rhs = np.zeros(ferm_shape, dtype=fdtype)
+        rhs.reshape(bs, ndof)[:, i] = 1.0 + 0.0j
+        col = np.asarray(theory.apply_D(q, jax.device_put(rhs)), dtype=fdtype).reshape(bs, ndof)
+        dmat[:, :, i] = col
+    t1 = time.perf_counter()
+
+    timing = {
+        "dirac_dense_ndof": float(ndof),
+        "dirac_dense_build_sec": float(t1 - t0),
+    }
+    context.cache[cache_key] = {"dmat": dmat, "timing": timing}
+    info = dict(timing)
+    info["dirac_cache_hit"] = 0.0
+    return dmat, info
+
+
 def _point_source_propagator_from_dense_inverse(
     ginv: np.ndarray,
     lattice_shape: Sequence[int],
@@ -254,6 +305,7 @@ def _full_point_source_propagator(
     else:
         if not hasattr(theory, "solve_direct"):
             raise AttributeError("Theory does not provide solve_direct(U, rhs) for correlator measurements")
+        solver_kind = str(getattr(theory, "solver_kind", "")).strip().lower()
         fdtype = np.dtype(getattr(q, "dtype", np.complex64))
         prop = np.zeros((bs, *lattice_shape, ns, nc, ns, nc), dtype=fdtype)
         solve_times: List[float] = []
@@ -265,7 +317,17 @@ def _full_point_source_propagator(
                 rhs = np.zeros(ferm_shape, dtype=fdtype)
                 rhs[(*base_index, src_spin, src_color)] = 1.0 + 0.0j
                 ts = time.perf_counter()
-                sol = np.asarray(theory.solve_direct(q, jax.device_put(rhs)), dtype=fdtype)
+                rhs_j = jax.device_put(rhs)
+                if solver_kind == "cg":
+                    if not hasattr(theory, "solve_normal") or not hasattr(theory, "apply_Ddag"):
+                        raise AttributeError(
+                            "Theory with solver.kind='cg' must provide apply_Ddag(U, rhs) and solve_normal(U, phi) "
+                            "for iterative correlator measurements"
+                        )
+                    rhs_normal = theory.apply_Ddag(q, rhs_j)
+                    sol = np.asarray(theory.solve_normal(q, rhs_normal), dtype=fdtype)
+                else:
+                    sol = np.asarray(theory.solve_direct(q, rhs_j), dtype=fdtype)
                 solve_times.append(float(time.perf_counter() - ts))
                 prop[..., src_spin, src_color] = sol
 
@@ -279,6 +341,7 @@ def _full_point_source_propagator(
             "inv_solve_min_sec": float(np.min(st)) if st.size else 0.0,
             "inv_solve_max_sec": float(np.max(st)) if st.size else 0.0,
             "inv_prop_build_wall_sec": float(build_dt),
+            "inv_used_normal_equations": 1.0 if solver_kind == "cg" else 0.0,
         }
     context.cache[cache_key] = {"prop": prop, "timing": timing}
     info = dict(timing)
@@ -555,6 +618,203 @@ def _eta_two_point_components_from_dense_inverse(
     return conn, disc
 
 
+def _dd_exact_schur_inverse(
+    q,
+    theory,
+    context: MeasurementContext,
+    *,
+    boundary_slices: Sequence[int],
+    boundary_width: int,
+    dense_max_dof: int,
+) -> Tuple[np.ndarray, TimeSlabDecomposition, Dict[str, float]]:
+    lattice_shape, _, ns, nc, _, ndof = _fermion_structure(theory)
+    nsc = int(ns * nc)
+    max_dof = int(dense_max_dof)
+    if max_dof > 0 and int(ndof) > int(max_dof):
+        raise ValueError(
+            f"Dense inversion blocked: ndof={ndof} exceeds dense_max_dof={max_dof}. "
+            "Increase dense_max_dof explicitly if intended."
+        )
+
+    decomp = TimeSlabDecomposition(
+        lattice_shape=tuple(int(v) for v in lattice_shape),
+        boundary_slices=tuple(int(v) for v in boundary_slices),
+        boundary_width=int(boundary_width),
+    )
+    key_slices = ",".join(str(int(v)) for v in tuple(decomp.boundary_slices))
+    cache_key = (
+        f"dd_exact_schur:maxdof={max_dof}:bw={int(decomp.boundary_width)}:cuts={key_slices}"
+    )
+    cached = context.cache.get(cache_key)
+    if isinstance(cached, dict) and ("sinv" in cached) and ("timing" in cached):
+        info = dict(cached["timing"])
+        info["dd_cache_hit"] = 1.0
+        info["dd_total_sec_this_call"] = 0.0
+        return np.asarray(cached["sinv"]), cached["decomp"], info
+
+    dmat, dmat_info = _full_dense_dirac_matrix(
+        q=q,
+        theory=theory,
+        context=context,
+        dense_max_dof=int(dense_max_dof),
+    )
+
+    b_idx = decomp.boundary_component_indices(nsc)
+    i_idx = decomp.interior_component_indices(nsc)
+    nb = int(b_idx.size)
+    ni = int(i_idx.size)
+
+    t0 = time.perf_counter()
+    sinv = np.zeros((int(dmat.shape[0]), ni, ni), dtype=dmat.dtype)
+    boundary_invert_sec = 0.0
+    schur_build_sec = 0.0
+    schur_invert_sec = 0.0
+    for b in range(int(dmat.shape[0])):
+        dii = np.asarray(dmat[b][np.ix_(i_idx, i_idx)], dtype=dmat.dtype)
+        if nb > 0:
+            dbb = np.asarray(dmat[b][np.ix_(b_idx, b_idx)], dtype=dmat.dtype)
+            dbi = np.asarray(dmat[b][np.ix_(b_idx, i_idx)], dtype=dmat.dtype)
+            dib = np.asarray(dmat[b][np.ix_(i_idx, b_idx)], dtype=dmat.dtype)
+            ts = time.perf_counter()
+            dbb_inv = np.linalg.inv(dbb)
+            boundary_invert_sec += float(time.perf_counter() - ts)
+            ts = time.perf_counter()
+            schur = dii - dib @ dbb_inv @ dbi
+            schur_build_sec += float(time.perf_counter() - ts)
+        else:
+            schur = dii
+        ts = time.perf_counter()
+        sinv[b] = np.linalg.inv(schur)
+        schur_invert_sec += float(time.perf_counter() - ts)
+    t1 = time.perf_counter()
+
+    build_sec = float(dmat_info.get("dirac_dense_build_sec", 0.0))
+    total_sec = float(build_sec + boundary_invert_sec + schur_build_sec + schur_invert_sec)
+    timing = {
+        "dd_backend_exact_schur": 1.0,
+        "dd_dense_ndof": float(ndof),
+        "dd_n_boundary_sites": float(int(decomp.boundary_site_indices.size)),
+        "dd_n_interior_sites": float(int(decomp.interior_site_indices.size)),
+        "dd_n_boundary_slices": float(len(tuple(decomp.boundary_slices))),
+        "dd_boundary_width": float(int(decomp.boundary_width)),
+        "dd_dense_build_sec": build_sec,
+        "dd_boundary_invert_sec": float(boundary_invert_sec),
+        "dd_schur_build_sec": float(schur_build_sec),
+        "dd_schur_invert_sec": float(schur_invert_sec),
+        "dd_total_sec": total_sec,
+        "dd_matrix_cache_hit": float(dmat_info.get("dirac_cache_hit", 0.0)),
+    }
+    context.cache[cache_key] = {"sinv": sinv, "decomp": decomp, "timing": timing}
+    info = dict(timing)
+    info["dd_cache_hit"] = 0.0
+    info["dd_total_sec_this_call"] = float((t1 - t0) + (0.0 if bool(dmat_info.get("dirac_cache_hit", 0.0)) else build_sec))
+    return sinv, decomp, info
+
+
+def _pion_two_point_momentum_from_dd_exact_schur_inverse(
+    sinv: np.ndarray,
+    decomposition: TimeSlabDecomposition,
+    lattice_shape: Sequence[int],
+    ns: int,
+    nc: int,
+    momenta: Sequence[int],
+    momentum_axis: int,
+    *,
+    source_site: Optional[int],
+    source_average: bool,
+) -> np.ndarray:
+    shp = tuple(int(v) for v in lattice_shape)
+    nsc = int(ns * nc)
+    interior_sites = np.asarray(decomposition.interior_site_indices, dtype=np.int64)
+    t_all, x_all, lt, lmom = _site_time_momentum_arrays(shp, momentum_axis)
+    t_site = t_all[interior_sites]
+    x_site = x_all[interior_sites]
+
+    src_local = None
+    if not bool(source_average):
+        if source_site is None:
+            raise ValueError("source_site is required when source_average=False")
+        src_local = decomposition.interior_local_site(int(source_site))
+
+    corr = np.zeros((len(tuple(momenta)), lt), dtype=np.complex128)
+    for b in range(int(sinv.shape[0])):
+        g4 = np.asarray(sinv[b]).reshape(int(interior_sites.size), nsc, int(interior_sites.size), nsc)
+        pair_vals = np.sum(np.abs(g4) ** 2, axis=(1, 3))
+        corr = corr + _accumulate_pair_correlator(
+            pair_vals=pair_vals,
+            t_site=t_site,
+            x_site=x_site,
+            lt=lt,
+            lmom=lmom,
+            momenta=momenta,
+            source_site=src_local,
+            source_average=bool(source_average),
+        )
+    return corr
+
+
+def _eta_two_point_components_from_dd_exact_schur_inverse(
+    sinv: np.ndarray,
+    decomposition: TimeSlabDecomposition,
+    lattice_shape: Sequence[int],
+    ns: int,
+    nc: int,
+    gamma: np.ndarray,
+    momenta: Sequence[int],
+    momentum_axis: int,
+    *,
+    source_site: Optional[int],
+    source_average: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    shp = tuple(int(v) for v in lattice_shape)
+    nsc = int(ns * nc)
+    interior_sites = np.asarray(decomposition.interior_site_indices, dtype=np.int64)
+    t_all, x_all, lt, lmom = _site_time_momentum_arrays(shp, momentum_axis)
+    t_site = t_all[interior_sites]
+    x_site = x_all[interior_sites]
+
+    src_local = None
+    if not bool(source_average):
+        if source_site is None:
+            raise ValueError("source_site is required when source_average=False")
+        src_local = decomposition.interior_local_site(int(source_site))
+
+    gam = np.asarray(gamma)
+    g5 = np.asarray(gamma5(gam), dtype=gam.dtype)
+    g5c = np.kron(g5, np.eye(int(nc), dtype=gam.dtype))
+
+    conn = np.zeros((len(tuple(momenta)), lt), dtype=np.complex128)
+    disc = np.zeros((len(tuple(momenta)), lt), dtype=np.complex128)
+    for b in range(int(sinv.shape[0])):
+        g4 = np.asarray(sinv[b]).reshape(int(interior_sites.size), nsc, int(interior_sites.size), nsc)
+        pair_conn = np.sum(np.abs(g4) ** 2, axis=(1, 3))
+        conn = conn + _accumulate_pair_correlator(
+            pair_vals=pair_conn,
+            t_site=t_site,
+            x_site=x_site,
+            lt=lt,
+            lmom=lmom,
+            momenta=momenta,
+            source_site=src_local,
+            source_average=bool(source_average),
+        )
+
+        diag_blocks = g4[np.arange(int(interior_sites.size)), :, np.arange(int(interior_sites.size)), :]
+        loops = np.einsum("ab,xba->x", g5c, diag_blocks, optimize=True)
+        pair_disc = np.outer(loops, np.conjugate(loops))
+        disc = disc + _accumulate_pair_correlator(
+            pair_vals=pair_disc,
+            t_site=t_site,
+            x_site=x_site,
+            lt=lt,
+            lmom=lmom,
+            momenta=momenta,
+            source_site=src_local,
+            source_average=bool(source_average),
+        )
+    return conn, disc
+
+
 def _proton_two_point_from_propagator(prop: np.ndarray, source_t: int, parity_sign: int, gamma: np.ndarray) -> np.ndarray:
     nd = int(prop.ndim - 5)
     if nd != 4:
@@ -639,6 +899,27 @@ def _parse_source_from_spec(spec: Mapping[str, Any]) -> Optional[Tuple[int, ...]
     if isinstance(src, Sequence):
         return tuple(int(v) for v in src)
     raise ValueError(f"Invalid source spec type: {type(src).__name__}")
+
+
+def _parse_boundary_slices_from_spec(spec: Mapping[str, Any]) -> Tuple[int, ...]:
+    raw = None
+    for key in ("boundary_slices", "boundaries", "cuts", "boundary_times", "time_cuts"):
+        if key in spec:
+            raw = spec.get(key)
+            break
+    if raw is None:
+        raise ValueError("DD measurement requires boundary_slices (or boundaries/cuts)")
+    if isinstance(raw, str):
+        toks = [t.strip() for t in raw.split(",") if t.strip()]
+        if not toks:
+            raise ValueError("DD measurement boundary_slices cannot be empty")
+        return tuple(int(t) for t in toks)
+    if isinstance(raw, Sequence):
+        vals = tuple(int(v) for v in raw)
+        if len(vals) == 0:
+            raise ValueError("DD measurement boundary_slices cannot be empty")
+        return vals
+    return (int(raw),)
 
 
 def _parse_momenta_from_spec(spec: Mapping[str, Any]) -> Tuple[int, ...]:
@@ -810,6 +1091,130 @@ class EtaTwoPointMeasurement:
 
 
 @dataclass
+class DDPionTwoPointMeasurement:
+    """Connected pseudoscalar two-point function from the exact interior Schur complement."""
+
+    every: int = 1
+    name: str = "pion_2pt_dd"
+    source: Optional[Tuple[int, ...]] = None
+    momenta: Tuple[int, ...] = (0,)
+    momentum_axis: int = 0
+    dense_max_dof: int = 4096
+    source_average: bool = False
+    boundary_slices: Tuple[int, ...] = (0,)
+    boundary_width: int = 1
+
+    def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
+        t0 = time.perf_counter()
+        lattice_shape = _extract_lattice_shape_from_theory(theory)
+        source = _coerce_source(self.source, lattice_shape)
+        moms = _coerce_momenta(self.momenta)
+        mom_axis = _coerce_momentum_axis(self.momentum_axis, lattice_shape)
+        sinv, decomp, inv_info = _dd_exact_schur_inverse(
+            q=q,
+            theory=theory,
+            context=context,
+            boundary_slices=tuple(int(v) for v in self.boundary_slices),
+            boundary_width=int(self.boundary_width),
+            dense_max_dof=int(self.dense_max_dof),
+        )
+        t1 = time.perf_counter()
+        source_site = None if bool(self.source_average) else _flat_site_index(source, lattice_shape)
+        corr = _pion_two_point_momentum_from_dd_exact_schur_inverse(
+            sinv=sinv,
+            decomposition=decomp,
+            lattice_shape=lattice_shape,
+            ns=int(theory.fermion_shape()[-2]),
+            nc=int(theory.fermion_shape()[-1]),
+            momenta=moms,
+            momentum_axis=mom_axis,
+            source_site=source_site,
+            source_average=bool(self.source_average),
+        )
+        t2 = time.perf_counter()
+
+        out = _flatten_corr_momentum("c", corr, moms, include_legacy_zero=True)
+        out["mom_axis"] = float(mom_axis)
+        out["n_momenta"] = float(len(moms))
+        out["source_average"] = 1.0 if bool(self.source_average) else 0.0
+        out["dd_n_boundary_slices"] = float(len(tuple(decomp.boundary_slices)))
+        out["dd_boundary_width"] = float(int(decomp.boundary_width))
+        out.update(inv_info)
+        out["wall_total_sec"] = float(t2 - t0)
+        out["wall_after_prop_sec"] = float(t2 - t1)
+        return out
+
+
+@dataclass
+class DDEtaTwoPointMeasurement:
+    """Flavor-singlet pseudoscalar channel from the exact interior Schur complement."""
+
+    every: int = 1
+    name: str = "eta_2pt_dd"
+    source: Optional[Tuple[int, ...]] = None
+    momenta: Tuple[int, ...] = (0,)
+    momentum_axis: int = 0
+    dense_max_dof: int = 4096
+    source_average: bool = True
+    n_flavor: int = 2
+    include_connected: bool = True
+    include_full: bool = True
+    boundary_slices: Tuple[int, ...] = (0,)
+    boundary_width: int = 1
+
+    def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
+        if not hasattr(theory, "gamma"):
+            raise AttributeError("Theory does not expose gamma matrices required for eta correlator")
+        t0 = time.perf_counter()
+        lattice_shape = _extract_lattice_shape_from_theory(theory)
+        source = _coerce_source(self.source, lattice_shape)
+        moms = _coerce_momenta(self.momenta)
+        mom_axis = _coerce_momentum_axis(self.momentum_axis, lattice_shape)
+        sinv, decomp, inv_info = _dd_exact_schur_inverse(
+            q=q,
+            theory=theory,
+            context=context,
+            boundary_slices=tuple(int(v) for v in self.boundary_slices),
+            boundary_width=int(self.boundary_width),
+            dense_max_dof=int(self.dense_max_dof),
+        )
+        t1 = time.perf_counter()
+        source_site = None if bool(self.source_average) else _flat_site_index(source, lattice_shape)
+        conn, disc = _eta_two_point_components_from_dd_exact_schur_inverse(
+            sinv=sinv,
+            decomposition=decomp,
+            lattice_shape=lattice_shape,
+            ns=int(theory.fermion_shape()[-2]),
+            nc=int(theory.fermion_shape()[-1]),
+            gamma=np.asarray(theory.gamma),
+            momenta=moms,
+            momentum_axis=mom_axis,
+            source_site=source_site,
+            source_average=bool(self.source_average),
+        )
+        t2 = time.perf_counter()
+
+        out: Dict[str, float] = {}
+        if bool(self.include_connected):
+            out.update(_flatten_corr_momentum("conn", conn, moms, include_legacy_zero=False))
+        out.update(_flatten_corr_momentum("disc", disc, moms, include_legacy_zero=False))
+        if bool(self.include_full) and bool(self.include_connected):
+            full = conn - float(int(self.n_flavor)) * disc
+            out.update(_flatten_corr_momentum("full", full, moms, include_legacy_zero=True))
+
+        out["mom_axis"] = float(mom_axis)
+        out["n_momenta"] = float(len(moms))
+        out["source_average"] = 1.0 if bool(self.source_average) else 0.0
+        out["n_flavor"] = float(int(self.n_flavor))
+        out["dd_n_boundary_slices"] = float(len(tuple(decomp.boundary_slices)))
+        out["dd_boundary_width"] = float(int(decomp.boundary_width))
+        out.update(inv_info)
+        out["wall_total_sec"] = float(t2 - t0)
+        out["wall_after_prop_sec"] = float(t2 - t1)
+        return out
+
+
+@dataclass
 class ProtonTwoPointMeasurement:
     """Local proton two-point function with (1 +/- gamma_t)/2 projection."""
 
@@ -907,6 +1312,56 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
                     n_flavor=int(n_flavor),
                     include_connected=bool(include_connected),
                     include_full=bool(include_full),
+                )
+            )
+            continue
+        if mtype in ("pion_2pt_dd", "dd_pion_2pt", "pion2pt_dd", "dd_pion2pt", "dd_pion"):
+            source = _parse_source_from_spec(spec)
+            moms = _parse_momenta_from_spec(spec)
+            mom_axis = int(spec.get("momentum_axis", spec.get("mom_axis", 0)))
+            dense_max_dof = int(spec.get("dense_max_dof", 4096))
+            source_average = _parse_bool_from_spec(spec, "source_average", False)
+            boundary_slices = _parse_boundary_slices_from_spec(spec)
+            boundary_width = int(spec.get("boundary_width", spec.get("bw", 1)))
+            out.append(
+                DDPionTwoPointMeasurement(
+                    every=every,
+                    name=(name or "pion_2pt_dd"),
+                    source=source,
+                    momenta=tuple(int(v) for v in moms),
+                    momentum_axis=int(mom_axis),
+                    dense_max_dof=int(dense_max_dof),
+                    source_average=bool(source_average),
+                    boundary_slices=tuple(int(v) for v in boundary_slices),
+                    boundary_width=int(boundary_width),
+                )
+            )
+            continue
+        if mtype in ("eta_2pt_dd", "dd_eta_2pt", "eta2pt_dd", "dd_eta2pt", "dd_eta"):
+            source = _parse_source_from_spec(spec)
+            moms = _parse_momenta_from_spec(spec)
+            mom_axis = int(spec.get("momentum_axis", spec.get("mom_axis", 0)))
+            dense_max_dof = int(spec.get("dense_max_dof", 4096))
+            source_average = _parse_bool_from_spec(spec, "source_average", True)
+            n_flavor = int(spec.get("n_flavor", spec.get("nflavor", 2)))
+            include_connected = _parse_bool_from_spec(spec, "include_connected", True)
+            include_full = _parse_bool_from_spec(spec, "include_full", True)
+            boundary_slices = _parse_boundary_slices_from_spec(spec)
+            boundary_width = int(spec.get("boundary_width", spec.get("bw", 1)))
+            out.append(
+                DDEtaTwoPointMeasurement(
+                    every=every,
+                    name=(name or "eta_2pt_dd"),
+                    source=source,
+                    momenta=tuple(int(v) for v in moms),
+                    momentum_axis=int(mom_axis),
+                    dense_max_dof=int(dense_max_dof),
+                    source_average=bool(source_average),
+                    n_flavor=int(n_flavor),
+                    include_connected=bool(include_connected),
+                    include_full=bool(include_full),
+                    boundary_slices=tuple(int(v) for v in boundary_slices),
+                    boundary_width=int(boundary_width),
                 )
             )
             continue
