@@ -14,9 +14,11 @@ from jaxqft.fermions import gamma5
 from .domain_decomposition import TimeSlabDecomposition
 from .integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
 from .multilevel_quenched import (
+    build_giusti_surface_projector_basis,
     build_projector_basis,
     build_two_level_pion_geometry,
     compute_factorized_pion_blocks,
+    compute_giusti_asymmetric_pion_blocks,
     factorized_pion_corr_from_blocks,
 )
 from .update import HMC, SMD
@@ -1304,7 +1306,8 @@ class DDTwoLevelFactorizedPionMeasurement:
     boundary_slices: Tuple[int, ...] = (0,)
     boundary_width: int = 1
     source_margin: int = 1
-    projector_kind: str = "full"  # full | probe | laplace
+    factorization_kind: str = "boundary_transfer"  # boundary_transfer | giusti
+    projector_kind: str = "full"  # full | probe | laplace | svd
     projector_nvec: int = 0
     probe_stride: int = 2
     dense_max_domain_dof: int = 1024
@@ -1375,34 +1378,99 @@ class DDTwoLevelFactorizedPionMeasurement:
             source_margin=int(self.source_margin),
             momentum_axis=int(mom_axis),
         )
-
-        phi = build_projector_basis(
-            q=q,
-            theory=theory,
-            geometry=geom,
-            ns=ns,
-            nc=nc,
-            kind=str(self.projector_kind),
-            nvec=int(self.projector_nvec),
-            probe_stride=int(self.probe_stride),
-        )
+        fact_mode = str(self.factorization_kind).strip().lower()
+        if fact_mode in ("boundary", "boundary_transfer", "transfer", "slab"):
+            fact_mode = "boundary_transfer"
+        elif fact_mode in ("giusti", "giusti_surface", "giusti_asym", "surface"):
+            fact_mode = "giusti"
+        else:
+            raise ValueError(f"Unsupported factorization_kind for {self.name}: {self.factorization_kind!r}")
 
         # Level-0 factorized approximation and exact bias.
-        src0, sink0 = compute_factorized_pion_blocks(
-            q=q,
-            theory=theory,
-            geometry=geom,
-            phi_overlap=phi,
-            dense_max_domain_dof=int(self.dense_max_domain_dof),
-        )
-        approx0_bs, valid_mask = factorized_pion_corr_from_blocks(
-            source_blocks=src0,
-            sink_blocks=sink0,
-            geometry=geom,
-            momenta=moms,
-            average_pm=bool(self.average_pm),
-        )
-        approx0 = np.sum(np.asarray(approx0_bs), axis=0)
+        if fact_mode == "boundary_transfer":
+            phi = build_projector_basis(
+                q=q,
+                theory=theory,
+                geometry=geom,
+                ns=ns,
+                nc=nc,
+                kind=str(self.projector_kind),
+                nvec=int(self.projector_nvec),
+                probe_stride=int(self.probe_stride),
+            )
+            src0, sink0 = compute_factorized_pion_blocks(
+                q=q,
+                theory=theory,
+                geometry=geom,
+                phi_overlap=phi,
+                dense_max_domain_dof=int(self.dense_max_domain_dof),
+            )
+            approx0_bs, valid_mask = factorized_pion_corr_from_blocks(
+                source_blocks=src0,
+                sink_blocks=sink0,
+                geometry=geom,
+                momenta=moms,
+                average_pm=bool(self.average_pm),
+            )
+            approx0 = np.sum(np.asarray(approx0_bs), axis=0)
+            n_projectors = int(phi.shape[1])
+        else:
+            phi_src = build_giusti_surface_projector_basis(
+                q=q,
+                theory=theory,
+                geometry=geom,
+                ns=ns,
+                nc=nc,
+                kind=str(self.projector_kind),
+                nvec=int(self.projector_nvec),
+                probe_stride=int(self.probe_stride),
+                dressed_domain="source",
+            )
+            phi_sink = build_giusti_surface_projector_basis(
+                q=q,
+                theory=theory,
+                geometry=geom,
+                ns=ns,
+                nc=nc,
+                kind=str(self.projector_kind),
+                nvec=int(self.projector_nvec),
+                probe_stride=int(self.probe_stride),
+                dressed_domain="sink",
+            )
+            src0_l, sink0_l = compute_giusti_asymmetric_pion_blocks(
+                q=q,
+                theory=theory,
+                geometry=geom,
+                phi_surface=phi_src,
+                dense_max_domain_dof=int(self.dense_max_domain_dof),
+                dressed_domain="source",
+            )
+            src0_r, sink0_r = compute_giusti_asymmetric_pion_blocks(
+                q=q,
+                theory=theory,
+                geometry=geom,
+                phi_surface=phi_sink,
+                dense_max_domain_dof=int(self.dense_max_domain_dof),
+                dressed_domain="sink",
+            )
+            approx0_l_bs, valid_mask = factorized_pion_corr_from_blocks(
+                source_blocks=src0_l,
+                sink_blocks=sink0_l,
+                geometry=geom,
+                momenta=moms,
+                average_pm=bool(self.average_pm),
+            )
+            approx0_r_bs, valid_mask_r = factorized_pion_corr_from_blocks(
+                source_blocks=src0_r,
+                sink_blocks=sink0_r,
+                geometry=geom,
+                momenta=moms,
+                average_pm=bool(self.average_pm),
+            )
+            if not np.array_equal(np.asarray(valid_mask, dtype=bool), np.asarray(valid_mask_r, dtype=bool)):
+                raise RuntimeError("Internal Giusti valid-mask mismatch")
+            approx0 = 0.5 * (np.sum(np.asarray(approx0_l_bs), axis=0) + np.sum(np.asarray(approx0_r_bs), axis=0))
+            n_projectors = int(phi_src.shape[1] + phi_sink.shape[1])
 
         backend = str(self.exact_backend).strip().lower()
         if backend in ("iter", "cg", "point", "auto"):
@@ -1440,34 +1508,80 @@ class DDTwoLevelFactorizedPionMeasurement:
         if int(self.level1_warmup) > 0:
             q_cur = evolve(q_cur, int(self.level1_warmup))
 
-        src_sum = None
-        sink_sum = None
         sample_count = max(1, int(self.level1_ncfg))
-        for m in range(sample_count):
-            if m > 0 and int(self.level1_skip) > 0:
-                q_cur = evolve(q_cur, int(self.level1_skip))
-            src_m, sink_m = compute_factorized_pion_blocks(
-                q=q_cur,
-                theory=theory,
-                geometry=geom,
-                phi_overlap=phi,
-                dense_max_domain_dof=int(self.dense_max_domain_dof),
-            )
-            src_sum = np.asarray(src_m) if src_sum is None else (src_sum + np.asarray(src_m))
-            sink_sum = np.asarray(sink_m) if sink_sum is None else (sink_sum + np.asarray(sink_m))
+        if fact_mode == "boundary_transfer":
+            src_sum = None
+            sink_sum = None
+            for m in range(sample_count):
+                if m > 0 and int(self.level1_skip) > 0:
+                    q_cur = evolve(q_cur, int(self.level1_skip))
+                src_m, sink_m = compute_factorized_pion_blocks(
+                    q=q_cur,
+                    theory=theory,
+                    geometry=geom,
+                    phi_overlap=phi,
+                    dense_max_domain_dof=int(self.dense_max_domain_dof),
+                )
+                src_sum = np.asarray(src_m) if src_sum is None else (src_sum + np.asarray(src_m))
+                sink_sum = np.asarray(sink_m) if sink_sum is None else (sink_sum + np.asarray(sink_m))
 
-        src_mean = src_sum / float(sample_count)
-        sink_mean = sink_sum / float(sample_count)
-        approx_ml_bs, valid_mask_ml = factorized_pion_corr_from_blocks(
-            source_blocks=src_mean,
-            sink_blocks=sink_mean,
-            geometry=geom,
-            momenta=moms,
-            average_pm=bool(self.average_pm),
-        )
-        if not np.array_equal(np.asarray(valid_mask_ml, dtype=bool), np.asarray(valid_mask, dtype=bool)):
-            raise RuntimeError("Internal multilevel valid-mask mismatch")
-        approx_ml = np.sum(np.asarray(approx_ml_bs), axis=0)
+            src_mean = src_sum / float(sample_count)
+            sink_mean = sink_sum / float(sample_count)
+            approx_ml_bs, valid_mask_ml = factorized_pion_corr_from_blocks(
+                source_blocks=src_mean,
+                sink_blocks=sink_mean,
+                geometry=geom,
+                momenta=moms,
+                average_pm=bool(self.average_pm),
+            )
+            if not np.array_equal(np.asarray(valid_mask_ml, dtype=bool), np.asarray(valid_mask, dtype=bool)):
+                raise RuntimeError("Internal multilevel valid-mask mismatch")
+            approx_ml = np.sum(np.asarray(approx_ml_bs), axis=0)
+        else:
+            src_sum_l = None
+            sink_sum_l = None
+            src_sum_r = None
+            sink_sum_r = None
+            for m in range(sample_count):
+                if m > 0 and int(self.level1_skip) > 0:
+                    q_cur = evolve(q_cur, int(self.level1_skip))
+                src_l, sink_l = compute_giusti_asymmetric_pion_blocks(
+                    q=q_cur,
+                    theory=theory,
+                    geometry=geom,
+                    phi_surface=phi_src,
+                    dense_max_domain_dof=int(self.dense_max_domain_dof),
+                    dressed_domain="source",
+                )
+                src_r, sink_r = compute_giusti_asymmetric_pion_blocks(
+                    q=q_cur,
+                    theory=theory,
+                    geometry=geom,
+                    phi_surface=phi_sink,
+                    dense_max_domain_dof=int(self.dense_max_domain_dof),
+                    dressed_domain="sink",
+                )
+                src_sum_l = np.asarray(src_l) if src_sum_l is None else (src_sum_l + np.asarray(src_l))
+                sink_sum_l = np.asarray(sink_l) if sink_sum_l is None else (sink_sum_l + np.asarray(sink_l))
+                src_sum_r = np.asarray(src_r) if src_sum_r is None else (src_sum_r + np.asarray(src_r))
+                sink_sum_r = np.asarray(sink_r) if sink_sum_r is None else (sink_sum_r + np.asarray(sink_r))
+
+            approx_ml_parts = []
+            for src_sum_i, sink_sum_i in (
+                (src_sum_l, sink_sum_l),
+                (src_sum_r, sink_sum_r),
+            ):
+                corr_i, valid_mask_i = factorized_pion_corr_from_blocks(
+                    source_blocks=src_sum_i / float(sample_count),
+                    sink_blocks=sink_sum_i / float(sample_count),
+                    geometry=geom,
+                    momenta=moms,
+                    average_pm=bool(self.average_pm),
+                )
+                if not np.array_equal(np.asarray(valid_mask_i, dtype=bool), np.asarray(valid_mask, dtype=bool)):
+                    raise RuntimeError("Internal Giusti multilevel valid-mask mismatch")
+                approx_ml_parts.append(np.sum(np.asarray(corr_i), axis=0))
+            approx_ml = 0.5 * (approx_ml_parts[0] + approx_ml_parts[1])
         corrected = approx_ml + bias
         t1 = time.perf_counter()
 
@@ -1486,7 +1600,10 @@ class DDTwoLevelFactorizedPionMeasurement:
         out["dd_sink_domain_index"] = float(int(geom.sink_domain_index))
         out["dd_source_time"] = float(int(source[-1]))
         out["dd_n_overlap_sites"] = float(int(geom.overlap_sites.size))
-        out["dd_n_projectors"] = float(int(phi.shape[1]))
+        out["dd_n_projectors"] = float(int(n_projectors))
+        out["dd_factorization_is_giusti"] = 1.0 if fact_mode == "giusti" else 0.0
+        out["dd_surface_support_source_sites"] = float(int(geom.source_surface_sites.size))
+        out["dd_surface_support_sink_sites"] = float(int(geom.sink_surface_sites.size))
         out["dd_n_level1_samples"] = float(sample_count)
         out["dd_level1_acceptance"] = float(chain.calc_acceptance())
         out.update(inv_info)
@@ -1667,6 +1784,7 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
                     boundary_slices=tuple(int(v) for v in boundary_slices),
                     boundary_width=int(boundary_width),
                     source_margin=int(spec.get("source_margin", 1)),
+                    factorization_kind=str(spec.get("factorization_kind", spec.get("factorization", "boundary_transfer"))),
                     projector_kind=str(spec.get("projector_kind", spec.get("projector", "full"))),
                     projector_nvec=int(spec.get("projector_nvec", spec.get("nvec", 0))),
                     probe_stride=int(spec.get("probe_stride", spec.get("projector_stride", 2))),

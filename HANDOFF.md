@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-03-24
+Last updated: 2026-03-25
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -106,6 +106,11 @@ Last updated: 2026-03-24
       - current result:
         - `7/7 passed` in the local JAX CPU environment
 - Phase-2 quenched multilevel DD pion measurement (new):
+  - dedicated note:
+    - `docs/notes/domain_decomposition_wilson_u1.md`
+    - this is the current repository-level reference for the DD formulation actually implemented in phases 1/2/3
+    - derivation-style LaTeX companion:
+      - `docs/notes/domain_decomposition_wilson_u1.tex`
   - scope:
     - measurement-only implementation; existing level-0 HMC/SMD production paths stay unchanged
     - meant for quenched `U1WilsonNf2(include_fermion_monomial=False)` gauge backgrounds
@@ -115,12 +120,29 @@ Last updated: 2026-03-24
   - core code:
     - `jaxqft/core/multilevel_quenched.py`
       - two-slab DD geometry for source/sink separation
-      - projector support on the union of the two frozen slabs
-      - projector choices:
-        - `full`
-        - `probe`
-        - `laplace` / `distillation` (covariant Laplacian modes)
-      - dense restricted-domain block algebra for the factorized pion building blocks
+      - factorization families:
+        - `factorization_kind = "boundary_transfer"`:
+          - projector support on the union of the two frozen slabs
+          - projector choices:
+            - `full`
+            - `probe`
+            - `laplace` / `distillation`
+            - `svd` / `singular`
+          - repaired factorized observable:
+            - local source factor from `D_AA^{-1}` and `D_{Sigma,A}`
+            - local sink factor from `D_CC^{-1}` and `D_{C,Sigma}`
+            - explicit projected slab transfer matrix `M = V^dagger D_{Sigma,Sigma} V`
+            - factorized pion blocks now include `M^{-1}`; the earlier local prototype omitted that transfer and produced a nearly-null approximation
+        - `factorization_kind = "giusti"`:
+          - two asymmetric branches are computed and averaged:
+            - source side dressed, sink side bare
+            - sink side dressed, source side bare
+          - projector support is reduced to the relevant slab **surface** seen by the bare domain
+          - projector choices:
+            - `full`
+            - `probe`
+            - `laplace` / `distillation`
+          - `svd` is intentionally not enabled here
     - `jaxqft/core/measurements.py`
       - new inline measurement type:
         - `pion_2pt_ml_dd`
@@ -136,17 +158,30 @@ Last updated: 2026-03-24
         - `corrected`
         - `exact`
       - only valid cross-domain times are emitted, together with `*_valid_t*`
+      - new option:
+        - `factorization_kind = "boundary_transfer"` (default) or `"giusti"`
+      - new metadata fields:
+        - `dd_factorization_is_giusti`
+        - `dd_surface_support_source_sites`
+        - `dd_surface_support_sink_sites`
   - validation:
     - `scripts/u1_wilson_nf2/validate_phase2_multilevel.py`
     - coverage:
-      - projector construction (`full`, `probe`, `laplace`)
-      - source/sink domain locality under DD splicing
+      - projector construction (`full`, `probe`, slab-local `laplace`, slab-local `svd`)
+      - Giusti surface projector construction (`full`, `probe`, surface-local `laplace`)
+      - source/sink domain locality under DD splicing with fixed boundaries
+      - explicit block-contraction identity against the dense factorized propagator
+      - explicit Giusti block-contraction identity against the dense asymmetric propagator
       - pair-average identity for independently level-1-averaged source/sink blocks
-      - level-0 bias identity `approx_l0 + bias = exact`
+      - level-0 bias identity `approx_l0 + bias = exact` for both factorization families
+      - gauge invariance of the multilevel measurement output under a U(1) site gauge transform in the deterministic `level1_ncfg=1` limit for both factorization families
     - command:
       - `python3 scripts/u1_wilson_nf2/validate_phase2_multilevel.py`
-    - current result:
-      - `4/4 passed` in the local JAX CPU environment
+    - current status:
+      - passes in the local JAX CPU environment after the 2026-03-25 block-contraction fix
+  - Giusti benchmarking note:
+    - start from `factorization_kind = "giusti"` with `projector_kind = "full"` as the exact reference within the Giusti family
+    - then compare `probe` and `laplace` on the reduced surface support
   - analysis support (new):
     - `scripts/mcmc/fit_2pt_dispersion.py`
       - now understands sparse support from `channel_valid_t*`
@@ -161,6 +196,47 @@ Last updated: 2026-03-24
       - for multilevel fitting, `p{p}_cov_mean` is the covariance of the blocked corrected level-0 mean and is the matrix to use in correlated fits
     - `scripts/mcmc/inspect_2pt_correlators.py`
       - now also respects sparse support times from `*_valid_t*`
+    - `scripts/mcmc/analyze_ml_dd_correlation.py`
+      - compares `approx_l0` (or another truncated channel) against `exact`
+      - reports blocked exact-vs-truncated correlation per momentum/time
+      - writes JSON always; add plotting unless `--no-gui` is used
+      - useful efficiency metric:
+        - high correlation of the truncated observable with `exact` at fixed level-0 cost
+      - dry-run command on an old checkpoint:
+        - `python3 scripts/mcmc/analyze_ml_dd_correlation.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2550_16x32_pion_ml_dd_ckpt.pkl --measurement pion_2pt_ml_dd --exact-channel exact --approx-channel approx_l0 --outdir /tmp/jaxqft_ml_corr --prefix dryrun_old_ml --no-gui`
+      - old-checkpoint diagnostic from the pre-repair implementation:
+        - `p=0`: mean corr(Re) `0.239`, median `|approx|/|exact| = 2.0e-3`
+    - `scripts/mcmc/inspect_ml_dd_channels.py`
+      - dependency-free SVG summary for multilevel DD checkpoints
+      - for each momentum, writes a 2x2 panel with:
+        - exact correlator (real part, blocked mean plus/minus stderr)
+        - corrected correlator (real part, blocked mean plus/minus stderr)
+        - bias correlator (real part, blocked mean plus/minus stderr)
+        - per-timeslice level-0 correlation `corr(approx_l0, exact)`
+      - writes a JSON sidecar with the plotted arrays
+      - example:
+        - `python3 scripts/mcmc/inspect_ml_dd_channels.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pion_ml_dd_bw3_ckpt.pkl --measurement pion_2pt_ml_dd --outdir runs/U1-example/analysis/ml_bw3_inspect --prefix bw3`
+  - current width scan at fixed heavier pion (`kappa=0.2530`, `16x32`):
+    - run cards:
+      - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_ml_dd_bw1.toml`
+      - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_ml_dd_bw3.toml`
+      - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_ml_dd_bw5.toml`
+    - observed trend so far:
+      - `boundary_width = 3` improved the level-0 exact-vs-factorized correlation materially relative to the lighter/thinner setup
+      - `boundary_width = 5` did not improve on `boundary_width = 3`; per-timeslice correlation and corrected variance were slightly worse overall
+        - `p=1`: mean corr(Re) `0.194`
+        - `p=2`: mean corr(Re) `0.126`
+        - `p=3`: mean corr(Re) `0.136`
+        - `p=4`: mean corr(Re) `0.120`
+        - interpretation: the previous approximation was weakly correlated with the exact correlator and far too small in magnitude
+  - runnable comparison cards:
+    - Giusti full-surface reference on the heavier `bw=1` setup:
+      - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_ml_dd_bw1_giusti.toml`
+    - full-basis reference:
+      - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2550_16x32_pion_ml_dd.toml`
+    - truncated singular-vector pilot:
+      - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2550_16x32_pion_ml_dd_svd8.toml`
+      - uses `projector_kind = "svd"` and `projector_nvec = 8`, i.e. four singular vectors per slab
   - end-to-end smoke command:
     - temporary control file used locally:
       - `/tmp/phase2_ml_smoke.toml`

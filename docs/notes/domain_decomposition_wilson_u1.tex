@@ -1,0 +1,323 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage[a4paper,margin=1in]{geometry}
+\title{U(1) Wilson Fermions: Domain-Decomposition Notes}
+\author{jaxQFT}
+\date{2026-03-25}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+This note documents the \emph{current} domain-decomposition code for the 2D U(1)
+Wilson-fermion Schwinger model in \texttt{jaxQFT}. It covers:
+\begin{itemize}
+  \item Phase 1: exact interior Schur-complement observables.
+  \item Phase 2: quenched two-level pion estimator with bias correction.
+\end{itemize}
+It is a mathematical companion to the shorter repository summary in
+\texttt{docs/notes/domain\_decomposition\_wilson\_u1.md}.
+
+\section{Gauge Convention}
+Links transform as
+\begin{equation}
+U_\mu(x) \to U_\mu^\Omega(x)=\Omega^\dagger(x)\,U_\mu(x)\,\Omega(x+\hat\mu),
+\end{equation}
+and fermions as
+\begin{equation}
+\psi(x) \to \psi^\Omega(x)=\Omega^\dagger(x)\psi(x).
+\end{equation}
+
+\section{Time-Slab Geometry}
+The decomposition is built from frozen time slabs. The frozen region is
+\begin{equation}
+\Sigma = \Sigma_L \cup \Sigma_R.
+\end{equation}
+For phase 2, the code assumes exactly two unfrozen connected components:
+\begin{itemize}
+  \item source domain $A$,
+  \item sink domain $C$.
+\end{itemize}
+The block Dirac operator is then
+\begin{equation}
+D =
+\begin{pmatrix}
+D_{AA} & D_{A\Sigma} & 0 \\
+D_{\Sigma A} & D_{\Sigma\Sigma} & D_{\Sigma C} \\
+0 & D_{C\Sigma} & D_{CC}
+\end{pmatrix}.
+\end{equation}
+
+\section{Phase 1: Exact Interior Schur Observables}
+Phase 1 splits the lattice sites into interior $I$ and frozen boundary $B$:
+\begin{equation}
+D =
+\begin{pmatrix}
+D_{II} & D_{IB} \\
+D_{BI} & D_{BB}
+\end{pmatrix}.
+\end{equation}
+The exact interior Schur complement is
+\begin{equation}
+S_I = D_{II} - D_{IB} D_{BB}^{-1} D_{BI},
+\end{equation}
+and the exact interior propagator is
+\begin{equation}
+G_I = S_I^{-1}.
+\end{equation}
+
+\subsection{Exact DD pion observable}
+For a point source $x \in I$, the exact connected pion correlator is built from
+the interior propagator:
+\begin{equation}
+C_\pi^{\mathrm{DD}}(y,x)
+=
+\mathrm{tr}\!\left[
+G_I(y,x)\,G_I(y,x)^\dagger
+\right].
+\end{equation}
+After momentum projection,
+\begin{equation}
+C_\pi^{\mathrm{DD}}(t,p)
+=
+\sum_{\substack{y \in I\\ y_0-x_0=t}}
+e^{ip(y_1-x_1)} C_\pi^{\mathrm{DD}}(y,x).
+\end{equation}
+When the code uses $\pm p$ averaging,
+\begin{equation}
+C_\pi^{\cos}(t,p)
+=
+\frac12\left(C_\pi^{\mathrm{DD}}(t,+p)+C_\pi^{\mathrm{DD}}(t,-p)\right).
+\end{equation}
+
+\subsection{Exact DD singlet observable}
+The singlet pseudoscalar channel uses the same exact interior propagator. The connected
+piece is built exactly as above. The disconnected loop is constructed from the exact
+interior trace of the pseudoscalar density, and the full singlet correlator is the
+sum of connected and disconnected pieces with the code's current normalization convention.
+
+\section{Phase 2: General Two-Level Estimator}
+For each level-0 gauge configuration $U_n$, define
+\begin{equation}
+X_n(t,p)
+=
+\langle\!\langle C_{\mathrm{fact}}(t,p)\rangle\!\rangle_1(U_n)
++
+\Bigl[
+C_{\mathrm{exact}}(t,p;U_n) - C_{\mathrm{fact}}(t,p;U_n)
+\Bigr].
+\end{equation}
+The final corrected estimator is
+\begin{equation}
+\widehat C(t,p) = \frac{1}{N_0}\sum_{n=1}^{N_0} X_n(t,p).
+\end{equation}
+The covariance used for correlated fits is the covariance of the corrected level-0
+samples $X_n$:
+\begin{equation}
+\widehat{\mathrm{Cov}}_{(t,p),(t',p')}
+=
+\frac{1}{N_0(N_0-1)}
+\sum_{n=1}^{N_0}
+\left(X_n-\bar X\right)_{(t,p)}
+\left(X_n-\bar X\right)_{(t',p')}.
+\end{equation}
+
+\section{Phase 2A: Boundary-Transfer Factorization}
+This is selected by
+\begin{equation}
+\texttt{factorization\_kind = "boundary\_transfer"}.
+\end{equation}
+
+\subsection{Projector support}
+The projector support is the \emph{full union of frozen slabs} $\Sigma$.
+The current code therefore builds
+\begin{equation}
+V \in \mathbb{C}^{|\Sigma| \times N_{\mathrm{proj}}}.
+\end{equation}
+The supported projector families are:
+\begin{itemize}
+  \item \texttt{full},
+  \item \texttt{probe},
+  \item \texttt{laplace}/\texttt{distillation},
+  \item \texttt{svd}/\texttt{singular}.
+\end{itemize}
+
+\subsection{Projected slab transfer}
+The implemented projected transfer matrix is
+\begin{equation}
+M = V^\dagger D_{\Sigma\Sigma} V.
+\end{equation}
+For a point source $\eta_x$ in $A$, the source factor is
+\begin{equation}
+S_x = M^{-1} V^\dagger D_{\Sigma A} D_{AA}^{-1} \eta_x.
+\end{equation}
+For a sink site $y \in C$, the sink factor is
+\begin{equation}
+L_y = \left[D_{CC}^{-1} D_{C\Sigma} V\right]_y.
+\end{equation}
+The factorized propagator is
+\begin{equation}
+G_{\mathrm{fact}}(y,x)=L_y S_x.
+\end{equation}
+
+\subsection{Block contraction}
+Define
+\begin{equation}
+S_{\mathrm{blk}} = S_x S_x^\dagger,
+\qquad
+L_{\mathrm{blk}}(y)=L_y^\dagger L_y.
+\end{equation}
+Then
+\begin{equation}
+C_{\pi,\mathrm{fact}}(y,x)
+=
+\mathrm{tr}\!\left[S_{\mathrm{blk}}\,L_{\mathrm{blk}}(y)\right]
+=
+\sum_{p,q} S_{pq}\,L_{qp}(y).
+\end{equation}
+The transpose on the sink block is important and is explicitly tested in the current
+validation suite.
+
+\section{Phase 2B: Giusti-Style Surface Factorization}
+This is selected by
+\begin{equation}
+\texttt{factorization\_kind = "giusti"}.
+\end{equation}
+
+\subsection{Asymmetric idea}
+Two asymmetric approximations are built and then averaged:
+\begin{itemize}
+  \item source side dressed, sink side bare,
+  \item sink side dressed, source side bare.
+\end{itemize}
+Let
+\begin{equation}
+\bar A = A \cup \Sigma,
+\qquad
+\bar C = \Sigma \cup C.
+\end{equation}
+
+For the partition $(\bar A,C)$, the exact two-block Schur form is
+\begin{equation}
+G_{CA}
+=
+-\left(D_{CC} - D_{C\bar A} D_{\bar A\bar A}^{-1} D_{\bar A C}\right)^{-1}
+\,D_{C\bar A} D_{\bar A\bar A}^{-1}.
+\end{equation}
+The current Giusti-style approximation drops the cross-domain Schur term and keeps
+the local dressing on $\bar A$:
+\begin{equation}
+G_{\mathrm{fact}}^{(\bar A|C)}
+\approx
+- D_{CC}^{-1} D_{C\bar A} D_{\bar A\bar A}^{-1}.
+\end{equation}
+
+For the partition $(A,\bar C)$, analogously,
+\begin{equation}
+G_{\mathrm{fact}}^{(A|\bar C)}
+\approx
+- D_{\bar C\bar C}^{-1} D_{\bar C A} D_{AA}^{-1}.
+\end{equation}
+
+\subsection{Surface-only support}
+Because Wilson fermions are nearest-neighbor, the coupling between domains only touches
+the slab surface seen by the opposite domain. The current code therefore restricts
+the Giusti projectors to the relevant surface support:
+\begin{itemize}
+  \item source-dressed branch: sink-facing slab surface $S_C$,
+  \item sink-dressed branch: source-facing slab surface $S_A$.
+\end{itemize}
+
+This directly answers the implementation question:
+\begin{quote}
+\textbf{Yes: for the Giusti path, \texttt{probe} and \texttt{laplace} are restricted to the
+surface between the two domains.}
+\end{quote}
+For the older boundary-transfer path, they are \emph{not} surface-restricted; they live on
+the full frozen overlap $\Sigma$.
+
+\subsection{Current implemented factors}
+For the source-dressed branch, with a basis
+\begin{equation}
+V_C \in \mathbb{C}^{|S_C| \times N_C},
+\end{equation}
+the code computes
+\begin{align}
+S_x^{(\bar A|C)}
+&=
+V_C^\dagger \left(D_{\bar A\bar A}^{-1}\eta_x\right)_{S_C},\\
+L_y^{(\bar A|C)}
+&=
+\left[D_{CC}^{-1} D_{C S_C} V_C\right]_y.
+\end{align}
+Hence
+\begin{equation}
+G_{\mathrm{fact}}^{(\bar A|C)}(y,x)
+=
+L_y^{(\bar A|C)} S_x^{(\bar A|C)}.
+\end{equation}
+
+For the sink-dressed branch, with
+\begin{equation}
+V_A \in \mathbb{C}^{|S_A| \times N_A},
+\end{equation}
+the code computes
+\begin{align}
+S_x^{(A|\bar C)}
+&=
+V_A^\dagger D_{S_A A} D_{AA}^{-1}\eta_x,\\
+L_y^{(A|\bar C)}
+&=
+\left[\left(D_{\bar C\bar C}^{-1}V_A\right)_{C,S_A}\right]_y.
+\end{align}
+Hence
+\begin{equation}
+G_{\mathrm{fact}}^{(A|\bar C)}(y,x)
+=
+L_y^{(A|\bar C)} S_x^{(A|\bar C)}.
+\end{equation}
+
+\subsection{Symmetric Giusti average}
+The code forms the averaged factorized pion correlator
+\begin{equation}
+C_{\pi,\mathrm{fact}}^{\mathrm{giusti}}
+=
+\frac12\left(
+C_{\pi,\mathrm{fact}}^{(\bar A|C)}
++
+C_{\pi,\mathrm{fact}}^{(A|\bar C)}
+\right).
+\end{equation}
+The bias is defined from this averaged object:
+\begin{equation}
+B = C_{\pi,\mathrm{exact}} - C_{\pi,\mathrm{fact}}^{\mathrm{giusti}}.
+\end{equation}
+The same symmetric averaging is used in the level-1 conditional expectation:
+\begin{equation}
+\langle\!\langle C_{\mathrm{fact}} \rangle\!\rangle_1
+=
+\frac12\left(
+\langle\!\langle C_{\mathrm{fact}}^{(\bar A|C)} \rangle\!\rangle_1
++
+\langle\!\langle C_{\mathrm{fact}}^{(A|\bar C)} \rangle\!\rangle_1
+\right).
+\end{equation}
+
+\section{What Is Still Missing}
+The following are not implemented yet:
+\begin{itemize}
+  \item stochastic Giusti projectors,
+  \item a distillation basis built from a \emph{dressed} interface operator rather than the
+  current surface Laplacian,
+  \item phase-3 multiboson correction.
+\end{itemize}
+
+\section{Code References}
+The current implementation lives in:
+\begin{itemize}
+  \item \texttt{jaxqft/core/multilevel\_quenched.py},
+  \item \texttt{jaxqft/core/measurements.py},
+  \item \texttt{scripts/u1\_wilson\_nf2/validate\_phase2\_multilevel.py}.
+\end{itemize}
+
+\end{document}
