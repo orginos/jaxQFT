@@ -1,0 +1,161 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{geometry}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{DD-Independent Schwinger Spectroscopy in \texttt{jaxQFT}}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+This note documents a DD-independent spectroscopy path for the two-dimensional
+U(1) Wilson-fermion model used as a Schwinger-model proxy in
+\texttt{jaxQFT}. The goal is to support
+\begin{enumerate}
+  \item single-pion spectroscopy in the isovector pseudoscalar channel, and
+  \item two-pion spectroscopy in the maximal-isospin channel using a momentum
+  basis and a generalized eigenvalue analysis.
+\end{enumerate}
+The domain-decomposition measurements remain separate and are \emph{not} used
+here.
+
+\section{Single-Particle Channel}
+The existing inline measurement
+\texttt{pion\_2pt} computes the connected pseudoscalar correlator
+\begin{equation}
+  C_{\pi}(t;\,p) =
+  \sum_x e^{ipx}
+  \langle P^a(x,t)\,P^a(0,0)^\dagger \rangle,
+\end{equation}
+with the local interpolating field
+\begin{equation}
+  P^a(x,t) = \bar\psi(x,t)\,\gamma_5\,\tau^a\,\psi(x,t).
+\end{equation}
+For the Schwinger-model spectroscopy workflow, the practical use is:
+\begin{itemize}
+  \item generate or load an ensemble of U(1) configurations,
+  \item measure \texttt{pion\_2pt} for a set of spatial momenta,
+  \item analyze the resulting correlators with
+  \texttt{scripts/mcmc/fit\_2pt\_dispersion.py}.
+\end{itemize}
+This produces the single-pion dispersion relation $E_\pi(p)$ that is later used
+as the free two-particle reference.
+
+\section{Two-Particle Channel}
+\subsection{Operator Basis}
+The new inline measurement \texttt{pipi\_i2\_matrix} targets the maximal-isospin
+two-pion channel. The operator basis is
+\begin{equation}
+  O_n(t) = \pi^+(p_n,t)\,\pi^+(-p_n,t),
+  \qquad
+  p_n = \frac{2\pi n}{L_x},
+\end{equation}
+where
+\begin{equation}
+  \pi^+(p,t) = \sum_x e^{ipx}\,\bar d(x,t)\,\gamma_5\,u(x,t).
+\end{equation}
+The measurement uses a user-provided list of integers
+\texttt{momenta = [}$n_0,n_1,\dots$\texttt{]} to define the basis.
+
+\subsection{Wick Contractions}
+For the $\pi^+\pi^+$ channel there are no disconnected contributions. The
+correlator matrix is the difference of a direct and an exchange term,
+\begin{equation}
+  C_{nm}(t) = D_{nm}(t) - X_{nm}(t).
+\end{equation}
+Using dense all-to-all propagators on a fixed source time slice $t_{\rm src}$ and
+sink time $t_{\rm snk}=t_{\rm src}+t$, the implementation evaluates the spatial
+sums exactly. The direct term is built from momentum-projected single-pion
+blocks, while the exchange term keeps the full quark-line crossing required for
+the $I=2$ channel.
+
+\subsection{Implementation Choices}
+The measurement lives in
+\texttt{jaxqft/core/measurements.py} as
+\texttt{TwoPionI2MatrixMeasurement}. The current implementation deliberately
+keeps the scope narrow:
+\begin{itemize}
+  \item it is DD-independent,
+  \item it is restricted to two-dimensional lattices $(L_x,L_t)$,
+  \item it currently assumes the only nontrivial momentum axis is the spatial
+  axis \texttt{mom\_axis = 0},
+  \item it uses the dense inverse path only,
+  \item it averages over a configurable list of source time slices
+  \texttt{source\_times}.
+\end{itemize}
+This is the correct tradeoff for a spectroscopy code path whose immediate target
+is small-volume quenched studies and offline analysis.
+
+\section{Offline GEVP Analysis}
+The new analysis script
+\texttt{scripts/mcmc/analyze\_pipi\_i2\_gevp.py} reads checkpoint
+\texttt{state.inline\_records} produced by \texttt{mcmc.py}. Its workflow is:
+\begin{enumerate}
+  \item extract the correlator-matrix samples for one channel
+  (\texttt{full}, \texttt{direct}, or \texttt{exchange}),
+  \item optionally hermitize $C(t)$ sample by sample,
+  \item estimate an integrated autocorrelation time from
+  $\mathrm{Re}\,C_{00}(t_{\rm ref})$ and choose a jackknife block size
+  $b \simeq 2\tau_{\mathrm{int}}$ unless the user overrides it,
+  \item build blocked jackknife samples,
+  \item solve the GEVP
+  \begin{equation}
+    C(t)\,v_n(t,t_0) = \lambda_n(t,t_0)\,C(t_0)\,v_n(t,t_0),
+  \end{equation}
+  \item construct effective energies from the principal correlators,
+  \item estimate level energies from a user-selected fit window.
+\end{enumerate}
+The script writes both a PNG summary and a JSON file containing the numerical
+results.
+
+\section{Configuration Interface}
+The measurement can be configured directly in the \texttt{mcmc.py} TOML file:
+\begin{verbatim}
+[[measurements.inline]]
+type = "pipi_i2_matrix"
+name = "pipi_i2_matrix"
+every = 20
+momenta = [0, 1, 2, 3]
+mom_axis = 0
+source_times = [0]
+dense_max_dof = 4096
+include_direct = true
+include_exchange = true
+include_full = true
+\end{verbatim}
+This path is independent of the DD measurement types.
+
+\section{Smoke-Test Commands}
+The code path was smoke-tested locally with the JAX environment in
+\texttt{/opt/python/jax}. The tests exercised:
+\begin{itemize}
+  \item direct construction of \texttt{TwoPionI2MatrixMeasurement},
+  \item the \texttt{build\_inline\_measurements} $\rightarrow$
+  \texttt{run\_inline\_measurements} path used by \texttt{mcmc.py},
+  \item offline GEVP analysis on a tiny synthetic checkpoint assembled from real
+  U(1) Wilson measurements on a $4\times 8$ lattice.
+\end{itemize}
+
+\section{Current Limitations}
+The present implementation is intentionally the first useful version rather than
+the final spectroscopy system:
+\begin{itemize}
+  \item the two-pion matrix is dense-inverse only,
+  \item the current channel is maximal-isospin $I=2$,
+  \item the GEVP analysis uses blocked jackknife errors and an explicit fit
+  window rather than a fully automatic multi-exponential model selection,
+  \item free-vs-interacting level comparisons should use the measured
+  single-pion dispersion relation rather than continuum kinematics alone.
+\end{itemize}
+These limitations are acceptable for the intended near-term use:
+quenched pilot studies, operator-basis debugging, and student-facing offline
+analysis exercises.
+
+\end{document}
