@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-03-25
+Last updated: 2026-03-30
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -12,6 +12,38 @@ Last updated: 2026-03-25
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Schwinger spectroscopy (DD-independent, new):
+  - Scope:
+    - keeps the Schwinger spectroscopy path fully separate from the DD code
+    - reuses the non-DD `U1WilsonNf2` and inline measurement stack
+  - Inline measurements:
+    - existing `pion_2pt` remains the single-particle path for the isovector pseudoscalar channel
+    - new `pipi_i2_matrix` in `jaxqft/core/measurements.py`
+      - target operator basis: `O_n(t) = pi(p_n,t) pi(-p_n,t)`
+      - channel: maximal-isospin two-pion (`I=2`)
+      - implementation:
+        - dense all-to-all inverse only
+        - 2D lattices `(Lx, Lt)` only
+        - configurable `momenta = [n0, n1, ...]`
+        - configurable `source_times = [t0, ...]`
+        - outputs `direct`, `exchange`, and `full = direct - exchange` matrix correlators
+      - currently requires `mom_axis = 0`
+  - Offline analysis:
+    - new script `scripts/mcmc/analyze_pipi_i2_gevp.py`
+      - reads `state.inline_records` from an `mcmc.py` checkpoint
+      - blocked jackknife with automatic block-size choice from IAT unless overridden
+      - solves the GEVP and produces principal correlators, effective energies, PNG, and JSON
+    - single-pion dispersion/mass analysis continues to use:
+      - `scripts/mcmc/analyze_2pt_effective_mass.py`
+      - `scripts/mcmc/fit_2pt_dispersion.py`
+  - Docs:
+    - new note `docs/notes/schwinger_spectroscopy.tex`
+  - Config template:
+    - `scripts/mcmc/mcmc.py` now includes an example `[[measurements.inline]]` block for `pipi_i2_matrix`
+  - Smoke tests run locally in `/opt/python/jax`:
+    - direct measurement construction on `U1WilsonNf2(lattice_shape=(4,8), ...)`
+    - `build_inline_measurements(...)` -> `run_inline_measurements(...)` path for `pipi_i2_matrix`
+    - `scripts/mcmc/analyze_pipi_i2_gevp.py` on a tiny synthetic checkpoint assembled from real U(1) Wilson measurements
 - O(N) sigma model (new):
   - New generic model: `jaxqft/models/on_sigma.py`
     - covers `N>=2` with one code path

@@ -471,6 +471,122 @@ def _flatten_corr_momentum_masked(
     return out
 
 
+def _flatten_matrix_corr_momentum(prefix: str, corr: np.ndarray) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    arr = np.asarray(corr)
+    if arr.ndim != 3:
+        raise ValueError(f"Expected rank-3 matrix correlator array (Nmom, Nmom, Lt), got {arr.shape}")
+    for i in range(int(arr.shape[0])):
+        for j in range(int(arr.shape[1])):
+            row = np.asarray(arr[i, j]).reshape(-1)
+            for t, v in enumerate(row):
+                out[f"{prefix}_i{int(i)}_j{int(j)}_t{int(t)}_re"] = float(np.real(v))
+                out[f"{prefix}_i{int(i)}_j{int(j)}_t{int(t)}_im"] = float(np.imag(v))
+    return out
+
+
+def _coerce_source_times(source_times: Optional[Sequence[int]], lt: int) -> Tuple[int, ...]:
+    if source_times is None:
+        return (0,)
+    vals = tuple(int(v) % int(lt) for v in source_times)
+    if len(vals) == 0:
+        return (0,)
+    return vals
+
+
+def _parse_source_times_from_spec(spec: Mapping[str, Any]) -> Optional[Tuple[int, ...]]:
+    raw = None
+    for key in ("source_times", "source_time", "tsrc", "t_src"):
+        if key in spec:
+            raw = spec.get(key)
+            break
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        toks = [t.strip() for t in raw.split(",") if t.strip()]
+        if not toks:
+            return None
+        return tuple(int(t) for t in toks)
+    if isinstance(raw, Sequence):
+        vals = tuple(int(v) for v in raw)
+        return vals if vals else None
+    return (int(raw),)
+
+
+def _timeslice_site_indices_1d_spatial(lattice_shape: Sequence[int], time_slice: int) -> Tuple[np.ndarray, np.ndarray]:
+    shp = tuple(int(v) for v in lattice_shape)
+    if len(shp) != 2:
+        raise ValueError(f"Timeslice spectroscopy helper expects a 2D lattice (Lx, Lt), got {shp}")
+    lx, lt = int(shp[0]), int(shp[1])
+    t = int(time_slice) % lt
+    xs = np.arange(lx, dtype=np.int64)
+    tt = np.full((lx,), t, dtype=np.int64)
+    sites = np.asarray(np.ravel_multi_index((xs, tt), shp), dtype=np.int64)
+    return xs, sites
+
+
+def _timeslice_propagator_from_dense_inverse_1d_spatial(
+    ginv_b: np.ndarray,
+    lattice_shape: Sequence[int],
+    *,
+    ns: int,
+    nc: int,
+    source_time: int,
+    sink_time: int,
+) -> np.ndarray:
+    shp = tuple(int(v) for v in lattice_shape)
+    vol = int(np.prod(np.asarray(shp, dtype=np.int64)))
+    nsc = int(ns * nc)
+    g4 = np.asarray(ginv_b).reshape(vol, nsc, vol, nsc)
+    _, sink_sites = _timeslice_site_indices_1d_spatial(shp, sink_time)
+    _, source_sites = _timeslice_site_indices_1d_spatial(shp, source_time)
+    block = g4[np.ix_(sink_sites, np.arange(nsc, dtype=np.int64), source_sites, np.arange(nsc, dtype=np.int64))]
+    return np.asarray(np.transpose(block, (0, 2, 1, 3)))
+
+
+def _two_pion_i2_matrix_from_timeslice_propagator(
+    prop_t: np.ndarray,
+    momenta: Sequence[int],
+) -> Tuple[np.ndarray, np.ndarray]:
+    g = np.asarray(prop_t)
+    if g.ndim != 4:
+        raise ValueError(f"Expected rank-4 timeslice propagator (Lx, Lx, nsc, nsc), got {g.shape}")
+    lx = int(g.shape[0])
+    if int(g.shape[1]) != lx:
+        raise ValueError(f"Expected square spatial propagator block, got {g.shape[:2]}")
+    moms = tuple(int(v) for v in momenta)
+    nmom = int(len(moms))
+
+    xs = np.arange(lx, dtype=np.float64)
+    sink_phase = np.exp(2j * np.pi * np.asarray(moms, dtype=np.float64)[:, None] * xs[None, :] / float(lx))
+    source_phase = np.conjugate(sink_phase)
+
+    pion_kernel = np.einsum("xyab,xyab->xy", g, np.conjugate(g), optimize=True)
+    mixed = np.einsum("px,qy,xy->pq", sink_phase, source_phase, pion_kernel, optimize=True)
+    direct = mixed * np.conjugate(mixed)
+
+    sink_pair_phase = np.exp(
+        2j
+        * np.pi
+        * np.asarray(moms, dtype=np.float64)[:, None, None]
+        * (xs[None, :, None] - xs[None, None, :])
+        / float(lx)
+    )
+    source_pair_phase = np.conjugate(sink_pair_phase)
+
+    left = np.einsum("xyab,Xycb->xXyac", g, np.conjugate(g), optimize=True)
+    right = np.einsum("XYcd,xYad->xXYca", g, np.conjugate(g), optimize=True)
+    right = np.transpose(right, (0, 1, 2, 4, 3))
+    exchange_kernel = np.einsum("xXyac,xXYac->xXyY", left, right, optimize=True)
+    exchange = np.einsum("pxX,qyY,xXyY->pq", sink_pair_phase, source_pair_phase, exchange_kernel, optimize=True)
+
+    if direct.shape != (nmom, nmom) or exchange.shape != (nmom, nmom):
+        raise ValueError(
+            f"Unexpected two-pion matrix shapes: direct={direct.shape}, exchange={exchange.shape}, expected {(nmom, nmom)}"
+        )
+    return np.asarray(direct), np.asarray(exchange)
+
+
 def _build_md_integrator(name: str, theory, nmd: int, tau: float):
     key = str(name).strip().lower()
     if key == "minnorm2":
@@ -1167,6 +1283,99 @@ class EtaTwoPointMeasurement:
 
 
 @dataclass
+class TwoPionI2MatrixMeasurement:
+    """Two-pion I=2 correlator matrix for O_p = pi(p) pi(-p) on a 1D spatial lattice.
+
+    This DD-independent measurement is intended for Schwinger-model spectroscopy
+    on 2D lattices (Lx, Lt). It uses the dense all-to-all inverse and performs
+    the spatial sums exactly on a chosen set of source time slices.
+    """
+
+    every: int = 1
+    name: str = "pipi_i2_matrix"
+    momenta: Tuple[int, ...] = (0, 1)
+    momentum_axis: int = 0
+    source_times: Optional[Tuple[int, ...]] = None
+    dense_max_dof: int = 4096
+    include_direct: bool = True
+    include_exchange: bool = True
+    include_full: bool = True
+
+    def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
+        t0 = time.perf_counter()
+        lattice_shape = _extract_lattice_shape_from_theory(theory)
+        if len(tuple(lattice_shape)) != 2:
+            raise ValueError(
+                f"{self.name} currently supports only 2D lattices (Lx, Lt) for Schwinger spectroscopy; got {lattice_shape}"
+            )
+        mom_axis = _coerce_momentum_axis(self.momentum_axis, lattice_shape)
+        if int(mom_axis) != 0:
+            raise ValueError(f"{self.name} currently requires mom_axis=0 on (Lx, Lt) lattices; got {mom_axis}")
+        moms = _coerce_momenta(self.momenta)
+        lt = int(tuple(lattice_shape)[-1])
+        source_times = _coerce_source_times(self.source_times, lt)
+        if len(source_times) == 0:
+            raise ValueError(f"{self.name} requires at least one source time slice")
+
+        ginv, inv_info = _full_dense_inverse(
+            q=q,
+            theory=theory,
+            context=context,
+            dense_max_dof=int(self.dense_max_dof),
+        )
+        t1 = time.perf_counter()
+
+        nmom = int(len(moms))
+        direct = np.zeros((nmom, nmom, lt), dtype=np.complex128)
+        exchange = np.zeros_like(direct)
+        ns = int(theory.fermion_shape()[-2])
+        nc = int(theory.fermion_shape()[-1])
+        bs = int(ginv.shape[0])
+
+        for b in range(bs):
+            ginv_b = np.asarray(ginv[b])
+            for tsrc in source_times:
+                for dt in range(lt):
+                    tsnk = int((int(tsrc) + int(dt)) % lt)
+                    prop_t = _timeslice_propagator_from_dense_inverse_1d_spatial(
+                        ginv_b,
+                        lattice_shape=lattice_shape,
+                        ns=ns,
+                        nc=nc,
+                        source_time=int(tsrc),
+                        sink_time=int(tsnk),
+                    )
+                    dmat, xmat = _two_pion_i2_matrix_from_timeslice_propagator(prop_t, moms)
+                    direct[:, :, dt] += dmat
+                    exchange[:, :, dt] += xmat
+
+        norm = float(max(1, bs * len(source_times)))
+        direct = direct / norm
+        exchange = exchange / norm
+        full = direct - exchange
+        t2 = time.perf_counter()
+
+        out: Dict[str, float] = {}
+        for i, p in enumerate(moms):
+            out[f"basis_p{i}"] = float(int(p))
+        out["n_momenta"] = float(nmom)
+        out["mom_axis"] = float(int(mom_axis))
+        out["n_source_times"] = float(len(source_times))
+        for i, tsrc in enumerate(source_times):
+            out[f"source_time_{int(i)}"] = float(int(tsrc))
+        if bool(self.include_direct):
+            out.update(_flatten_matrix_corr_momentum("direct", direct))
+        if bool(self.include_exchange):
+            out.update(_flatten_matrix_corr_momentum("exchange", exchange))
+        if bool(self.include_full):
+            out.update(_flatten_matrix_corr_momentum("full", full))
+        out.update(inv_info)
+        out["wall_total_sec"] = float(t2 - t0)
+        out["wall_after_prop_sec"] = float(t2 - t1)
+        return out
+
+
+@dataclass
 class DDPionTwoPointMeasurement:
     """Connected pseudoscalar two-point function from the exact interior Schur complement."""
 
@@ -1710,6 +1919,30 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
                     source_average=bool(source_average),
                     n_flavor=int(n_flavor),
                     include_connected=bool(include_connected),
+                    include_full=bool(include_full),
+                )
+            )
+            continue
+        if mtype in ("pipi_i2_matrix", "two_pion_i2", "pipi", "pipi_i2"):
+            moms = _parse_momenta_from_spec(spec)
+            if len(tuple(moms)) < 1:
+                raise ValueError(f"Measurement[{idx}] requires at least one momentum for {mtype}")
+            mom_axis = int(spec.get("momentum_axis", spec.get("mom_axis", 0)))
+            dense_max_dof = int(spec.get("dense_max_dof", 4096))
+            source_times = _parse_source_times_from_spec(spec)
+            include_direct = _parse_bool_from_spec(spec, "include_direct", True)
+            include_exchange = _parse_bool_from_spec_aliases(spec, ("include_exchange", "include_cross"), True)
+            include_full = _parse_bool_from_spec(spec, "include_full", True)
+            out.append(
+                TwoPionI2MatrixMeasurement(
+                    every=every,
+                    name=(name or "pipi_i2_matrix"),
+                    momenta=tuple(int(v) for v in moms),
+                    momentum_axis=int(mom_axis),
+                    source_times=None if source_times is None else tuple(int(v) for v in source_times),
+                    dense_max_dof=int(dense_max_dof),
+                    include_direct=bool(include_direct),
+                    include_exchange=bool(include_exchange),
                     include_full=bool(include_full),
                 )
             )

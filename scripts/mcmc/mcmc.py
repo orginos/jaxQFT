@@ -232,6 +232,19 @@ every = 1
 #n_flavor = 2
 #include_connected = true
 #include_full = true
+
+# Two-pion I=2 correlator matrix for Schwinger spectroscopy (dense all-to-all).
+#[[measurements.inline]]
+#type = "pipi_i2_matrix"
+#name = "pipi_i2_matrix"
+#every = 20
+#momenta = [0, 1, 2, 3]
+#mom_axis = 0
+#source_times = [0]
+#dense_max_dof = 4096
+#include_direct = true
+#include_exchange = true
+#include_full = true
 """
 
 
