@@ -1,0 +1,162 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{Schwinger-Model Pion Form Factor in \texttt{jaxQFT}}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+This note documents the DD-independent form-factor workflow now implemented for
+the two-dimensional U(1) Wilson-fermion Schwinger-model example in
+\texttt{jaxQFT}. The target observable is the pion matrix element of the
+isovector vector current, measured with dense all-to-all propagators and
+analyzed with autocorrelation-aware blocked jackknife fits.
+
+\section{Current and Interpolator}
+The source and sink interpolators are the local pseudoscalar operators
+\begin{equation}
+  P^+(x) = \bar d(x) \gamma_5 u(x),
+  \qquad
+  P^-(x) = \bar u(x) \gamma_5 d(x),
+\end{equation}
+and the current insertion is either the local isovector vector current
+\begin{equation}
+  V^{(3)}_\mu(x) = \bar\psi(x)\gamma_\mu \frac{\tau^3}{2}\psi(x).
+\end{equation}
+or the exactly conserved Wilson point-split current
+\begin{equation}
+  J^{(3)}_\mu\!\left(x+\frac{\hat\mu}{2}\right)
+  =
+  \frac{1}{2}\Big[
+    \bar\psi(x+\hat\mu)\,U^\dagger_\mu(x)\,(r+\gamma_\mu)\,\frac{\tau^3}{2}\,\psi(x)
+    -
+    \bar\psi(x)\,U_\mu(x)\,(r-\gamma_\mu)\,\frac{\tau^3}{2}\,\psi(x+\hat\mu)
+  \Big].
+\end{equation}
+For the charged-pion connected correlator, the $u$-line and $d$-line current
+insertions are equal, so the connected three-point function is represented by a
+single quark-line triangle contraction.
+
+\section{Dense All-to-All Construction}
+Let $S(x,y)$ denote the full quark propagator. For source point $y$, current
+insertion point $z$, and sink point $x$, the connected pion three-point kernel
+implemented in the code is
+\begin{equation}
+  K_\mu(x,z,y)
+  =
+  \mathrm{Tr}\left[
+    \gamma_5 S(x,z) \gamma_\mu S(z,y) \gamma_5 S(y,x)
+  \right].
+\end{equation}
+The inline measurement uses the dense inverse of the Wilson operator, reshaped
+into timeslice blocks, so that for each chosen source time $t_{\rm src}$, sink
+separation $t_{\rm sep}$, and insertion time $\tau$, the spatial sums are done
+exactly. For the conserved current, the insertion is evaluated as the sum of
+its forward and backward point-split pieces with the same dense all-to-all data.
+
+\section{Momentum Projection}
+With source time $t_{\rm src}$, sink time $t_{\rm src}+t_{\rm sep}$, and
+insertion time $t_{\rm src}+\tau$, the measured correlator is
+\begin{equation}
+  C_{3,\mu}(\tau,t_{\rm sep};p_f,p_i)
+  =
+  \frac{1}{N_{\rm src}}
+  \sum_{t_{\rm src},y,x,z}
+  e^{-ip_f x}
+  e^{+i(p_f-p_i)z}
+  e^{+ip_i y}
+  K_\mu(x,z,y),
+\end{equation}
+where $N_{\rm src}$ is the number of source sites used in the translation
+average. In the current implementation:
+\begin{itemize}
+  \item all spatial source positions on each selected source timeslice are used,
+  \item the source-time average is configurable,
+  \item the measurement currently targets 2D lattices $(L_x,L_t)$ with momentum
+  along the single spatial direction.
+\end{itemize}
+
+\section{Practical Run Setup}
+The production card added for the 16\,$\times$\,32 quenched example is
+\begin{verbatim}
+runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_form_factor.toml
+\end{verbatim}
+with the following choices:
+\begin{itemize}
+  \item quenched gauge evolution at $\beta=8.0$,
+  \item dense, translation-averaged pion two-point functions for
+  $p\in\{-2,-1,0,1,2\}$,
+  \item dense pion three-point functions in Breit kinematics
+  $(p_f,p_i)=(p,-p)$ for $p=0,1,2$,
+  \item temporal current only ($\mu=1$ in this 2D convention),
+  \item all source times, and all source-sink separations
+  $t_{\rm sep}=4,5,\ldots,16$.
+\end{itemize}
+The example card currently defaults to \texttt{current\_kind = "local"}.
+Setting \texttt{current\_kind = "conserved"} switches to the point-split
+current while keeping the rest of the workflow unchanged.
+This is a deliberate compromise: it exploits full translation invariance while
+keeping the number of stored three-point channels small enough for a practical
+checkpoint size.
+
+\section{Output Layout}
+The three-point measurement is stored under the inline measurement name
+\texttt{pion\_3pt\_vector} with flat scalar keys of the form
+\begin{verbatim}
+c3_mu{mu}_pf{pf}_pi{pi}_tsep{tsep}_tau{tau}_re
+c3_mu{mu}_pf{pf}_pi{pi}_tsep{tsep}_tau{tau}_im
+\end{verbatim}
+This matches the single-channel extractor already present in
+\texttt{scripts/mcmc/analyze\_pion\_vector\_3pt.py}.
+
+\section{Analysis Path}
+Two analysis scripts are now available.
+
+\subsection{Single channel}
+\texttt{scripts/mcmc/analyze\_pion\_vector\_3pt.py} extracts one selected
+channel $(\mu,p_i,p_f,t_{\rm sep})$ at a time. It fits the two-point
+functions, removes the overlap factors, and performs a correlated plateau fit.
+
+\subsection{Batch form-factor scan}
+\texttt{scripts/mcmc/analyze\_pion\_form\_factor.py} scans all matching
+channels in a checkpoint, runs the same blocked-jackknife extraction for each
+one, and summarizes the results in a JSON table together with a summary PNG.
+For the default 16\,$\times$\,32 card this means a scan over the available
+Breit-frame momentum transfers and all stored source-sink separations.
+
+\section{Statistics}
+The analysis is blocked and IAT-aware:
+\begin{enumerate}
+  \item two-point and three-point samples are aligned on common MCMC steps,
+  \item a block size is chosen automatically from integrated autocorrelation
+  times unless overridden,
+  \item pion energies and overlap factors are fit on blocked data,
+  \item the three-point plateau is chosen with correlated constant fits,
+  \item matrix elements and form factors are quoted from blocked jackknife
+  replicas.
+\end{enumerate}
+
+\section{Current Limitation}
+Both current choices are now available through
+\texttt{current\_kind = "local"|"conserved"} in the inline measurement block.
+For the conserved current one should use $Z_V=1$ in the analysis scripts. For
+the local current the same analysis path applies, but a separate multiplicative
+renormalization factor is still needed. The conserved-current sign convention
+now matches the local-current path, and the analysis scripts recover
+$F_\pi(Q^2=0)=1$ to machine precision on a synthetic single-state checkpoint.
+The remaining caveat is practical rather than formal: a tiny hot-start dataset
+such as $4\times 8$ with $t_{\rm sep}=4$ is not a meaningful charge-normalization
+test because wrap-around and excited-state contamination are still large there.
+A proper physics validation should therefore be done on a thermalized ensemble
+with several source-sink separations.
+
+\end{document}

@@ -1,0 +1,256 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{geometry}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{Pion Vector-Current Matrix Elements in \texttt{jaxQFT}}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+This note documents the DD-independent analysis path used to extract a pion
+vector-current matrix element from two-point and three-point functions in the
+two-dimensional U(1) Wilson-fermion model used in this repository as a
+Schwinger-model proxy.
+
+The goal is narrow and practical:
+\begin{enumerate}
+  \item fit the pion two-point functions to obtain the single-particle energy
+  $E_\pi(p)$ and the overlap factor $Z_\pi(p)$,
+  \item use those fits together with a pion three-point function to remove the
+  source/sink overlap factors,
+  \item extract the matrix element
+  $\langle \pi(p_f)|V_\mu|\pi(p_i)\rangle$,
+  \item for the temporal current, convert that matrix element to the pion form
+  factor.
+\end{enumerate}
+
+\section{Current Choice}
+For an isospin-symmetric two-flavor theory the correct connected current for the
+charged-pion form factor is the isovector vector current
+\begin{equation}
+  V_\mu^{(3)}(x)
+  =
+  \bar\psi(x)\,\gamma_\mu\,\frac{\tau^3}{2}\,\psi(x).
+\end{equation}
+If the exactly conserved point-split Wilson current is used, its renormalization
+constant is
+\begin{equation}
+  Z_V = 1.
+\end{equation}
+If instead a local current is used, the analysis stays the same but a separate
+current renormalization factor must be applied at the end. The script therefore
+keeps a user-visible multiplicative input $Z_V$ and defaults it to $1$.
+
+\section{Single-Pion Two-Point Function}
+For a local pseudoscalar interpolator
+\begin{equation}
+  P^a(x) = \bar\psi(x)\,\gamma_5\,\tau^a\,\psi(x),
+\end{equation}
+the momentum-projected two-point function is
+\begin{equation}
+  C_2(t;\,p)
+  =
+  \sum_x e^{ipx}\,
+  \langle P^a(x,t)\,P^a(0)^\dagger \rangle.
+\end{equation}
+At large Euclidean time,
+\begin{equation}
+  C_2(t;\,p)
+  \approx
+  \frac{|Z_\pi(p)|^2}{2E_\pi(p)}
+  \left(
+    e^{-E_\pi(p)t}
+    +
+    e^{-E_\pi(p)(T-t)}
+  \right),
+\end{equation}
+with
+\begin{equation}
+  Z_\pi(p) = \langle 0|P^a(0)|\pi^a(p)\rangle.
+\end{equation}
+
+In the code this is fit as
+\begin{equation}
+  C_2(t;\,p) = A(p)\left(e^{-Et}+e^{-E(T-t)}\right),
+\end{equation}
+so the overlap factor used by the three-point analysis is
+\begin{equation}
+  Z_\pi(p) = \sqrt{2E_\pi(p)\,A(p)}.
+\end{equation}
+
+\section{Three-Point Function}
+For source at time $0$, current insertion at time $\tau$, and sink at
+$t_{\rm sep}$, define
+\begin{equation}
+  C_{3,\mu}(\tau,t_{\rm sep};p_f,p_i)
+  =
+  \sum_{x,y}
+  e^{-ip_f x}
+  e^{+i(p_f-p_i)y}
+  \langle
+    P(x,t_{\rm sep})\,
+    V_\mu(y,\tau)\,
+    P(0)^\dagger
+  \rangle.
+\end{equation}
+In the single-state region $0 \ll \tau \ll t_{\rm sep}$,
+\begin{equation}
+  C_{3,\mu}(\tau,t_{\rm sep};p_f,p_i)
+  \approx
+  \frac{Z_\pi(p_f)\,Z_\pi(p_i)}{4E_fE_i}
+  \langle \pi(p_f)|V_\mu|\pi(p_i)\rangle\,
+  e^{-E_f(t_{\rm sep}-\tau)}\,e^{-E_i\tau},
+\end{equation}
+where $E_i \equiv E_\pi(p_i)$ and $E_f \equiv E_\pi(p_f)$.
+
+\section{Peeling Off the Overlap Factors}
+\subsection{Direct overlap removal}
+Once $E_i$, $E_f$, $Z_\pi(p_i)$, and $Z_\pi(p_f)$ are known from the two-point
+fits, the matrix element can be isolated directly:
+\begin{equation}
+  M_\mu^{(Z)}(\tau)
+  \equiv
+  Z_V\,
+  \frac{4E_fE_i}{Z_\pi(p_f)\,Z_\pi(p_i)}
+  e^{E_f(t_{\rm sep}-\tau)+E_i\tau}
+  C_{3,\mu}(\tau,t_{\rm sep};p_f,p_i).
+\end{equation}
+In the plateau region,
+\begin{equation}
+  M_\mu^{(Z)}(\tau)
+  \to
+  Z_V\,\langle \pi(p_f)|V_\mu|\pi(p_i)\rangle.
+\end{equation}
+
+\subsection{Ratio method}
+The same matrix element can be extracted with the standard ratio
+\begin{equation}
+  R_\mu(\tau,t_{\rm sep};p_f,p_i)
+  =
+  \frac{C_{3,\mu}(\tau,t_{\rm sep};p_f,p_i)}{C_2(t_{\rm sep};p_f)}
+  \sqrt{
+    \frac{
+      C_2(t_{\rm sep}-\tau;p_i)\,
+      C_2(\tau;p_f)\,
+      C_2(t_{\rm sep};p_f)
+    }{
+      C_2(t_{\rm sep}-\tau;p_f)\,
+      C_2(\tau;p_i)\,
+      C_2(t_{\rm sep};p_i)
+    }
+  }.
+\end{equation}
+Using the same single-state asymptotics as above, one finds
+\begin{equation}
+  R_\mu(\tau,t_{\rm sep};p_f,p_i)
+  \to
+  \frac{
+    \langle \pi(p_f)|V_\mu|\pi(p_i)\rangle
+  }{
+    2\sqrt{E_fE_i}
+  }.
+\end{equation}
+The corresponding effective matrix element is therefore
+\begin{equation}
+  M_\mu^{(R)}(\tau)
+  \equiv
+  Z_V\,2\sqrt{E_fE_i}\,
+  R_\mu(\tau,t_{\rm sep};p_f,p_i).
+\end{equation}
+
+This ratio is useful because the overlap factors cancel explicitly. In the
+current implementation the plateau window is selected from $M_\mu^{(R)}(\tau)$,
+and the same window is then applied to both $M_\mu^{(R)}$ and $M_\mu^{(Z)}$ as
+a cross-check.
+
+On the small lattices used for this Schwinger-model workflow, the two-point
+function can still have visible backward propagation even when the three-point
+function is analyzed in a forward-state window. For that reason, the code uses
+the fitted forward branch
+\begin{equation}
+  C_2^{\rm fw}(t;\,p) = A(p)e^{-E_\pi(p)t}
+\end{equation}
+inside the ratio estimator by default. This keeps the ratio and direct
+overlap-removal estimators on the same single-state footing.
+
+\section{Form-Factor Normalization}
+For the temporal current in Euclidean kinematics,
+\begin{equation}
+  \langle \pi(p_f)|V_t|\pi(p_i)\rangle
+  =
+  \left(E_f + E_i\right) F_\pi(Q^2),
+\end{equation}
+with
+\begin{equation}
+  Q^2 = (E_f-E_i)^2 + (p_f-p_i)^2
+\end{equation}
+in the continuum-like convention used by the script. Therefore
+\begin{equation}
+  F_\pi(Q^2)
+  =
+  \frac{
+    \langle \pi(p_f)|V_t|\pi(p_i)\rangle
+  }{
+    E_f + E_i
+  }.
+\end{equation}
+The script reports this quantity automatically when the selected current index
+is the temporal one.
+
+\section{Statistical Procedure}
+The extraction code is designed to stay consistent with the rest of the MCMC
+analysis pipeline:
+\begin{enumerate}
+  \item Align the two-point and three-point records on the same MCMC steps.
+  \item Estimate an integrated autocorrelation time from the two-point and
+  three-point data and choose a block size $b \gtrsim 2\tau_{\rm int}$ unless
+  the user overrides it.
+  \item Build blocked means.
+  \item Fit the pion two-point functions on blocked data and propagate the
+  resulting $E_\pi(p)$ and $Z_\pi(p)$ through a blocked jackknife.
+  \item Construct the effective matrix-element curves on each jackknife sample.
+  \item Choose the plateau window from a correlated constant fit to the ratio
+  estimator.
+  \item Quote the final value and error from the same jackknife samples and the
+  selected window.
+\end{enumerate}
+
+\section{Expected Three-Point Record Layout}
+The current analysis script reads checkpoint records with flat scalar keys of
+the form
+\begin{verbatim}
+c3_mu{mu}_pf{pf}_pi{pi}_tsep{tsep}_tau{tau}_re
+c3_mu{mu}_pf{pf}_pi{pi}_tsep{tsep}_tau{tau}_im
+\end{verbatim}
+inside a measurement block whose name defaults to
+\texttt{pion\_3pt\_vector}. This fixes the interface for the future inline
+three-point measurement implementation.
+
+\section{Code Path}
+The extraction workflow is implemented in
+\begin{verbatim}
+scripts/mcmc/analyze_pion_vector_3pt.py
+\end{verbatim}
+and uses the existing correlated two-point fitting machinery from
+\texttt{scripts/mcmc/fit\_2pt\_dispersion.py}. The result is a JSON summary and,
+optionally, a PNG showing the effective matrix-element plateau.
+
+\section{Practical Caveat}
+The direct overlap-removal estimator assumes the forward single-state form of
+the three-point function. In practice this is safe only when
+\begin{equation}
+  0 \ll \tau \ll t_{\rm sep} \ll T/2.
+\end{equation}
+If wrap-around effects or excited states are significant, the plateau will not
+be reliable and one must move to a more complete simultaneous
+two-state/two-point/three-point fit.
+
+\end{document}

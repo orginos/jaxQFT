@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-03-30
+Last updated: 2026-03-31
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -12,6 +12,243 @@ Last updated: 2026-03-30
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Generic inline-measurement gauge-invariance driver (new):
+  - New script:
+    - `scripts/mcmc/check_measurement_gauge_invariance.py`
+  - Purpose:
+    - build a gauge theory and inline measurement list from the same TOML format used by `scripts/mcmc/mcmc.py`
+    - draw a gauge field `U` and a random site gauge transformation `Omega`
+    - run the selected inline measurements on `U` and `U^\Omega`
+    - compare all non-timing flattened outputs entry-by-entry
+  - Scope:
+    - supports:
+      - `u1/u1_ym`
+      - `u1/u1_wilson_nf2`
+      - `su2/su2_ym`
+      - `su2/su2_wilson_nf2`
+      - `su3/su3_ym`
+      - `su3/su3_wilson_nf2`
+    - selection is by the same `run.theory_family` / `run.theory` fields used in the MCMC card
+    - measurement list comes from `measurements.inline`
+  - Comparison policy:
+    - ignores timing/inversion-cache metadata by default using:
+      - `^(timing_|wall_|inv_)`
+    - compares all other flattened output keys with `np.allclose`
+    - restores the model RNG key between the untransformed and transformed runs so stochastic measurements see the same random stream
+  - CLI:
+    - `--config <card.toml>`
+    - `--measurement <name>` (repeatable / comma-separated) to test a subset
+    - `--ntrials`, `--omega-scale`, `--atol`, `--rtol`, `--json-out`
+  - Smoke test run locally:
+    - temporary `u1_wilson_nf2` 4x8 card with:
+      - `plaquette`
+      - `pion_2pt`
+      - `eta_2pt`
+      - `pipi_i2_matrix`
+      - `pion_3pt_vector` local
+      - `pion_3pt_vector` conserved
+    - command:
+      - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/check_measurement_gauge_invariance.py --config /tmp/measurement_gauge_invariance_smoke.toml --ntrials 1`
+    - result:
+      - PASS
+      - compared 345 non-timing outputs
+      - `max_abs_err = 1.898e-07`
+      - `max_rel_err = 4.941e-03`
+- Schwinger pion form factor (DD-independent, new):
+  - Scope:
+    - adds the missing inline 3pt measurement path for the Schwinger-model pion form factor
+    - keeps the work entirely separate from the DD code
+    - uses the dense all-to-all inverse already used by the Schwinger spectroscopy path
+  - Inline measurement:
+    - new `PionVectorThreePointMeasurement` in `jaxqft/core/measurements.py`
+    - measurement name:
+      - `pion_3pt_vector`
+    - current implementation:
+      - supports both:
+        - local isovector vector current (`current_kind = "local"`)
+        - conserved point-split Wilson current (`current_kind = "conserved"`)
+      - 2D lattices `(Lx, Lt)` only
+      - momentum along `mom_axis = 0` only
+      - dense inverse only
+    - correlator layout:
+      - flat scalar keys
+        - `c3_mu{mu}_pf{pf}_pi{pi}_tsep{tsep}_tau{tau}_re`
+        - `c3_mu{mu}_pf{pf}_pi{pi}_tsep{tsep}_tau{tau}_im`
+      - pair modes:
+        - `pair_mode = "breit"` gives `(p_f, p_i) = (p, -p)` for each entry in `momenta`
+        - `pair_mode = "all"` gives the full Cartesian product
+    - translation averaging:
+      - sums over all spatial source positions exactly on each selected source timeslice
+      - averages over the configured `source_times`
+      - the 16x32 production card uses all 32 source times
+    - conserved-current implementation notes:
+      - derived from the same Wilson operator convention used by `apply_D`
+      - uses the BC-dressed links from `theory._links_with_fermion_bc(U)`
+      - temporal current uses adjacent-time blocks
+      - spatial current uses shifted spatial indices inside one timeslice block
+    - timing summaries added:
+      - `timing_inversion_step_sec`
+      - `timing_inversion_this_call_sec`
+      - `timing_propagator_build_sec`
+      - `timing_contraction_sec`
+      - `timing_contraction_per_source_time_sec`
+      - `timing_contraction_per_triangle_sec`
+      - `timing_contraction_per_current_triangle_sec`
+  - Analysis:
+    - existing single-channel extractor remains:
+      - `scripts/mcmc/analyze_pion_vector_3pt.py`
+    - new batch script:
+      - `scripts/mcmc/analyze_pion_form_factor.py`
+      - purpose:
+        - scan all matching `pion_3pt_vector` channels in a checkpoint
+        - run the same blocked-jackknife extraction used by the single-channel script
+        - summarize all channels in one JSON file and one PNG
+      - default workflow:
+        - fit `pion_2pt`
+        - extract each `(mu, p_i, p_f, t_sep)` channel
+        - compute the renormalized matrix element
+        - for the temporal current, convert it to `F_pi(Q^2)`
+  - Run card:
+    - new card:
+      - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_form_factor.toml`
+    - current choices:
+      - quenched `16x32`
+      - dense translation-averaged `pion_2pt` for `p = -2,-1,0,1,2`
+      - dense `pion_3pt_vector` in Breit kinematics for `p = 0,1,2`
+      - temporal current only (`mu = 1`)
+      - default `current_kind = "local"` (switch to `"conserved"` to test the point-split path)
+      - `t_sep = 4,5,...,16`
+      - all source times
+      - `measure = 1000`, `skip = 20`
+  - Docs:
+    - new note:
+      - `docs/notes/schwinger_pion_form_factor.tex`
+  - Smoke tests run locally:
+    - syntax:
+      - `python3 -m py_compile jaxqft/core/measurements.py scripts/mcmc/analyze_pion_form_factor.py scripts/mcmc/analyze_pion_vector_3pt.py`
+    - TOML parse:
+      - `python3 - <<'PY' ... tomllib.load('runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_form_factor.toml') ... PY`
+    - direct dense measurement smoke on `U1WilsonNf2(lattice_shape=(4,8), ...)`:
+      - built `pion_2pt` and `pion_3pt_vector` records for 6 tiny samples
+      - wrote synthetic checkpoint:
+        - `/tmp/pion_form_factor_smoke.pkl`
+      - confirmed emitted keys such as:
+        - `c3_mu1_pf0_pi0_tsep4_tau1_re`
+        - `c3_mu1_pf1_pi-1_tsep4_tau1_re`
+    - current-kind smoke:
+      - tiny synthetic checkpoints written for both:
+        - `/tmp/pion_form_factor_local_smoke.pkl`
+        - `/tmp/pion_form_factor_conserved_smoke.pkl`
+      - confirmed:
+        - `current_kind_local = 1, current_kind_conserved = 0` for local
+        - `current_kind_local = 0, current_kind_conserved = 1` for conserved
+    - batch-analysis smoke:
+      - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_form_factor.py --input /tmp/pion_form_factor_smoke.pkl --mu 1 --pair-mode breit --max-abs-p 1 --tsep-min 4 --tsep-max 4 --block-size 1 --pion-fit-range 1,3 --plateau-range 1,3 --prefix pion_form_factor_smoke --outdir /tmp --no-gui`
+      - outputs:
+        - `/tmp/pion_form_factor_smoke.json`
+        - `/tmp/pion_form_factor_smoke.png`
+    - conserved-analysis smoke:
+      - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_form_factor.py --input /tmp/pion_form_factor_conserved_smoke.pkl --mu 1 --pair-mode breit --max-abs-p 1 --tsep-min 4 --tsep-max 4 --block-size 1 --pion-fit-range 1,3 --plateau-range 1,3 --prefix pion_form_factor_conserved_smoke --outdir /tmp --no-gui`
+      - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_vector_3pt.py --input /tmp/pion_form_factor_conserved_smoke.pkl --mu 1 --pi -1 --pf 1 --tsep 4 --block-size 1 --pion-fit-range 1,3 --plateau-range 1,3 --prefix pion_vector_conserved_smoke --outdir /tmp --no-gui`
+    - matched local-vs-conserved comparison on the same tiny dataset:
+      - checkpoints:
+        - `/tmp/pion_form_factor_compare_local.pkl`
+        - `/tmp/pion_form_factor_compare_conserved.pkl`
+      - current small-data charge-normalization readout:
+        - local:
+          - `F_pi(Q^2=0) = 1.349 +/- 0.192` on the one available `tsep=4` channel
+        - conserved:
+          - `F_pi(Q^2=0) = -1.309 +/- 0.185` on the one available `tsep=4` channel
+      - interpretation:
+        - this is not a physically meaningful ensemble test (tiny 4x8 hot-start data), but it is enough to say:
+          - the conserved-current code path executes and the analysis consumes it
+          - the conserved-current path is not yet validated as a production default
+        - for that reason, the 16x32 production card remains on `current_kind = "local"` by default
+    - follow-up double-check on 2026-03-31:
+      - fixed the conserved-current overall sign in `jaxqft/core/measurements.py` by changing the point-split contraction from `forward - backward` to `backward - forward`
+      - direct matrix-level check on a tiny dense inverse confirmed:
+        - local helper matches the explicit local bilinear contraction
+        - conserved helper matches the explicit point-split bilinear contraction after the sign fix
+      - synthetic single-state validation:
+        - built `/tmp/pion_form_factor_single_state_f1.pkl` with exact one-state data and input `F_pi(Q^2=0)=1`
+        - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_vector_3pt.py --input /tmp/pion_form_factor_single_state_f1.pkl --mu 1 --pi 0 --pf 0 --tsep 8 --block-size 2 --pion-fit-range 2,6 --plateau-range 2,6 --prefix pion_form_factor_single_state_f1 --outdir /tmp --no-gui`
+        - recovered:
+          - `matrix_element = 0.80000000003`
+          - `form_factor = 1.00000000003`
+      - interpretation:
+        - the conserved-current sign bug was real
+        - the old `4x8, t_sep=4` magnitude mismatch is not a second normalization bug in the analysis; it is a bad state-isolation test because the lattice is too short and the one-state extraction is contaminated by wrap-around/excited states
+    - note compilation:
+      - `pdflatex -interaction=nonstopmode -halt-on-error -output-directory /tmp docs/notes/schwinger_pion_form_factor.tex`
+- Pion vector-current matrix-element extraction (DD-independent, new):
+  - Scope:
+    - analysis-only path for a single pion 3pt kinematic channel
+    - keeps the Schwinger/pion form-factor work separate from the DD code
+    - assumes 3pt data are already present in `state.inline_records`
+  - New script:
+    - `scripts/mcmc/analyze_pion_vector_3pt.py`
+    - purpose:
+      - fit `pion_2pt` at the source and sink momenta
+      - extract `E_pi(p)` and `Z_pi(p)=sqrt(2EA)`
+      - build two effective matrix-element estimators for one selected channel `(mu, p_i, p_f, t_sep)`:
+        - direct overlap removal from fitted `Z_pi`
+        - a 2pt/3pt ratio estimator
+      - choose the plateau window by a correlated constant fit on the ratio estimator
+      - report the renormalized matrix element and, for the temporal current, the pion form factor
+    - expected 3pt flat-key layout:
+      - `c3_mu{mu}_pf{pf}_pi{pi}_tsep{tsep}_tau{tau}_re`
+      - `c3_mu{mu}_pf{pf}_pi{pi}_tsep{tsep}_tau{tau}_im`
+    - implementation notes:
+      - blocked jackknife with automatic block-size choice from 2pt/3pt IAT unless overridden
+      - the ratio estimator uses the fitted forward 2pt branch `A exp(-Et)` by default
+        - reason:
+          - on the small Schwinger-model lattices, this keeps the ratio and direct-overlap estimators on the same single-state footing even when the raw 2pt still has visible backward propagation
+      - default policy is conservative:
+        - `--no-pion-fallback-two-exp` is the default behavior in this script
+        - users can still enable a 2-exp fallback explicitly if needed
+  - Docs:
+    - new note `docs/notes/pion_vector_matrix_element.tex`
+  - Smoke tests run locally:
+    - `python3 -m py_compile scripts/mcmc/analyze_pion_vector_3pt.py`
+    - synthetic checkpoint built with:
+      - `pion_2pt` at `p=0,1`
+      - `pion_3pt_vector` for `mu=1, p_i=0, p_f=1, t_sep=8`
+    - extraction command:
+      - `python3 scripts/mcmc/analyze_pion_vector_3pt.py --input /tmp/pion_vector_3pt_smoke.pkl --mu 1 --pi 0 --pf 1 --tsep 8 --no-gui --outdir /tmp --prefix pion_vector_smoke3`
+    - current smoke result:
+      - recovered matrix element:
+        - ratio estimator `0.81970(10)`
+        - direct-overlap estimator `0.81970(10)`
+      - note compilation:
+        - `pdflatex -interaction=nonstopmode -halt-on-error -output-directory /tmp docs/notes/pion_vector_matrix_element.tex`
+- Spectroscopy timing instrumentation (new):
+  - `jaxqft/core/measurements.py`
+    - `PionTwoPointMeasurement` now emits explicit timing summaries:
+      - `timing_inversion_step_sec`
+      - `timing_inversion_this_call_sec`
+      - `timing_propagator_build_sec`
+      - `timing_contraction_sec`
+      - `timing_contraction_per_momentum_sec`
+      - `n_source_sites_effective`
+      - `timing_contraction_per_source_site_sec`
+    - `TwoPionI2MatrixMeasurement` now emits:
+      - `timing_inversion_step_sec`
+      - `timing_inversion_this_call_sec`
+      - `timing_propagator_build_sec`
+      - `timing_contraction_sec`
+      - `timing_contraction_per_source_time_sec`
+      - `timing_contraction_per_dt_sec`
+  - purpose:
+    - make the inversion/contraction split explicit in checkpoint `inline_records`
+    - quantify the extra post-inversion cost from source averaging and multiple `source_times`
+  - smoke test:
+    - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python ...`
+    - verified:
+      - `pion_2pt` exposes the new `timing_*` keys
+      - `pipi_i2_matrix` exposes the new `timing_*` keys
+      - cache reuse is visible:
+        - `pion` first call had nonzero `timing_inversion_this_call_sec`
+        - `pipi` second call in the same measurement context had `timing_inversion_this_call_sec = 0`
 - Schwinger spectroscopy (DD-independent, new):
   - Scope:
     - keeps the Schwinger spectroscopy path fully separate from the DD code
@@ -33,6 +270,15 @@ Last updated: 2026-03-30
       - reads `state.inline_records` from an `mcmc.py` checkpoint
       - blocked jackknife with automatic block-size choice from IAT unless overridden
       - solves the GEVP and produces principal correlators, effective energies, PNG, and JSON
+    - new combined script `scripts/mcmc/analyze_schwinger_spectrum.py`
+      - performs a joint blocked-jackknife analysis of:
+        - single-pion spectrum from `pion_2pt`
+        - two-pion `I=2` spectrum from `pipi_i2_matrix`
+        - correlated energy shifts `Delta E_n = W_n - E_n^free`
+      - current free reference:
+        - ordered noninteracting levels built from the measured one-pion energies on the same ensemble
+        - `E_n^free = 2 E_pi(p_n)` using the `basis_p*` momenta stored by `pipi_i2_matrix`
+      - reports significance and an approximate measurement-count projection for reaching a target sigma threshold
     - single-pion dispersion/mass analysis continues to use:
       - `scripts/mcmc/analyze_2pt_effective_mass.py`
       - `scripts/mcmc/fit_2pt_dispersion.py`
@@ -44,6 +290,7 @@ Last updated: 2026-03-30
     - direct measurement construction on `U1WilsonNf2(lattice_shape=(4,8), ...)`
     - `build_inline_measurements(...)` -> `run_inline_measurements(...)` path for `pipi_i2_matrix`
     - `scripts/mcmc/analyze_pipi_i2_gevp.py` on a tiny synthetic checkpoint assembled from real U(1) Wilson measurements
+    - `scripts/mcmc/analyze_schwinger_spectrum.py` on the same tiny synthetic checkpoint
 - O(N) sigma model (new):
   - New generic model: `jaxqft/models/on_sigma.py`
     - covers `N>=2` with one code path

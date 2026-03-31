@@ -27,6 +27,14 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 
 
+def _fmt_pm_text(name: str, value: float, err: float, *, value_fmt: str = ".4f", err_fmt: str = ".4f") -> str:
+    if np.isfinite(float(value)) and np.isfinite(float(err)):
+        return f"{name}={format(float(value), value_fmt)}+/-{format(float(err), err_fmt)}"
+    if np.isfinite(float(value)):
+        return f"{name}={format(float(value), value_fmt)}"
+    return f"{name}=n/a"
+
+
 def autocorrelation_fft(x) -> np.ndarray:
     a = np.asarray(x, dtype=np.float64).reshape(-1)
     n = int(a.size)
@@ -1297,8 +1305,8 @@ def main() -> int:
             ax1.plot(xline, yline, "-", color="#9467bd", lw=1.4, label="weighted linear fit")
             lbl = (
                 f"E^2 = m^2 + c^2 p_hat^2\n"
-                f"m={float(disp_mc['m']):.4f}±{float(disp_mc['m_err']):.4f}\n"
-                f"c={float(disp_mc['c']):.4f}±{float(disp_mc['c_err']):.4f}\n"
+                f"{_fmt_pm_text('m', float(disp_mc['m']), float(disp_mc['m_err']), value_fmt='.4f', err_fmt='.4f')}\n"
+                f"{_fmt_pm_text('c', float(disp_mc['c']), float(disp_mc['c_err']), value_fmt='.4f', err_fmt='.4f')}\n"
                 f"chi2/dof={float(disp_fit['chi2_dof']):.3f}"
             )
             ax1.text(

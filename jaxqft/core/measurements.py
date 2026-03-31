@@ -513,6 +513,72 @@ def _parse_source_times_from_spec(spec: Mapping[str, Any]) -> Optional[Tuple[int
     return (int(raw),)
 
 
+def _coerce_tseps(tseps: Optional[Sequence[int]], lt: int) -> Tuple[int, ...]:
+    if tseps is None:
+        return (max(1, int(min(8, lt - 1))),)
+    vals = sorted({int(v) for v in tseps if 0 < int(v) < int(lt)})
+    if not vals:
+        raise ValueError(f"Expected at least one source-sink separation in [1, {int(lt) - 1}]")
+    return tuple(vals)
+
+
+def _parse_tseps_from_spec(spec: Mapping[str, Any]) -> Optional[Tuple[int, ...]]:
+    raw = None
+    for key in ("tseps", "tsep", "source_sink_separations", "sink_separations"):
+        if key in spec:
+            raw = spec.get(key)
+            break
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        toks = [t.strip() for t in raw.split(",") if t.strip()]
+        if not toks:
+            return None
+        return tuple(int(t) for t in toks)
+    if isinstance(raw, Sequence):
+        vals = tuple(int(v) for v in raw)
+        return vals if vals else None
+    return (int(raw),)
+
+
+def _coerce_current_indices(currents: Optional[Sequence[int]], nd: int) -> Tuple[int, ...]:
+    if currents is None:
+        return tuple(range(int(nd)))
+    vals = sorted({int(v) for v in currents if 0 <= int(v) < int(nd)})
+    if not vals:
+        raise ValueError(f"Expected at least one current index in [0, {int(nd) - 1}]")
+    return tuple(vals)
+
+
+def _parse_current_indices_from_spec(spec: Mapping[str, Any]) -> Optional[Tuple[int, ...]]:
+    raw = None
+    for key in ("current_indices", "currents", "mus", "mu"):
+        if key in spec:
+            raw = spec.get(key)
+            break
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        toks = [t.strip() for t in raw.split(",") if t.strip()]
+        if not toks:
+            return None
+        return tuple(int(t) for t in toks)
+    if isinstance(raw, Sequence):
+        vals = tuple(int(v) for v in raw)
+        return vals if vals else None
+    return (int(raw),)
+
+
+def _build_threepoint_pairs(momenta: Sequence[int], pair_mode: str) -> Tuple[Tuple[int, int], ...]:
+    moms = tuple(int(v) for v in momenta)
+    mode = str(pair_mode).strip().lower()
+    if mode in ("all", "cartesian", "full"):
+        return tuple((int(pf), int(pi)) for pf in moms for pi in moms)
+    if mode in ("breit", "breit_frame", "symmetric"):
+        return tuple((int(p), -int(p)) for p in moms)
+    raise ValueError(f"Unsupported 3pt pair_mode: {pair_mode!r}")
+
+
 def _timeslice_site_indices_1d_spatial(lattice_shape: Sequence[int], time_slice: int) -> Tuple[np.ndarray, np.ndarray]:
     shp = tuple(int(v) for v in lattice_shape)
     if len(shp) != 2:
@@ -542,6 +608,87 @@ def _timeslice_propagator_from_dense_inverse_1d_spatial(
     _, source_sites = _timeslice_site_indices_1d_spatial(shp, source_time)
     block = g4[np.ix_(sink_sites, np.arange(nsc, dtype=np.int64), source_sites, np.arange(nsc, dtype=np.int64))]
     return np.asarray(np.transpose(block, (0, 2, 1, 3)))
+
+
+def _take_mu_links_np(u: np.ndarray, mu: int, layout: str) -> np.ndarray:
+    if str(layout) == "BMXYIJ":
+        return np.asarray(u[:, int(mu), ...])
+    return np.asarray(u[..., int(mu)])
+
+
+def _local_vector_triangle_from_timeslice_blocks(
+    block_xz: np.ndarray,
+    block_zy: np.ndarray,
+    block_yx: np.ndarray,
+    *,
+    gamma_left: np.ndarray,
+    gamma_mu: np.ndarray,
+) -> np.ndarray:
+    return np.asarray(
+        np.einsum(
+            "ab,xzbc,cd,zyde,ef,yxfa->xzy",
+            gamma_left,
+            block_xz,
+            gamma_mu,
+            block_zy,
+            gamma_left,
+            block_yx,
+            optimize=True,
+        )
+    )
+
+
+def _conserved_vector_triangle_from_timeslice_blocks_2d(
+    *,
+    block_xz: np.ndarray,
+    block_zy: np.ndarray,
+    block_yx: np.ndarray,
+    gamma_left: np.ndarray,
+    p_fwd: np.ndarray,
+    p_bwd: np.ndarray,
+    link_line: np.ndarray,
+    mu: int,
+    block_xz_shifted: Optional[np.ndarray] = None,
+    block_zy_shifted: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    if int(mu) == 0:
+        if block_xz_shifted is None:
+            block_xz_shifted = np.roll(np.asarray(block_xz), shift=-1, axis=1)
+        if block_zy_shifted is None:
+            block_zy_shifted = np.roll(np.asarray(block_zy), shift=-1, axis=0)
+    else:
+        if block_xz_shifted is None or block_zy_shifted is None:
+            raise ValueError("Temporal conserved-current contraction requires shifted-time blocks")
+
+    tri_fwd = np.asarray(
+        np.einsum(
+            "ab,xzbc,cd,zyde,ef,yxfa,z->xzy",
+            gamma_left,
+            block_xz,
+            p_fwd,
+            block_zy_shifted,
+            gamma_left,
+            block_yx,
+            np.asarray(link_line),
+            optimize=True,
+        )
+    )
+    tri_bwd = np.asarray(
+        np.einsum(
+            "ab,xzbc,cd,zyde,ef,yxfa,z->xzy",
+            gamma_left,
+            block_xz_shifted,
+            p_bwd,
+            block_zy,
+            gamma_left,
+            block_yx,
+            np.conjugate(np.asarray(link_line)),
+            optimize=True,
+        )
+    )
+    # Match the same connected-correlator sign convention used by the local
+    # current path: the Wilson point-split current enters as backward - forward.
+    return np.asarray(0.5 * (tri_bwd - tri_fwd))
 
 
 def _two_pion_i2_matrix_from_timeslice_propagator(
@@ -1215,6 +1362,18 @@ class PionTwoPointMeasurement:
         out["source_average"] = 1.0 if bool(self.source_average) else 0.0
         out["average_pm"] = 1.0 if bool(self.average_pm) else 0.0
         out.update(inv_info)
+        out["timing_inversion_step_sec"] = float(inv_info.get("inv_solve_total_sec_step", float("nan")))
+        out["timing_inversion_this_call_sec"] = float(inv_info.get("inv_solve_total_sec_this_call", float("nan")))
+        out["timing_propagator_build_sec"] = float(inv_info.get("inv_prop_build_wall_sec", float("nan")))
+        out["timing_contraction_sec"] = float(t2 - t1)
+        out["timing_contraction_per_momentum_sec"] = float((t2 - t1) / max(1, len(moms)))
+        if bool(self.source_average):
+            vol = int(np.prod(np.asarray(lattice_shape, dtype=np.int64)))
+            out["n_source_sites_effective"] = float(vol)
+            out["timing_contraction_per_source_site_sec"] = float((t2 - t1) / max(1, vol))
+        else:
+            out["n_source_sites_effective"] = 1.0
+            out["timing_contraction_per_source_site_sec"] = float(t2 - t1)
         out["wall_total_sec"] = float(t2 - t0)
         out["wall_after_prop_sec"] = float(t2 - t1)
         return out
@@ -1370,6 +1529,248 @@ class TwoPionI2MatrixMeasurement:
         if bool(self.include_full):
             out.update(_flatten_matrix_corr_momentum("full", full))
         out.update(inv_info)
+        out["timing_inversion_step_sec"] = float(inv_info.get("inv_solve_total_sec_step", float("nan")))
+        out["timing_inversion_this_call_sec"] = float(inv_info.get("inv_solve_total_sec_this_call", float("nan")))
+        out["timing_propagator_build_sec"] = float(inv_info.get("inv_prop_build_wall_sec", float("nan")))
+        out["timing_contraction_sec"] = float(t2 - t1)
+        out["timing_contraction_per_source_time_sec"] = float((t2 - t1) / max(1, len(source_times)))
+        out["timing_contraction_per_dt_sec"] = float((t2 - t1) / max(1, len(source_times) * lt))
+        out["wall_total_sec"] = float(t2 - t0)
+        out["wall_after_prop_sec"] = float(t2 - t1)
+        return out
+
+
+@dataclass
+class PionVectorThreePointMeasurement:
+    """Dense DD-independent pion 3pt function with a local vector-current insertion.
+
+    The implementation targets the 2D Schwinger-model workflow on (Lx, Lt)
+    lattices, uses the dense all-to-all inverse, and averages exactly over all
+    spatial source positions on a configurable set of source time slices.
+    """
+
+    every: int = 1
+    name: str = "pion_3pt_vector"
+    momenta: Tuple[int, ...] = (0, 1, 2)
+    pair_mode: str = "breit"  # breit | all
+    tseps: Tuple[int, ...] = (4, 5, 6, 7, 8)
+    current_indices: Optional[Tuple[int, ...]] = None
+    momentum_axis: int = 0
+    source_times: Optional[Tuple[int, ...]] = None
+    dense_max_dof: int = 4096
+    tau_margin: int = 1
+    channel_prefix: str = "c3"
+    current_kind: str = "local"
+
+    def run(self, q, theory, context: MeasurementContext) -> Mapping[str, float]:
+        t0 = time.perf_counter()
+        lattice_shape = _extract_lattice_shape_from_theory(theory)
+        if len(tuple(lattice_shape)) != 2:
+            raise ValueError(
+                f"{self.name} currently supports only 2D lattices (Lx, Lt) for Schwinger form factors; got {lattice_shape}"
+            )
+        if not hasattr(theory, "gamma"):
+            raise AttributeError(f"{self.name} requires a Wilson-fermion theory exposing gamma matrices")
+        current_kind = str(self.current_kind).strip().lower()
+        if current_kind not in ("local", "conserved"):
+            raise ValueError(f"{self.name} currently supports current_kind in {{'local','conserved'}}")
+
+        mom_axis = _coerce_momentum_axis(self.momentum_axis, lattice_shape)
+        if int(mom_axis) != 0:
+            raise ValueError(f"{self.name} currently requires mom_axis=0 on (Lx, Lt) lattices; got {mom_axis}")
+        lx, lt = int(lattice_shape[0]), int(lattice_shape[1])
+        moms = _coerce_momenta(self.momenta)
+        pairs = _build_threepoint_pairs(moms, self.pair_mode)
+        source_times = _coerce_source_times(self.source_times, lt)
+        if self.source_times is None:
+            source_times = tuple(range(lt))
+        if len(source_times) == 0:
+            raise ValueError(f"{self.name} requires at least one source time slice")
+        tseps = _coerce_tseps(self.tseps, lt)
+        tau_margin = max(0, int(self.tau_margin))
+        currents = _coerce_current_indices(self.current_indices, int(theory.gamma.shape[0]))
+
+        ns = int(theory.fermion_shape()[-2])
+        nc = int(theory.fermion_shape()[-1])
+        nsc = int(ns * nc)
+
+        ginv, inv_info = _full_dense_inverse(
+            q=q,
+            theory=theory,
+            context=context,
+            dense_max_dof=int(self.dense_max_dof),
+        )
+        t1 = time.perf_counter()
+
+        gam = np.asarray(theory.gamma)
+        g5 = np.asarray(gamma5(gam), dtype=gam.dtype)
+        eye_c = np.eye(int(nc), dtype=gam.dtype)
+        g5c = np.kron(g5, eye_c)
+        gamma_c = {int(mu): np.kron(np.asarray(gam[int(mu)], dtype=gam.dtype), eye_c) for mu in currents}
+        p_fwd = {
+            int(mu): np.kron(np.asarray(theory.wilson_r * theory.dirac.spin_eye - theory.gamma[int(mu)], dtype=gam.dtype), eye_c)
+            for mu in currents
+        }
+        p_bwd = {
+            int(mu): np.kron(np.asarray(theory.wilson_r * theory.dirac.spin_eye + theory.gamma[int(mu)], dtype=gam.dtype), eye_c)
+            for mu in currents
+        }
+        u_links = None
+        if current_kind == "conserved":
+            if hasattr(theory, "_links_with_fermion_bc"):
+                u_links = np.asarray(theory._links_with_fermion_bc(q))
+            else:
+                u_links = np.asarray(q)
+
+        xs = np.arange(lx, dtype=np.float64)
+        sink_phase = {int(pf): np.exp(-2j * np.pi * float(int(pf)) * xs / float(lx)) for pf, _ in pairs}
+        source_phase = {int(pi): np.exp(+2j * np.pi * float(int(pi)) * xs / float(lx)) for _, pi in pairs}
+        insert_phase = {}
+        for pf, pi in pairs:
+            qmom = float(int(pf) - int(pi))
+            base = np.exp(+2j * np.pi * qmom * xs / float(lx))
+            insert_phase[(int(pf), int(pi), "local")] = base
+            for mu in currents:
+                shift = 0.5 if (current_kind == "conserved" and int(mu) == int(mom_axis)) else 0.0
+                insert_phase[(int(pf), int(pi), int(mu))] = base * np.exp(+2j * np.pi * qmom * shift / float(lx))
+
+        out: Dict[str, float] = {}
+        out["n_pairs"] = float(len(pairs))
+        out["n_tseps"] = float(len(tseps))
+        out["n_source_times"] = float(len(source_times))
+        out["n_source_sites_effective"] = float(len(source_times) * lx)
+        out["mom_axis"] = float(int(mom_axis))
+        out["tau_margin"] = float(tau_margin)
+        out["current_kind_local"] = 1.0 if current_kind == "local" else 0.0
+        out["current_kind_conserved"] = 1.0 if current_kind == "conserved" else 0.0
+        for ip, (pf, pi) in enumerate(pairs):
+            out[f"pair_{int(ip)}_pf"] = float(int(pf))
+            out[f"pair_{int(ip)}_pi"] = float(int(pi))
+        for it, tsep in enumerate(tseps):
+            out[f"tsep_{int(it)}"] = float(int(tsep))
+        for imu, mu in enumerate(currents):
+            out[f"current_mu_{int(imu)}"] = float(int(mu))
+
+        contraction_calls = 0
+        tri_evals = 0
+        bs = int(ginv.shape[0])
+        for b in range(bs):
+            ginv_b = np.asarray(ginv[b])
+            u_links_b = None if u_links is None else np.asarray(u_links[b])
+            block_cache: Dict[Tuple[int, int], np.ndarray] = {}
+
+            def _get_block(tsink: int, tsource: int) -> np.ndarray:
+                key = (int(tsink) % lt, int(tsource) % lt)
+                cached = block_cache.get(key)
+                if cached is not None:
+                    return cached
+                block = _timeslice_propagator_from_dense_inverse_1d_spatial(
+                    ginv_b,
+                    lattice_shape=lattice_shape,
+                    ns=ns,
+                    nc=nc,
+                    source_time=int(key[1]),
+                    sink_time=int(key[0]),
+                )
+                block_cache[key] = np.asarray(block)
+                return block_cache[key]
+
+            for tsrc in source_times:
+                tsrc_i = int(tsrc)
+                for tsep in tseps:
+                    tsep_i = int(tsep)
+                    tsnk = int((tsrc_i + tsep_i) % lt)
+                    block_yx = _get_block(tsrc_i, tsnk)
+                    tau_lo = int(tau_margin)
+                    tau_hi = int(tsep_i) - int(tau_margin)
+                    if tau_hi < tau_lo:
+                        continue
+                    for tau in range(int(tau_lo), int(tau_hi) + 1):
+                        tins = int((tsrc_i + int(tau)) % lt)
+                        block_xz = _get_block(tsnk, tins)
+                        block_zy = _get_block(tins, tsrc_i)
+                        tri_local = None
+                        tri_evals += 1
+                        for mu in currents:
+                            if current_kind == "local":
+                                if tri_local is None:
+                                    tri_local = {}
+                                tri = tri_local.get(int(mu))
+                                if tri is None:
+                                    tri = _local_vector_triangle_from_timeslice_blocks(
+                                        block_xz,
+                                        block_zy,
+                                        block_yx,
+                                        gamma_left=g5c,
+                                        gamma_mu=gamma_c[int(mu)],
+                                    )
+                                    tri_local[int(mu)] = tri
+                            else:
+                                if u_links_b is None:
+                                    raise ValueError("Conserved-current measurement requires link data")
+                                u_mu = _take_mu_links_np(u_links_b[None, ...], int(mu), str(theory.layout))[0]
+                                if int(mu) == 0:
+                                    link_line = np.asarray(u_mu[:, int(tins)], dtype=np.complex128)
+                                    tri = _conserved_vector_triangle_from_timeslice_blocks_2d(
+                                        block_xz=block_xz,
+                                        block_zy=block_zy,
+                                        block_yx=block_yx,
+                                        gamma_left=g5c,
+                                        p_fwd=p_fwd[int(mu)],
+                                        p_bwd=p_bwd[int(mu)],
+                                        link_line=link_line,
+                                        mu=int(mu),
+                                    )
+                                else:
+                                    tins_p1 = int((int(tins) + 1) % lt)
+                                    block_xz_p = _get_block(tsnk, tins_p1)
+                                    block_zy_p = _get_block(tins_p1, tsrc_i)
+                                    link_line = np.asarray(u_mu[:, int(tins)], dtype=np.complex128)
+                                    tri = _conserved_vector_triangle_from_timeslice_blocks_2d(
+                                        block_xz=block_xz,
+                                        block_zy=block_zy,
+                                        block_yx=block_yx,
+                                        gamma_left=g5c,
+                                        p_fwd=p_fwd[int(mu)],
+                                        p_bwd=p_bwd[int(mu)],
+                                        link_line=link_line,
+                                        mu=int(mu),
+                                        block_xz_shifted=block_xz_p,
+                                        block_zy_shifted=block_zy_p,
+                                    )
+                            contraction_calls += 1
+                            for pf, pi in pairs:
+                                phase = (
+                                    sink_phase[int(pf)][:, None, None]
+                                    * (
+                                        insert_phase[(int(pf), int(pi), int(mu)) if current_kind == "conserved" else (int(pf), int(pi), "local")]
+                                    )[None, :, None]
+                                    * source_phase[int(pi)][None, None, :]
+                                )
+                                val = np.sum(tri * phase, dtype=np.complex128)
+                                key_base = (
+                                    f"{self.channel_prefix}_mu{int(mu)}_pf{int(pf)}_pi{int(pi)}_"
+                                    f"tsep{int(tsep_i)}_tau{int(tau)}"
+                                )
+                                out[f"{key_base}_re"] = out.get(f"{key_base}_re", 0.0) + float(np.real(val))
+                                out[f"{key_base}_im"] = out.get(f"{key_base}_im", 0.0) + float(np.imag(val))
+
+        norm = float(max(1, bs * len(source_times) * lx))
+        for key in list(out.keys()):
+            if key.endswith("_re") or key.endswith("_im"):
+                out[key] = float(out[key] / norm)
+
+        t2 = time.perf_counter()
+        out.update(inv_info)
+        out["timing_inversion_step_sec"] = float(inv_info.get("inv_solve_total_sec_step", float("nan")))
+        out["timing_inversion_this_call_sec"] = float(inv_info.get("inv_solve_total_sec_this_call", float("nan")))
+        out["timing_propagator_build_sec"] = float(inv_info.get("inv_prop_build_wall_sec", float("nan")))
+        out["timing_contraction_sec"] = float(t2 - t1)
+        out["timing_contraction_per_source_time_sec"] = float((t2 - t1) / max(1, len(source_times)))
+        out["timing_contraction_per_triangle_sec"] = float((t2 - t1) / max(1, tri_evals))
+        out["timing_contraction_per_current_triangle_sec"] = float((t2 - t1) / max(1, contraction_calls))
+        out["n_triangle_evals"] = float(tri_evals)
+        out["n_current_triangle_evals"] = float(contraction_calls)
         out["wall_total_sec"] = float(t2 - t0)
         out["wall_after_prop_sec"] = float(t2 - t1)
         return out
@@ -1944,6 +2345,36 @@ def build_inline_measurements(specs: List[Mapping[str, Any]]) -> List[InlineMeas
                     include_direct=bool(include_direct),
                     include_exchange=bool(include_exchange),
                     include_full=bool(include_full),
+                )
+            )
+            continue
+        if mtype in ("pion_3pt_vector", "pion3pt_vector", "pion_ff", "pion_form_factor"):
+            moms = _parse_momenta_from_spec(spec)
+            if len(tuple(moms)) < 1:
+                raise ValueError(f"Measurement[{idx}] requires at least one momentum for {mtype}")
+            mom_axis = int(spec.get("momentum_axis", spec.get("mom_axis", 0)))
+            dense_max_dof = int(spec.get("dense_max_dof", 4096))
+            source_times = _parse_source_times_from_spec(spec)
+            tseps = _parse_tseps_from_spec(spec)
+            currents = _parse_current_indices_from_spec(spec)
+            pair_mode = str(spec.get("pair_mode", "breit"))
+            tau_margin = int(spec.get("tau_margin", 1))
+            channel_prefix = str(spec.get("channel_prefix", spec.get("channel", "c3")))
+            current_kind = str(spec.get("current_kind", "local"))
+            out.append(
+                PionVectorThreePointMeasurement(
+                    every=every,
+                    name=(name or "pion_3pt_vector"),
+                    momenta=tuple(int(v) for v in moms),
+                    pair_mode=str(pair_mode),
+                    tseps=tuple(int(v) for v in (tseps if tseps is not None else (4, 5, 6, 7, 8))),
+                    current_indices=None if currents is None else tuple(int(v) for v in currents),
+                    momentum_axis=int(mom_axis),
+                    source_times=None if source_times is None else tuple(int(v) for v in source_times),
+                    dense_max_dof=int(dense_max_dof),
+                    tau_margin=int(tau_margin),
+                    channel_prefix=str(channel_prefix),
+                    current_kind=str(current_kind),
                 )
             )
             continue
