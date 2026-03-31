@@ -109,6 +109,84 @@ def _filter_channels(
     return sorted(out, key=lambda row: (row[0], row[1] - row[2], row[1], row[2], row[3]))
 
 
+def _safe_jk_covariance(jk: np.ndarray) -> np.ndarray:
+    arr = np.asarray(jk, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] < 2:
+        return np.full((arr.shape[-1], arr.shape[-1]), np.nan, dtype=np.float64)
+    return PV3._jackknife_covariance(arr)
+
+
+def _covariance_weighted_average(full_vals: np.ndarray, jk_vals: np.ndarray, cov_reg: float) -> Tuple[float, float]:
+    y = np.asarray(full_vals, dtype=np.float64).reshape(-1)
+    yjk = np.asarray(jk_vals, dtype=np.float64)
+    if y.size == 1:
+        return float(y[0]), float(PV3._scalar_jackknife_err(yjk[:, 0], float(y[0])))
+    cov = _safe_jk_covariance(yjk)
+    diag_mean = float(np.nanmean(np.diag(cov))) if np.all(np.isfinite(np.diag(cov))) else 1.0
+    cc = np.asarray(cov + float(cov_reg) * max(1.0, diag_mean) * np.eye(y.size), dtype=np.float64)
+    try:
+        winv = np.linalg.pinv(cc, rcond=1.0e-12)
+    except np.linalg.LinAlgError:
+        winv = np.eye(y.size, dtype=np.float64)
+    one = np.ones((y.size,), dtype=np.float64)
+    denom = float(one @ winv @ one)
+    if not np.isfinite(denom) or abs(denom) < 1.0e-14:
+        w = np.full((y.size,), 1.0 / float(y.size), dtype=np.float64)
+    else:
+        w = np.asarray((winv @ one) / denom, dtype=np.float64)
+    full = float(w @ y)
+    jk = np.asarray(yjk @ w, dtype=np.float64)
+    err = float(PV3._scalar_jackknife_err(jk, full))
+    return full, err
+
+
+def _group_results_by_q2_tsep(
+    results: Sequence[Mapping[str, object]],
+    *,
+    cov_reg: float,
+    q2_tol: float = 1.0e-12,
+) -> List[Dict[str, object]]:
+    grouped: Dict[Tuple[int, int], List[Mapping[str, object]]] = {}
+    for row in results:
+        if not bool(row.get("form_available", False)):
+            continue
+        q2 = float(row["q2_cont_like"])
+        tsep = int(row["tsep"])
+        q2_bin = int(round(q2 / float(q2_tol))) if float(q2_tol) > 0.0 else int(round(q2 * 1.0e12))
+        grouped.setdefault((q2_bin, tsep), []).append(row)
+
+    out: List[Dict[str, object]] = []
+    for (_, tsep), rows in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        q2 = float(rows[0]["q2_cont_like"])
+        rr_full = np.asarray([float(r["form_ratio"]) for r in rows], dtype=np.float64)
+        rr_jk = np.asarray([np.asarray(r["_form_ratio_jk"], dtype=np.float64) for r in rows], dtype=np.float64).T
+        rd_full = np.asarray([float(r["form_direct"]) for r in rows], dtype=np.float64)
+        rd_jk = np.asarray([np.asarray(r["_form_direct_jk"], dtype=np.float64) for r in rows], dtype=np.float64).T
+        avg_ratio, avg_ratio_err = _covariance_weighted_average(rr_full, rr_jk, cov_reg=float(cov_reg))
+        avg_direct, avg_direct_err = _covariance_weighted_average(rd_full, rd_jk, cov_reg=float(cov_reg))
+        out.append(
+            {
+                "q2_cont_like": float(q2),
+                "tsep": int(tsep),
+                "n_channels": int(len(rows)),
+                "channels": [
+                    {
+                        "mu": int(r["mu"]),
+                        "pf": int(r["pf"]),
+                        "pi": int(r["pi"]),
+                        "kinematic_prefactor_label": str(r["kinematic_prefactor_label"]),
+                    }
+                    for r in rows
+                ],
+                "form_ratio": float(avg_ratio),
+                "form_ratio_err": float(avg_ratio_err),
+                "form_direct": float(avg_direct),
+                "form_direct_err": float(avg_direct_err),
+            }
+        )
+    return out
+
+
 def _analyze_channel(
     *,
     payload: Mapping,
@@ -328,39 +406,51 @@ def _analyze_channel(
         int(plateau["support_idx_max"]),
     )
 
-    temporal_mu = PV3._temporal_mu_from_payload(payload)
-    is_temporal = int(mu) == int(temporal_mu)
+    kin_full, kin_label, is_temporal = PV3._kinematic_prefactor_1d(
+        payload,
+        mu=int(mu),
+        p_i=int(pi),
+        p_f=int(pf),
+        energy_i=float(p_i_res["energy"]),
+        energy_f=float(p_f_res["energy"]),
+    )
     form_ratio = float("nan")
     form_ratio_err = float("nan")
     form_direct = float("nan")
     form_direct_err = float("nan")
-    if is_temporal:
-        kin_full = float(p_i_res["energy"]) + float(p_f_res["energy"])
-        form_curve_full = np.full_like(ratio_comp_full, np.nan, dtype=np.float64)
-        form_curve_jk = np.full_like(ratio_comp_jk, np.nan, dtype=np.float64)
-        form_direct_jk = np.full_like(direct_comp_jk, np.nan, dtype=np.float64)
-        if kin_full != 0.0:
-            form_curve_full = ratio_comp_full / kin_full
+    form_curve_full = np.full_like(ratio_comp_full, np.nan, dtype=np.float64)
+    form_curve_jk = np.full_like(ratio_comp_jk, np.nan, dtype=np.float64)
+    form_direct_jk = np.full_like(direct_comp_jk, np.nan, dtype=np.float64)
+    form_ratio_jk_plateau = np.full((nb,), np.nan, dtype=np.float64)
+    form_direct_jk_plateau = np.full((nb,), np.nan, dtype=np.float64)
+    if abs(float(kin_full)) > 1.0e-14:
+        form_curve_full = ratio_comp_full / float(kin_full)
         for ib in range(nb):
-            kin_jk = float(np.asarray(p_i_res["jk_energy"], dtype=np.float64)[ib]) + float(np.asarray(p_f_res["jk_energy"], dtype=np.float64)[ib])
-            if kin_jk != 0.0:
+            if is_temporal:
+                kin_jk = float(np.asarray(p_i_res["jk_energy"], dtype=np.float64)[ib]) + float(np.asarray(p_f_res["jk_energy"], dtype=np.float64)[ib])
+            else:
+                kin_jk = float(kin_full)
+            if abs(float(kin_jk)) > 1.0e-14:
                 form_curve_jk[ib] = ratio_comp_jk[ib] / kin_jk
                 form_direct_jk[ib] = direct_comp_jk[ib] / kin_jk
-        if kin_full != 0.0:
-            form_ratio, form_ratio_err = PV3._plateau_from_weights(
-                form_curve_full,
-                form_curve_jk,
-                weights,
-                int(plateau["support_idx_min"]),
-                int(plateau["support_idx_max"]),
-            )
-            form_direct, form_direct_err = PV3._plateau_from_weights(
-                direct_comp_full / kin_full,
-                form_direct_jk,
-                weights,
-                int(plateau["support_idx_min"]),
-                int(plateau["support_idx_max"]),
-            )
+        form_ratio, form_ratio_err = PV3._plateau_from_weights(
+            form_curve_full,
+            form_curve_jk,
+            weights,
+            int(plateau["support_idx_min"]),
+            int(plateau["support_idx_max"]),
+        )
+        form_direct, form_direct_err = PV3._plateau_from_weights(
+            direct_comp_full / float(kin_full),
+            form_direct_jk,
+            weights,
+            int(plateau["support_idx_min"]),
+            int(plateau["support_idx_max"]),
+        )
+        i0 = int(plateau["support_idx_min"])
+        i1 = int(plateau["support_idx_max"]) + 1
+        form_ratio_jk_plateau = np.asarray(form_curve_jk[:, i0:i1] @ weights, dtype=np.float64)
+        form_direct_jk_plateau = np.asarray(form_direct_jk[:, i0:i1] @ weights, dtype=np.float64)
 
     lx = PV3._spatial_extent_from_payload(payload)
     qi = PV3._continuum_momentum_1d(int(pi), lx)
@@ -373,6 +463,10 @@ def _analyze_channel(
         "pi": int(pi),
         "tsep": int(tsep),
         "q2_cont_like": float(q2),
+        "is_temporal": bool(is_temporal),
+        "form_available": bool(abs(float(kin_full)) > 1.0e-14),
+        "kinematic_prefactor": float(kin_full),
+        "kinematic_prefactor_label": str(kin_label),
         "n_common_samples": int(common_steps.size),
         "block_size": int(block_size),
         "plateau_tmin": float(plateau["tmin"]),
@@ -392,6 +486,8 @@ def _analyze_channel(
         "pion_energy_pf_err": float(p_f_res["energy_err"]),
         "block_meta": block_meta,
         "n_plateau_candidates": int(len(plateau_candidates)),
+        "_form_ratio_jk": np.asarray(form_ratio_jk_plateau, dtype=np.float64).tolist(),
+        "_form_direct_jk": np.asarray(form_direct_jk_plateau, dtype=np.float64).tolist(),
     }
 
 
@@ -402,7 +498,8 @@ def _setup_parser() -> argparse.ArgumentParser:
     ap.add_argument("--pion-channel", default="c")
     ap.add_argument("--threept-measurement", default="pion_3pt_vector")
     ap.add_argument("--threept-channel", default="c3")
-    ap.add_argument("--mu", type=int, default=-1, help="current index; <0 selects the temporal current")
+    ap.add_argument("--mu", type=int, default=-1, help="current index; <0 selects the temporal current unless --all-mus is set")
+    ap.add_argument("--all-mus", action="store_true", help="analyze all available current components")
     ap.add_argument("--pair-mode", default="breit", choices=("breit", "all"))
     ap.add_argument("--max-abs-p", type=int, default=99)
     ap.add_argument("--tsep-min", type=int, default=4)
@@ -504,12 +601,12 @@ def main() -> int:
             f"No 3pt channels found for measurement='{args.threept_measurement}' channel='{args.threept_channel}'"
         )
 
-    mu = None if int(args.mu) < 0 else int(args.mu)
-    if mu is None:
+    mu = None if bool(args.all_mus) else (None if int(args.mu) < 0 else int(args.mu))
+    if mu is None and (not bool(args.all_mus)):
         mu = int(PV3._temporal_mu_from_payload(payload))
     selected = _filter_channels(
         available,
-        mu=int(mu),
+        mu=None if mu is None else int(mu),
         tsep_min=int(args.tsep_min),
         tsep_max=int(args.tsep_max),
         pair_mode=str(args.pair_mode),
@@ -538,6 +635,12 @@ def main() -> int:
         )
         results.append(res)
 
+    serializable_results = [
+        {k: v for k, v in row.items() if not str(k).startswith("_")}
+        for row in results
+    ]
+    grouped_q2_tsep = _group_results_by_q2_tsep(results, cov_reg=float(args.cov_reg))
+
     summary = {
         "input": str(ckpt_path),
         "measurement_names": {
@@ -545,7 +648,8 @@ def main() -> int:
             "threept": str(args.threept_measurement),
         },
         "filters": {
-            "mu": int(mu),
+            "mu": None if mu is None else int(mu),
+            "all_mus": bool(args.all_mus),
             "pair_mode": str(args.pair_mode),
             "max_abs_p": int(args.max_abs_p),
             "tsep_min": int(args.tsep_min),
@@ -553,9 +657,10 @@ def main() -> int:
             "component": str(args.component),
             "zv": float(args.zv),
         },
-        "n_channels": int(len(results)),
-        "channels": results,
-        "charge_normalization": _charge_normalization_report(results),
+        "n_channels": int(len(serializable_results)),
+        "channels": serializable_results,
+        "grouped_q2_tsep": grouped_q2_tsep,
+        "charge_normalization": _charge_normalization_report(serializable_results),
     }
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, sort_keys=True)
@@ -564,24 +669,34 @@ def main() -> int:
     if plt is not None:
         fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.2))
         vals = np.asarray(
-            [r["form_ratio"] if np.isfinite(r["form_ratio"]) else r["matrix_ratio"] for r in results],
+            [r["form_ratio"] if np.isfinite(r["form_ratio"]) else r["matrix_ratio"] for r in serializable_results],
             dtype=np.float64,
         )
         errs = np.asarray(
-            [r["form_ratio_err"] if np.isfinite(r["form_ratio_err"]) else r["matrix_ratio_err"] for r in results],
+            [r["form_ratio_err"] if np.isfinite(r["form_ratio_err"]) else r["matrix_ratio_err"] for r in serializable_results],
             dtype=np.float64,
         )
-        q2s = np.asarray([r["q2_cont_like"] for r in results], dtype=np.float64)
-        tseps = np.asarray([r["tsep"] for r in results], dtype=np.float64)
+        q2s = np.asarray([r["q2_cont_like"] for r in serializable_results], dtype=np.float64)
+        tseps = np.asarray([r["tsep"] for r in serializable_results], dtype=np.float64)
         sc = axes[0].scatter(q2s, vals, c=tseps, cmap="viridis", s=42)
         axes[0].errorbar(q2s, vals, yerr=errs, fmt="none", ecolor="0.45", alpha=0.8, capsize=2.0)
         axes[0].set_xlabel(r"$Q^2$")
-        axes[0].set_ylabel("F_pi" if np.any(np.isfinite([r["form_ratio"] for r in results])) else "matrix element")
+        axes[0].set_ylabel("F_pi" if np.any(np.isfinite([r["form_ratio"] for r in serializable_results])) else "matrix element")
         axes[0].set_title("All analyzed channels")
         fig.colorbar(sc, ax=axes[0], label="tsep")
+        for grp in grouped_q2_tsep:
+            axes[0].errorbar(
+                [float(grp["q2_cont_like"])],
+                [float(grp["form_ratio"])],
+                yerr=[float(grp["form_ratio_err"])],
+                fmt="ks",
+                ms=5.0,
+                capsize=2.0,
+                alpha=0.9,
+            )
 
         grouped: Dict[Tuple[int, int], List[Dict[str, object]]] = {}
-        for row in results:
+        for row in serializable_results:
             grouped.setdefault((int(row["pf"]), int(row["pi"])), []).append(row)
         for (pf, pi), rows in sorted(grouped.items()):
             rows = sorted(rows, key=lambda r: int(r["tsep"]))
@@ -594,9 +709,20 @@ def main() -> int:
                 r["form_ratio_err"] if np.isfinite(r["form_ratio_err"]) else r["matrix_ratio_err"]
                 for r in rows
             ], dtype=np.float64)
-            axes[1].errorbar(x, y, yerr=yerr, marker="o", ms=4.0, capsize=2.0, label=f"pf={pf}, pi={pi}")
+            lab_mu = sorted({int(r["mu"]) for r in rows})
+            axes[1].errorbar(x, y, yerr=yerr, marker="o", ms=4.0, capsize=2.0, label=f"pf={pf}, pi={pi}, mu={lab_mu}")
+        for grp in grouped_q2_tsep:
+            axes[1].errorbar(
+                [float(grp["tsep"])],
+                [float(grp["form_ratio"])],
+                yerr=[float(grp["form_ratio_err"])],
+                fmt="ks",
+                ms=5.0,
+                capsize=2.0,
+                alpha=0.9,
+            )
         axes[1].set_xlabel("tsep")
-        axes[1].set_ylabel("F_pi" if np.any(np.isfinite([r["form_ratio"] for r in results])) else "matrix element")
+        axes[1].set_ylabel("F_pi" if np.any(np.isfinite([r["form_ratio"] for r in serializable_results])) else "matrix element")
         axes[1].set_title("Source-sink separation scan")
         axes[1].legend(loc="best", fontsize=8)
         fig.tight_layout()

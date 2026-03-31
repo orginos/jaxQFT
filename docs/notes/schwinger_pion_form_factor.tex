@@ -97,7 +97,7 @@ with the following choices:
   $p\in\{-2,-1,0,1,2\}$,
   \item dense pion three-point functions in Breit kinematics
   $(p_f,p_i)=(p,-p)$ for $p=0,1,2$,
-  \item temporal current only ($\mu=1$ in this 2D convention),
+  \item temporal current only in the example card ($\mu=1$ in this 2D convention),
   \item all source times, and all source-sink separations
   $t_{\rm sep}=4,5,\ldots,16$.
 \end{itemize}
@@ -124,14 +124,27 @@ Two analysis scripts are now available.
 \subsection{Single channel}
 \texttt{scripts/mcmc/analyze\_pion\_vector\_3pt.py} extracts one selected
 channel $(\mu,p_i,p_f,t_{\rm sep})$ at a time. It fits the two-point
-functions, removes the overlap factors, and performs a correlated plateau fit.
+functions, removes the overlap factors, performs a correlated plateau fit, and
+divides by the kinematic prefactor $(p_f+p_i)_\mu$ whenever that prefactor is
+nonzero. In the present 2D convention this means
+\begin{itemize}
+  \item $\mu=1$ (temporal): divide by $E_f+E_i$,
+  \item $\mu=0$ (spatial): divide by $p_f+p_i$.
+\end{itemize}
+Therefore the spatial current is useful for non-Breit kinematics, while it
+vanishes identically in the Breit frame.
 
 \subsection{Batch form-factor scan}
 \texttt{scripts/mcmc/analyze\_pion\_form\_factor.py} scans all matching
 channels in a checkpoint, runs the same blocked-jackknife extraction for each
 one, and summarizes the results in a JSON table together with a summary PNG.
 For the default 16\,$\times$\,32 card this means a scan over the available
-Breit-frame momentum transfers and all stored source-sink separations.
+Breit-frame momentum transfers and all stored source-sink separations. If the
+measurement was done with \texttt{pair\_mode = "all"} and both current
+components were stored, the batch script can additionally be run with
+\texttt{--all-mus}. In that mode it computes correlated averages of all channels
+that share the same $(Q^2,t_{\rm sep})$, so the spatial current contributes
+extra statistics whenever $p_f+p_i\neq 0$.
 
 \section{Statistics}
 The analysis is blocked and IAT-aware:

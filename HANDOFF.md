@@ -157,7 +157,20 @@ Last updated: 2026-03-31
         - fit `pion_2pt`
         - extract each `(mu, p_i, p_f, t_sep)` channel
         - compute the renormalized matrix element
-        - for the temporal current, convert it to `F_pi(Q^2)`
+        - whenever the kinematic prefactor is nonzero, convert it to `F_pi(Q^2)`
+      - current kinematic conventions:
+        - in the 2D Schwinger-model setup, `mu=1` is temporal and `mu=0` is spatial
+        - the single-channel script now uses:
+          - `E_f + E_i` for `mu=1`
+          - `p_f + p_i` for `mu=0`
+        - consequence:
+          - spatial-current channels are useful for `pair_mode = "all"` with `p_f + p_i != 0`
+          - in Breit kinematics they vanish and do not add information
+      - batch-analysis extension:
+        - `scripts/mcmc/analyze_pion_form_factor.py` now supports:
+          - `--all-mus`
+        - in that mode it analyzes all stored current components and builds correlated averages of all channels sharing the same `(Q^2, t_sep)`
+        - this is the intended path for gaining statistics from both `mu=0` and `mu=1` once the measurement card stores both currents and non-Breit momentum pairs
   - Run card:
     - new card:
       - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_form_factor.toml`
@@ -200,6 +213,31 @@ Last updated: 2026-03-31
     - conserved-analysis smoke:
       - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_form_factor.py --input /tmp/pion_form_factor_conserved_smoke.pkl --mu 1 --pair-mode breit --max-abs-p 1 --tsep-min 4 --tsep-max 4 --block-size 1 --pion-fit-range 1,3 --plateau-range 1,3 --prefix pion_form_factor_conserved_smoke --outdir /tmp --no-gui`
       - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_vector_3pt.py --input /tmp/pion_form_factor_conserved_smoke.pkl --mu 1 --pi -1 --pf 1 --tsep 4 --block-size 1 --pion-fit-range 1,3 --plateau-range 1,3 --prefix pion_vector_conserved_smoke --outdir /tmp --no-gui`
+    - spatial-current / all-mus exact synthetic validation (2026-03-31):
+      - built exact one-state checkpoint:
+        - `/tmp/pion_form_factor_mu01_exact.pkl`
+      - contents:
+        - `pion_2pt` at `p=0,1`
+        - `pion_3pt_vector` at the same non-Breit kinematics `(p_f,p_i)=(1,0), t_sep=8`
+        - both current components:
+          - `mu=1` with injected prefactor `(E_f+E_i) F`
+          - `mu=0` with injected prefactor `(p_f+p_i) F`
+        - injected form factor:
+          - `F_pi = 0.75`
+      - single-channel checks:
+        - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_vector_3pt.py --input /tmp/pion_form_factor_mu01_exact.pkl --mu 1 --pi 0 --pf 1 --tsep 8 --block-size 2 --pion-fit-range 2,6 --plateau-range 2,6 --prefix mu1_exact --outdir /tmp --no-gui`
+        - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_vector_3pt.py --input /tmp/pion_form_factor_mu01_exact.pkl --mu 0 --pi 0 --pf 1 --tsep 8 --block-size 2 --pion-fit-range 2,6 --plateau-range 2,6 --prefix mu0_exact --outdir /tmp --no-gui`
+        - recovered:
+          - `mu=1`: `F_pi = 0.750000000029`
+          - `mu=0`: `F_pi = 0.750000000045`
+      - batch all-current check:
+        - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_form_factor.py --input /tmp/pion_form_factor_mu01_exact.pkl --all-mus --pair-mode all --max-abs-p 1 --tsep-min 8 --tsep-max 8 --block-size 2 --pion-fit-range 2,6 --plateau-range 2,6 --prefix mu01_exact_batch --outdir /tmp --no-gui`
+        - grouped result:
+          - one `(Q^2, t_sep)` group with `n_channels = 2` (`mu=0` and `mu=1`)
+          - correlated grouped average:
+            - `F_pi = 0.750000000037`
+      - backward-compatibility check:
+        - without `--all-mus`, the batch analyzer still defaults to temporal-current-only selection for `mu < 0`
     - matched local-vs-conserved comparison on the same tiny dataset:
       - checkpoints:
         - `/tmp/pion_form_factor_compare_local.pkl`

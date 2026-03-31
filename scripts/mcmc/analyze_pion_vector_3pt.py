@@ -20,8 +20,8 @@ For one selected kinematic channel `(mu, p_i, p_f, t_sep)`, the script:
      - direct overlap removal from fitted `Z(p)`,
      - the standard 2pt/3pt ratio,
 4) selects a plateau window by correlated constant fits,
-5) reports the bare and renormalized matrix element, and, for the temporal
-   current, the pion form factor.
+5) reports the bare and renormalized matrix element, and, whenever the
+   kinematic prefactor is nonzero, the pion form factor.
 """
 
 from __future__ import annotations
@@ -808,6 +808,24 @@ def _continuum_momentum_1d(p: int, lx: int) -> float:
     return 2.0 * math.pi * float(int(p)) / float(int(max(1, lx)))
 
 
+def _kinematic_prefactor_1d(
+    payload: Mapping,
+    *,
+    mu: int,
+    p_i: int,
+    p_f: int,
+    energy_i: float,
+    energy_f: float,
+) -> Tuple[float, str, bool]:
+    temporal_mu = _temporal_mu_from_payload(payload)
+    if int(mu) == int(temporal_mu):
+        return float(energy_f + energy_i), "E_f+E_i", True
+    lx = _spatial_extent_from_payload(payload)
+    qi = _continuum_momentum_1d(int(p_i), lx)
+    qf = _continuum_momentum_1d(int(p_f), lx)
+    return float(qf + qi), "p_f+p_i", False
+
+
 def _setup_matplotlib(no_gui: bool):
     if "MPLCONFIGDIR" not in os.environ:
         mpldir = Path(tempfile.gettempdir()) / f"mplconfig_{os.getuid()}"
@@ -1106,8 +1124,14 @@ def main() -> int:
         int(plateau["support_idx_max"]),
     )
 
-    temporal_mu = _temporal_mu_from_payload(payload)
-    is_temporal = int(args.mu) == int(temporal_mu)
+    kin_full, kin_label, is_temporal = _kinematic_prefactor_1d(
+        payload,
+        mu=int(args.mu),
+        p_i=int(args.pi),
+        p_f=int(args.pf),
+        energy_i=float(p_i_res["energy"]),
+        energy_f=float(p_f_res["energy"]),
+    )
     form_ratio = float("nan")
     form_ratio_err = float("nan")
     form_direct = float("nan")
@@ -1115,30 +1139,30 @@ def main() -> int:
     form_curve_full = np.full_like(ratio_comp_full, np.nan, dtype=np.float64)
     form_curve_jk = np.full_like(ratio_comp_jk, np.nan, dtype=np.float64)
     form_direct_jk = np.full_like(direct_comp_jk, np.nan, dtype=np.float64)
-    if is_temporal:
-        kin_full = float(p_i_res["energy"]) + float(p_f_res["energy"])
-        if kin_full != 0.0:
-            form_curve_full = ratio_comp_full / kin_full
+    if abs(float(kin_full)) > 1.0e-14:
+        form_curve_full = ratio_comp_full / float(kin_full)
         for ib in range(nb):
-            kin_jk = float(np.asarray(p_i_res["jk_energy"], dtype=np.float64)[ib]) + float(np.asarray(p_f_res["jk_energy"], dtype=np.float64)[ib])  # type: ignore[index]
-            if kin_jk != 0.0:
+            if is_temporal:
+                kin_jk = float(np.asarray(p_i_res["jk_energy"], dtype=np.float64)[ib]) + float(np.asarray(p_f_res["jk_energy"], dtype=np.float64)[ib])  # type: ignore[index]
+            else:
+                kin_jk = float(kin_full)
+            if abs(float(kin_jk)) > 1.0e-14:
                 form_curve_jk[ib] = ratio_comp_jk[ib] / kin_jk
                 form_direct_jk[ib] = direct_comp_jk[ib] / kin_jk
-        if kin_full != 0.0:
-            form_ratio, form_ratio_err = _plateau_from_weights(
-                form_curve_full,
-                form_curve_jk,
-                weights,
-                int(plateau["support_idx_min"]),
-                int(plateau["support_idx_max"]),
-            )
-            form_direct, form_direct_err = _plateau_from_weights(
-                direct_comp_full / kin_full,
-                form_direct_jk,
-                weights,
-                int(plateau["support_idx_min"]),
-                int(plateau["support_idx_max"]),
-            )
+        form_ratio, form_ratio_err = _plateau_from_weights(
+            form_curve_full,
+            form_curve_jk,
+            weights,
+            int(plateau["support_idx_min"]),
+            int(plateau["support_idx_max"]),
+        )
+        form_direct, form_direct_err = _plateau_from_weights(
+            direct_comp_full / float(kin_full),
+            form_direct_jk,
+            weights,
+            int(plateau["support_idx_min"]),
+            int(plateau["support_idx_max"]),
+        )
 
     lx = _spatial_extent_from_payload(payload)
     qi = _continuum_momentum_1d(int(args.pi), lx)
@@ -1153,13 +1177,16 @@ def main() -> int:
         },
         "kinematics": {
             "mu": int(args.mu),
-            "temporal_mu": int(temporal_mu),
+            "temporal_mu": int(_temporal_mu_from_payload(payload)),
             "is_temporal": bool(is_temporal),
             "pi": int(args.pi),
             "pf": int(args.pf),
             "tsep": int(args.tsep),
             "spatial_extent": int(lx),
             "q2_cont_like": float(q2),
+            "kinematic_prefactor": float(kin_full),
+            "kinematic_prefactor_label": str(kin_label),
+            "form_factor_available": bool(abs(float(kin_full)) > 1.0e-14),
         },
         "statistics": {
             "n_common_samples": int(common_steps.size),
@@ -1202,6 +1229,9 @@ def main() -> int:
             "direct_err": float(matrix_direct_err),
         },
         "form_factor": {
+            "available": bool(abs(float(kin_full)) > 1.0e-14),
+            "kinematic_prefactor": float(kin_full),
+            "kinematic_prefactor_label": str(kin_label),
             "ratio_value": float(form_ratio),
             "ratio_err": float(form_ratio_err),
             "direct_value": float(form_direct),
@@ -1215,7 +1245,7 @@ def main() -> int:
             "matrix_direct_err": np.sqrt(np.clip(np.diag(_jackknife_covariance(direct_comp_jk)), 0.0, np.inf)).tolist(),
             "form_ratio_mean": np.asarray(form_curve_full, dtype=np.float64).tolist(),
             "form_ratio_err": np.sqrt(np.clip(np.diag(_jackknife_covariance(form_curve_jk)), 0.0, np.inf)).tolist()
-            if is_temporal
+            if abs(float(kin_full)) > 1.0e-14
             else [],
         },
     }
@@ -1236,7 +1266,8 @@ def main() -> int:
 
     plt = _setup_matplotlib(bool(args.no_gui))
     if plt is not None:
-        nrow = 2 if is_temporal else 1
+        form_available = abs(float(kin_full)) > 1.0e-14
+        nrow = 2 if form_available else 1
         fig, axes = plt.subplots(nrow, 1, figsize=(9.0, 3.6 * nrow), sharex=True)
         if not isinstance(axes, np.ndarray):
             axes = np.asarray([axes])
@@ -1281,7 +1312,7 @@ def main() -> int:
             f"ZV={float(args.zv):.6g}"
         )
         ax0.legend(loc="best", fontsize=9)
-        if is_temporal:
+        if form_available:
             ax1 = axes[1]
             ax1.errorbar(
                 x,
@@ -1290,7 +1321,7 @@ def main() -> int:
                 fmt="o",
                 ms=4.0,
                 capsize=2.0,
-                label="ratio / (Ef+Ei)",
+                label=f"ratio / ({kin_label})",
             )
             ax1.axvspan(float(plateau["tmin"]) - 0.5, float(plateau["tmax"]) + 0.5, color="0.92", zorder=-10)
             ax1.axhspan(
@@ -1301,6 +1332,7 @@ def main() -> int:
             )
             ax1.axhline(float(form_ratio), color="tab:green", lw=1.2, label="form-factor plateau")
             ax1.set_ylabel("F")
+            ax1.set_title(f"Form factor via {kin_label}")
             ax1.legend(loc="best", fontsize=9)
         axes[-1].set_xlabel("tau")
         fig.tight_layout()
