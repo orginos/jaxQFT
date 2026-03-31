@@ -1,0 +1,119 @@
+control_version = 1
+
+[run]
+theory_family = "u1"
+theory = "u1_wilson_nf2"
+seed = 20260331
+shape = [4, 8]
+batch = 1
+layout = "BMXYIJ"
+exp_method = "u1"
+hot_start_scale = 0.35
+
+[physics]
+beta = 4.0
+mass = 0.1739130435
+r = 1.0
+fermion_bc = "antiperiodic-t"
+
+[solver]
+kind = "cg"
+form = "normal"
+use_solver_guess = false
+guess_mode = "last"
+guess_history = 1
+tol = 1e-8
+maxiter = 1000
+preconditioner = "none"
+gmres_restart = 32
+gmres_solve_method = "batched"
+
+[monomials]
+include_gauge = true
+include_fermion = false
+fermion_kind = "eo_preconditioned"
+gauge_timescale = 0
+fermion_timescale = 1
+pf_refresh = "heatbath"
+pf_force_mode = "analytic"
+pf_gamma = 0.3
+
+[update]
+algorithm = "hmc"
+integrator = "minnorm2"
+tau = 1.0
+nmd = 4
+smd_gamma = 0.3
+smd_accept_reject = true
+
+[[measurements.inline]]
+type = "plaquette"
+name = "plaquette"
+every = 1
+
+[[measurements.inline]]
+type = "pion_2pt"
+name = "pion_2pt"
+every = 1
+source = [0, 0]
+momenta = [0, 1]
+mom_axis = 0
+average_pm = true
+propagator_backend = "dense"
+dense_max_dof = 128
+source_average = true
+
+[[measurements.inline]]
+type = "eta_2pt"
+name = "eta_2pt"
+every = 1
+source = [0, 0]
+momenta = [0, 1]
+mom_axis = 0
+dense_max_dof = 128
+source_average = true
+n_flavor = 2
+include_connected = true
+include_full = true
+
+[[measurements.inline]]
+type = "pipi_i2_matrix"
+name = "pipi_i2_matrix"
+every = 1
+momenta = [0, 1]
+mom_axis = 0
+source_times = [0, 4]
+dense_max_dof = 128
+include_direct = true
+include_exchange = true
+include_full = true
+
+[[measurements.inline]]
+type = "pion_3pt_vector"
+name = "pion_3pt_local"
+every = 1
+momenta = [0, 1]
+pair_mode = "breit"
+current_indices = [1]
+tseps = [4]
+source_times = [0, 4]
+mom_axis = 0
+dense_max_dof = 128
+tau_margin = 1
+channel_prefix = "c3"
+current_kind = "local"
+
+[[measurements.inline]]
+type = "pion_3pt_vector"
+name = "pion_3pt_conserved"
+every = 1
+momenta = [0, 1]
+pair_mode = "breit"
+current_indices = [1]
+tseps = [4]
+source_times = [0, 4]
+mom_axis = 0
+dense_max_dof = 128
+tau_margin = 1
+channel_prefix = "c3"
+current_kind = "conserved"

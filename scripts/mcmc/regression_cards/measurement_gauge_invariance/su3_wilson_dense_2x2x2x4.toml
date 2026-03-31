@@ -1,0 +1,86 @@
+control_version = 1
+
+[run]
+theory_family = "su3"
+theory = "su3_wilson_nf2"
+seed = 20260331
+shape = [2, 2, 2, 4]
+batch = 1
+layout = "BMXYIJ"
+exp_method = "su3"
+hot_start_scale = 0.20
+
+[physics]
+beta = 5.6
+mass = 0.2
+r = 1.0
+fermion_bc = "antiperiodic-t"
+
+[solver]
+kind = "cg"
+form = "normal"
+use_solver_guess = false
+guess_mode = "last"
+guess_history = 1
+tol = 1e-8
+maxiter = 500
+preconditioner = "none"
+gmres_restart = 32
+gmres_solve_method = "batched"
+
+[monomials]
+include_gauge = true
+include_fermion = false
+fermion_kind = "eo_preconditioned"
+gauge_timescale = 0
+fermion_timescale = 1
+pf_refresh = "heatbath"
+pf_force_mode = "analytic"
+pf_gamma = 0.3
+
+[update]
+algorithm = "hmc"
+integrator = "minnorm2"
+tau = 1.0
+nmd = 4
+smd_gamma = 0.3
+smd_accept_reject = true
+
+[[measurements.inline]]
+type = "plaquette"
+name = "plaquette"
+every = 1
+
+[[measurements.inline]]
+type = "pion_2pt"
+name = "pion_2pt"
+every = 1
+source = [0, 0, 0, 0]
+momenta = [0, 1]
+mom_axis = 0
+average_pm = true
+propagator_backend = "dense"
+dense_max_dof = 512
+source_average = true
+
+[[measurements.inline]]
+type = "eta_2pt"
+name = "eta_2pt"
+every = 1
+source = [0, 0, 0, 0]
+momenta = [0, 1]
+mom_axis = 0
+dense_max_dof = 512
+source_average = true
+n_flavor = 2
+include_connected = true
+include_full = true
+
+[[measurements.inline]]
+type = "proton_2pt"
+name = "proton_2pt"
+every = 1
+source = [0, 0, 0, 0]
+parity = "+"
+propagator_backend = "dense"
+dense_max_dof = 512

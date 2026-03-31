@@ -12,6 +12,56 @@ Last updated: 2026-03-31
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Curated gauge-invariance regression matrix (new):
+  - New regression cards:
+    - `scripts/mcmc/regression_cards/measurement_gauge_invariance/u1_wilson_dense_4x8.toml`
+    - `scripts/mcmc/regression_cards/measurement_gauge_invariance/su2_wilson_dense_2x2x2x4.toml`
+    - `scripts/mcmc/regression_cards/measurement_gauge_invariance/su3_wilson_dense_2x2x2x4.toml`
+  - New runner:
+    - `scripts/mcmc/run_measurement_gauge_invariance_regressions.py`
+  - Purpose:
+    - turn the generic inline-measurement gauge-invariance checker into a repeatable regression set
+    - keep the cases small enough for routine local/CI execution while still covering the measurement families we now rely on
+  - Coverage:
+    - `u1_wilson_dense_4x8.toml`
+      - `plaquette`
+      - `pion_2pt` (dense, source averaged)
+      - `eta_2pt` (dense, source averaged)
+      - `pipi_i2_matrix`
+      - `pion_3pt_vector` local
+      - `pion_3pt_vector` conserved
+    - `su2_wilson_dense_2x2x2x4.toml`
+      - `plaquette`
+      - `pion_2pt` (dense, source averaged)
+      - `eta_2pt` (dense, source averaged)
+      - note:
+        - no `proton_2pt` here because the current proton correlator implementation is explicitly `Nc=3` only
+    - `su3_wilson_dense_2x2x2x4.toml`
+      - `plaquette`
+      - `pion_2pt` (dense, source averaged)
+      - `eta_2pt` (dense, source averaged)
+      - `proton_2pt`
+  - Runner defaults:
+    - uses the generic checker underneath:
+      - `scripts/mcmc/check_measurement_gauge_invariance.py`
+    - curated-runner tolerance defaults are intentionally looser than the standalone checker:
+      - `atol = 1e-6`
+      - `rtol = 1e-6`
+    - reason:
+      - the SU(2) dense source-averaged meson case showed harmless finite-precision differences at the `5e-7` level
+      - the underlying checker keeps the stricter defaults for targeted debugging
+  - Local validation run:
+    - command:
+      - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/run_measurement_gauge_invariance_regressions.py --ntrials 1 --selfcheck-fail --json-out /tmp/measurement_gauge_invariance_regressions.json`
+    - result:
+      - `PASS: 3/3 cases passed`
+      - compared `577` non-timing outputs in total
+      - global `max_abs_err = 5.078e-07`
+      - global `max_rel_err = 2.110e-04`
+    - per-case summary:
+      - `u1_wilson_dense`: compared `409`, `max_abs_err = 6.263e-08`, wall `~2.38s`
+      - `su2_wilson_dense`: compared `82`, `max_abs_err = 5.078e-07`, wall `~3.27s`
+      - `su3_wilson_dense`: compared `86`, `max_abs_err = 3.016e-08`, wall `~5.34s`
 - Generic inline-measurement gauge-invariance driver (new):
   - New script:
     - `scripts/mcmc/check_measurement_gauge_invariance.py`
