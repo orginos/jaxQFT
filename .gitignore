@@ -38,6 +38,8 @@ env/
 *.aux
 *.log
 *.toc
+*.out
+*.synctex.gz
 
 # CLAUDE
 .claude/
