@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-03-31
+Last updated: 2026-04-01
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -255,6 +255,17 @@ Last updated: 2026-03-31
             - batch analysis now constructs one common MCMC-step set across all selected channels
             - if `--block-size <= 0`, it auto-picks a single global block size from the selected channel set
             - all grouped covariance-weighted averages now validate replica-length consistency explicitly
+        - grouped excited-fit robustness fix (2026-04-01):
+          - root cause of the remaining 16x64 batch failure:
+            - the reduced `Q^2` excited-state fit used the ratio estimator to choose a `t_sep` window and then assumed the direct-`Z` estimator would always fit on that same window
+            - for some momentum groups this was false, so `_fit_tsep_one_exp_jk(...)` raised `ValueError("full one-exp fit unexpectedly failed on selected window")` and aborted the whole analysis
+          - fix:
+            - the ratio fit remains the primary reduced result
+            - if the direct estimator fails on the ratio-selected window, the batch analysis now records `direct_fit.fit_failed = true` with a failure reason and continues instead of aborting
+          - relevant code:
+            - `scripts/mcmc/analyze_pion_form_factor.py`
+              - `_nan_tsep_one_exp_fit_result(...)`
+              - `_fit_grouped_q2_excited_state(...)`
           - relevant code:
             - `scripts/mcmc/analyze_pion_form_factor.py`
               - `_prepare_batch_common_steps_and_block_size(...)`
