@@ -172,6 +172,114 @@ def _covariance_weighted_average_with_jk(
     return full, err, jk
 
 
+def _extract_required_momenta(chans: Sequence[Tuple[int, int, int, int]]) -> List[int]:
+    moms = sorted({int(pf) for _, pf, _, _ in chans} | {int(pi) for _, _, pi, _ in chans})
+    return [int(p) for p in moms]
+
+
+def _align_samples_to_steps(samples: np.ndarray, steps: Sequence[int], target_steps: Sequence[int]) -> np.ndarray:
+    arr = np.asarray(samples)
+    st = np.asarray(steps, dtype=np.int64)
+    tgt = np.asarray(target_steps, dtype=np.int64)
+    idx = {int(s): i for i, s in enumerate(st.tolist())}
+    missing = [int(s) for s in tgt.tolist() if int(s) not in idx]
+    if missing:
+        raise ValueError(f"Target common-step set is not contained in available steps; missing={missing[:8]}")
+    return np.asarray([arr[idx[int(s)]] for s in tgt], dtype=arr.dtype)
+
+
+def _stack_group_jk(rows: Sequence[Mapping[str, object]], key: str, *, context: str) -> np.ndarray:
+    seqs = [np.asarray(r[key], dtype=np.float64) for r in rows]
+    lens = sorted({int(v.shape[0]) for v in seqs})
+    if len(lens) != 1:
+        desc = ", ".join(
+            f"mu={int(r['mu'])},pf={int(r['pf'])},pi={int(r['pi'])},tsep={int(r['tsep'])},nb={int(np.asarray(r[key]).shape[0])}"
+            for r in rows
+        )
+        raise ValueError(
+            f"Inconsistent jackknife replica counts while grouping {context}: lengths={lens}; channels=[{desc}]. "
+            "The batch analyzer should enforce a common step set and common block size; rerun with the patched analyzer."
+        )
+    return np.asarray(seqs, dtype=np.float64).T
+
+
+def _prepare_batch_common_steps_and_block_size(
+    *,
+    payload: Mapping,
+    records: Sequence[Mapping],
+    selected: Sequence[Tuple[int, int, int, int]],
+    pion_samples_by_p: Mapping[int, np.ndarray],
+    pion_steps_by_p: Mapping[int, np.ndarray],
+    pion_meta_by_p: Mapping[int, Mapping[str, object]],
+    args,
+) -> Tuple[np.ndarray, int, Dict[Tuple[int, int, int, int], Tuple[np.ndarray, np.ndarray, Dict[str, object]]]]:
+    required_momenta = _extract_required_momenta(selected)
+    common = None
+    for p in required_momenta:
+        st = set(int(s) for s in np.asarray(pion_steps_by_p[int(p)], dtype=np.int64).tolist())
+        common = st if common is None else (common & st)
+    if common is None:
+        raise ValueError("No required pion momenta were found while preparing batch common steps")
+
+    three_cache: Dict[Tuple[int, int, int, int], Tuple[np.ndarray, np.ndarray, Dict[str, object]]] = {}
+    for cur_mu, pf, pi, tsep in selected:
+        three_samples, three_steps, three_meta = PV3._extract_threepoint_channel(
+            records,
+            measurement=str(args.threept_measurement),
+            channel=str(args.threept_channel),
+            mu=int(cur_mu),
+            p_i=int(pi),
+            p_f=int(pf),
+            t_sep=int(tsep),
+        )
+        three_cache[(int(cur_mu), int(pf), int(pi), int(tsep))] = (three_samples, three_steps, three_meta)
+        common &= set(int(s) for s in np.asarray(three_steps, dtype=np.int64).tolist())
+
+    if not common:
+        raise ValueError("No common MCMC steps remain across the selected pion and 3pt channels")
+
+    steps = np.asarray(sorted(common), dtype=np.int64)
+    keep = np.arange(int(steps.size), dtype=np.int64)[max(0, int(args.discard)) :: max(1, int(args.stride))]
+    steps = np.asarray(steps[keep], dtype=np.int64)
+    if steps.size < 4:
+        raise ValueError(f"Need at least 4 common samples after batch discard/stride; got {int(steps.size)}")
+
+    if int(args.block_size) > 0:
+        return steps, int(args.block_size), three_cache
+
+    aligned_pions = {
+        int(p): _align_samples_to_steps(
+            np.asarray(pion_samples_by_p[int(p)], dtype=np.float64),
+            np.asarray(pion_steps_by_p[int(p)], dtype=np.int64),
+            steps,
+        )
+        for p in required_momenta
+    }
+    iat_max_lag = None if int(args.iat_max_lag) <= 0 else int(args.iat_max_lag)
+    global_block_size = 1
+    for cur_mu, pf, pi, tsep in selected:
+        three_samples, three_steps, three_meta = three_cache[(int(cur_mu), int(pf), int(pi), int(tsep))]
+        three_aligned = _align_samples_to_steps(three_samples, three_steps, steps)
+        support_taus = np.asarray(three_meta["support_taus"], dtype=np.int64)
+        resolved_component, _, _ = PV3._resolve_analysis_component(
+            payload,
+            mu=int(cur_mu),
+            component=str(args.component),
+        )
+        block_size, _ = PV3._choose_joint_block_size(
+            {int(p): aligned_pions[int(p)] for p in sorted({int(pi), int(pf)})},
+            three_aligned,
+            support_taus=support_taus,
+            tau_ref=max(1, min(int(tsep) // 2, int(tsep) - 1)),
+            iat_method=str(args.iat_method),
+            iat_c=float(args.iat_c),
+            iat_max_lag=iat_max_lag,
+            component=str(resolved_component),
+        )
+        global_block_size = max(int(global_block_size), int(block_size))
+    return steps, int(global_block_size), three_cache
+
+
 def _group_results_by_q2_tsep(
     results: Sequence[Mapping[str, object]],
     *,
@@ -191,9 +299,9 @@ def _group_results_by_q2_tsep(
     for (_, tsep), rows in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
         q2 = float(rows[0]["q2_cont_like"])
         rr_full = np.asarray([float(r["form_ratio"]) for r in rows], dtype=np.float64)
-        rr_jk = np.asarray([np.asarray(r["_form_ratio_jk"], dtype=np.float64) for r in rows], dtype=np.float64).T
+        rr_jk = _stack_group_jk(rows, "_form_ratio_jk", context=f"Q^2={q2:.8g}, tsep={int(tsep)} ratio")
         rd_full = np.asarray([float(r["form_direct"]) for r in rows], dtype=np.float64)
-        rd_jk = np.asarray([np.asarray(r["_form_direct_jk"], dtype=np.float64) for r in rows], dtype=np.float64).T
+        rd_jk = _stack_group_jk(rows, "_form_direct_jk", context=f"Q^2={q2:.8g}, tsep={int(tsep)} direct")
         avg_ratio, avg_ratio_err, avg_ratio_jk = _covariance_weighted_average_with_jk(
             rr_full, rr_jk, cov_reg=float(cov_reg)
         )
@@ -257,8 +365,8 @@ def _group_results_by_q2(
             continue
         ratio_full = np.asarray([float(r["form_ratio"]) for r in rows_fit], dtype=np.float64)
         direct_full = np.asarray([float(r["form_direct"]) for r in rows_fit], dtype=np.float64)
-        ratio_jk = np.asarray([np.asarray(r["_form_ratio_jk"], dtype=np.float64) for r in rows_fit], dtype=np.float64).T
-        direct_jk = np.asarray([np.asarray(r["_form_direct_jk"], dtype=np.float64) for r in rows_fit], dtype=np.float64).T
+        ratio_jk = _stack_group_jk(rows_fit, "_form_ratio_jk", context=f"late-tsep Q^2={q2:.8g} ratio")
+        direct_jk = _stack_group_jk(rows_fit, "_form_direct_jk", context=f"late-tsep Q^2={q2:.8g} direct")
 
         plateau_candidates: List[Dict[str, object]] = []
         if tseps.size == 1:
@@ -627,8 +735,8 @@ def _fit_grouped_q2_excited_state(
             continue
         ratio_full = np.asarray([float(r["form_ratio"]) for r in rows_fit], dtype=np.float64)
         direct_full = np.asarray([float(r["form_direct"]) for r in rows_fit], dtype=np.float64)
-        ratio_jk = np.asarray([np.asarray(r["_form_ratio_jk"], dtype=np.float64) for r in rows_fit], dtype=np.float64).T
-        direct_jk = np.asarray([np.asarray(r["_form_direct_jk"], dtype=np.float64) for r in rows_fit], dtype=np.float64).T
+        ratio_jk = _stack_group_jk(rows_fit, "_form_ratio_jk", context=f"excited-fit Q^2={q2:.8g} ratio")
+        direct_jk = _stack_group_jk(rows_fit, "_form_direct_jk", context=f"excited-fit Q^2={q2:.8g} direct")
 
         if tseps.size < max(4, int(tsep_fit_min_points)):
             continue
@@ -774,35 +882,54 @@ def _analyze_channel(
     pion_steps_by_p: Mapping[int, np.ndarray],
     pion_meta_by_p: Mapping[int, Mapping[str, object]],
     pion_fit_cache: Dict[Tuple[int, int, bytes], Dict[str, object]],
+    common_steps_override: Optional[np.ndarray],
+    block_size_override: Optional[int],
+    threepoint_cache: Optional[Dict[Tuple[int, int, int, int], Tuple[np.ndarray, np.ndarray, Dict[str, object]]]],
     mu: int,
     pi: int,
     pf: int,
     tsep: int,
     args,
 ) -> Dict[str, object]:
-    three_samples, three_steps, three_meta = PV3._extract_threepoint_channel(
-        records,
-        measurement=str(args.threept_measurement),
-        channel=str(args.threept_channel),
-        mu=int(mu),
-        p_i=int(pi),
-        p_f=int(pf),
-        t_sep=int(tsep),
-    )
-    pion_aligned, three_aligned, common_steps = PV3._align_common_steps(
-        pion_samples_by_p,
-        pion_steps_by_p,
-        required_momenta=(int(pi), int(pf)),
-        three_samples=three_samples,
-        three_steps=three_steps,
-    )
-    pion_aligned, three_aligned, common_steps = PV3._apply_common_discard_stride(
-        pion_aligned,
-        three_aligned,
-        common_steps,
-        discard=int(args.discard),
-        stride=int(args.stride),
-    )
+    cache_key_3pt = (int(mu), int(pf), int(pi), int(tsep))
+    if threepoint_cache is not None and cache_key_3pt in threepoint_cache:
+        three_samples, three_steps, three_meta = threepoint_cache[cache_key_3pt]
+    else:
+        three_samples, three_steps, three_meta = PV3._extract_threepoint_channel(
+            records,
+            measurement=str(args.threept_measurement),
+            channel=str(args.threept_channel),
+            mu=int(mu),
+            p_i=int(pi),
+            p_f=int(pf),
+            t_sep=int(tsep),
+        )
+    if common_steps_override is None:
+        pion_aligned, three_aligned, common_steps = PV3._align_common_steps(
+            pion_samples_by_p,
+            pion_steps_by_p,
+            required_momenta=(int(pi), int(pf)),
+            three_samples=three_samples,
+            three_steps=three_steps,
+        )
+        pion_aligned, three_aligned, common_steps = PV3._apply_common_discard_stride(
+            pion_aligned,
+            three_aligned,
+            common_steps,
+            discard=int(args.discard),
+            stride=int(args.stride),
+        )
+    else:
+        common_steps = np.asarray(common_steps_override, dtype=np.int64)
+        three_aligned = _align_samples_to_steps(three_samples, three_steps, common_steps)
+        pion_aligned = {
+            int(p): _align_samples_to_steps(
+                np.asarray(pion_samples_by_p[int(p)], dtype=np.float64),
+                np.asarray(pion_steps_by_p[int(p)], dtype=np.int64),
+                common_steps,
+            )
+            for p in sorted({int(pi), int(pf)})
+        }
     support_taus = np.asarray(three_meta["support_taus"], dtype=np.int64)
     iat_max_lag = None if int(args.iat_max_lag) <= 0 else int(args.iat_max_lag)
     resolved_component, resolved_sign, resolved_label = PV3._resolve_analysis_component(
@@ -811,7 +938,15 @@ def _analyze_channel(
         component=str(args.component),
     )
 
-    if int(args.block_size) > 0:
+    if block_size_override is not None:
+        block_size = int(block_size_override)
+        block_meta = {
+            "pion_tau_ref": float("nan"),
+            "pion_block_auto": float("nan"),
+            "threept_tau_ref": float("nan"),
+            "threept_block_auto": float("nan"),
+        }
+    elif int(args.block_size) > 0:
         block_size = int(args.block_size)
         block_meta = {
             "pion_tau_ref": float("nan"),
@@ -1261,6 +1396,20 @@ def main() -> int:
     if not selected:
         raise ValueError("No 3pt channels remain after filtering")
 
+    batch_common_steps, batch_block_size, threepoint_cache = _prepare_batch_common_steps_and_block_size(
+        payload=payload,
+        records=records,
+        selected=selected,
+        pion_samples_by_p=pion_samples_by_p,
+        pion_steps_by_p=pion_steps_by_p,
+        pion_meta_by_p=pion_meta_by_p,
+        args=args,
+    )
+    print(
+        f"[batch] common_samples={int(batch_common_steps.size)} block_size={int(batch_block_size)}",
+        flush=True,
+    )
+
     tsep_max_safe = None
     if bool(args.tsep_auto_thermal_cut):
         tsep_max_safe = _default_tsep_max_safe(
@@ -1283,6 +1432,9 @@ def main() -> int:
             pion_steps_by_p=pion_steps_by_p,
             pion_meta_by_p=pion_meta_by_p,
             pion_fit_cache=pion_fit_cache,
+            common_steps_override=batch_common_steps,
+            block_size_override=batch_block_size,
+            threepoint_cache=threepoint_cache,
             mu=int(cur_mu),
             pi=int(pi),
             pf=int(pf),
@@ -1345,6 +1497,8 @@ def main() -> int:
             "tsep_auto_thermal_cut": bool(args.tsep_auto_thermal_cut),
             "tsep_thermal_margin": int(args.tsep_thermal_margin),
             "tsep_max_safe": None if tsep_max_safe is None else int(tsep_max_safe),
+            "batch_common_samples": int(batch_common_steps.size),
+            "batch_block_size": int(batch_block_size),
         },
         "analysis_notes": {
             "per_channel_methods": [

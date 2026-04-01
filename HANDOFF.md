@@ -247,6 +247,44 @@ Last updated: 2026-03-31
         - in that mode it analyzes all stored current components and builds correlated averages of all channels sharing the same `(Q^2, t_sep)`
         - this is the intended path for gaining statistics from both `mu=0` and `mu=1` once the measurement card stores both currents and non-Breit momentum pairs
         - `--pair-mode q2zero` restricts the scan to equal-momentum channels `p_f=p_i`, which is useful for focused `F_pi(Q^2=0)` checks
+        - batch jackknife consistency fix (2026-04-01):
+          - root cause of the 16x64 failure:
+            - the batch analyzer was allowing each channel to auto-pick its own block size and common-step set
+            - grouped `(Q^2,t_sep)` averages then saw incompatible jackknife replica lengths and crashed when stacking `_form_ratio_jk`
+          - fix:
+            - batch analysis now constructs one common MCMC-step set across all selected channels
+            - if `--block-size <= 0`, it auto-picks a single global block size from the selected channel set
+            - all grouped covariance-weighted averages now validate replica-length consistency explicitly
+          - relevant code:
+            - `scripts/mcmc/analyze_pion_form_factor.py`
+              - `_prepare_batch_common_steps_and_block_size(...)`
+              - `_stack_group_jk(...)`
+      - 16x64 `Q^2=0` check (2026-04-01):
+        - checkpoint:
+          - `runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x64_pion_form_factor_ckpt.pkl`
+        - cleanest Ward-identity channel:
+          - `mu=1, p_f=p_i=0`
+        - single-channel command example:
+          - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pion_vector_3pt.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x64_pion_form_factor_ckpt.pkl --mu 1 --pi 0 --pf 0 --tsep 16 --zv 1.0 --outdir /tmp/jaxqft_16x64_q20 --prefix p0_t16 --no-gui`
+        - result summary for `mu=1, p=0`:
+          - common samples: `2000`
+          - auto block size: `9`
+          - `tsep=10`: `F(0)=1.0722 +/- 0.0285`
+          - `tsep=12`: `F(0)=1.0550 +/- 0.0235`
+          - `tsep=14`: `F(0)=1.0490 +/- 0.0190`
+          - `tsep=16`: `F(0)=1.0405 +/- 0.0148`
+        - interpretation:
+          - with `T=64`, `tsep=16` is still far from the thermal midpoint `T/2=32`
+          - the clean zero-momentum temporal-current channel shows no late-time downturn up to `tsep=16`
+          - instead it approaches unity smoothly, which is the expected behavior if the dominant wrap-around contamination seen on shorter temporal extents has been reduced
+        - equal-momentum `p=1` spot checks:
+          - `mu=1, p=1, tsep=12`: `0.9816 +/- 0.0090`
+          - `mu=1, p=1, tsep=16`: `1.0282 +/- 0.0408`
+          - `mu=0, p=1, tsep=12`: `0.6733 +/- 0.0162`
+          - `mu=0, p=1, tsep=16`: `0.7870 +/- 0.0343`
+        - practical conclusion:
+          - for the `Q^2=0` sanity check, trust `mu=1, p=0` first
+          - the nonzero-momentum spatial-current channel still carries noticeably larger systematics / excited-state sensitivity
         - real-checkpoint `Q^2=0` check on the 16x32 local-current dataset:
           - command:
             - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pion_form_factor.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pion_form_factor_ckpt.pkl --all-mus --pair-mode q2zero --max-abs-p 2 --tsep-min 4 --tsep-max 16 --block-size 2 --zv 1.0 --prefix u1_pion_form_factor_q2zero_only --outdir runs/U1-example --no-gui`
