@@ -700,6 +700,44 @@ def _fit_tsep_one_exp_jk(
     }
 
 
+def _nan_tsep_one_exp_fit_result(
+    *,
+    support_times: np.ndarray,
+    idx_min: int,
+    idx_max: int,
+    reason: str,
+    n_fit_failures_jk: int = 0,
+) -> Dict[str, object]:
+    support = np.asarray(support_times, dtype=np.int64).reshape(-1)
+    fit_tseps = support[int(idx_min) : int(idx_max) + 1].astype(int).tolist()
+    return {
+        "full": {
+            "value": float("nan"),
+            "amplitude": float("nan"),
+            "gap": float("nan"),
+            "chi2": float("nan"),
+            "chi2_dof": float("nan"),
+            "dof": float("nan"),
+            "tmin": float(fit_tseps[0]) if fit_tseps else float("nan"),
+            "tmax": float(fit_tseps[-1]) if fit_tseps else float("nan"),
+            "npts": float(len(fit_tseps)),
+            "cov_reg_eps": float("nan"),
+            "support_idx_min": float(idx_min),
+            "support_idx_max": float(idx_max),
+            "fit_curve": [float("nan")] * len(fit_tseps),
+            "fit_failed": True,
+            "fit_failure_reason": str(reason),
+        },
+        "jk_value": np.full((0,), float("nan"), dtype=np.float64),
+        "jk_amplitude": np.full((0,), float("nan"), dtype=np.float64),
+        "jk_gap": np.full((0,), float("nan"), dtype=np.float64),
+        "n_fit_failures_jk": int(n_fit_failures_jk),
+        "value_err": float("nan"),
+        "amplitude_err": float("nan"),
+        "gap_err": float("nan"),
+    }
+
+
 def _fit_grouped_q2_excited_state(
     grouped_q2_tsep: Sequence[Mapping[str, object]],
     *,
@@ -794,18 +832,26 @@ def _fit_grouped_q2_excited_state(
             cov_reg=float(cov_reg),
             full_fit=ratio_fit,
         )
-        direct_with_jk = _fit_tsep_one_exp_jk(
-            direct_full,
-            direct_jk,
-            support_times=tseps,
-            idx_min=int(idx_min),
-            idx_max=int(idx_max),
-            gap_min=float(gap_min),
-            gap_max=float(gap_max),
-            gap_grid=int(gap_grid),
-            cov_reg=float(cov_reg),
-            full_fit=ratio_fit,
-        )
+        try:
+            direct_with_jk = _fit_tsep_one_exp_jk(
+                direct_full,
+                direct_jk,
+                support_times=tseps,
+                idx_min=int(idx_min),
+                idx_max=int(idx_max),
+                gap_min=float(gap_min),
+                gap_max=float(gap_max),
+                gap_grid=int(gap_grid),
+                cov_reg=float(cov_reg),
+                full_fit=ratio_fit,
+            )
+        except ValueError as exc:
+            direct_with_jk = _nan_tsep_one_exp_fit_result(
+                support_times=tseps,
+                idx_min=int(idx_min),
+                idx_max=int(idx_max),
+                reason=str(exc),
+            )
 
         row = {
             "q2_cont_like": float(q2),
@@ -845,6 +891,8 @@ def _fit_grouped_q2_excited_state(
                 "n_fit_failures_jk": int(direct_with_jk["n_fit_failures_jk"]),
                 "fit_tseps": tseps[idx_min : idx_max + 1].astype(int).tolist(),
                 "fit_curve": np.asarray(direct_with_jk["full"]["fit_curve"], dtype=np.float64).tolist(),
+                "fit_failed": bool(direct_with_jk["full"].get("fit_failed", False)),
+                "fit_failure_reason": None if not bool(direct_with_jk["full"].get("fit_failed", False)) else str(direct_with_jk["full"].get("fit_failure_reason", "")),
             },
             "per_tsep": [
                 {
