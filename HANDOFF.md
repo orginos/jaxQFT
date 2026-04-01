@@ -12,6 +12,75 @@ Last updated: 2026-03-31
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Two-pion `t0`-scan analysis for the Schwinger `I=2` GEVP (new):
+  - New script:
+    - `scripts/mcmc/analyze_pipi_i2_t0_scan.py`
+  - Purpose:
+    - scan a user-specified list of GEVP metric times `t0`
+    - keep a common fit window across the scan by default
+    - quantify level stability under `t0 -> t0+1`
+    - recommend the earliest `t0` whose first `N` levels are stable within a configurable sigma threshold
+  - Reuses the existing `pipi_i2_matrix` offline machinery:
+    - blocked jackknife / IAT-based block-size selection
+    - correlator extraction from `state.inline_records`
+    - GEVP solve and principal-correlator effective energies
+  - CLI highlights:
+    - `--input`
+    - `--measurement`
+    - `--channel`
+    - `--t0-list`
+    - `--levels`
+    - `--fit-range`
+    - `--stable-levels`
+    - `--stability-nsigma`
+    - `--outdir`
+    - `--prefix`
+  - Local validation:
+    - compile check:
+      - `python3 -m py_compile scripts/mcmc/analyze_pipi_i2_t0_scan.py`
+  - `16x32` scan result on
+    - `runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pipi_i2_spectrum_ckpt.pkl`
+    - command:
+      - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pipi_i2_t0_scan.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pipi_i2_spectrum_ckpt.pkl --measurement pipi_i2_matrix --channel full --t0-list 1,2,3,4 --levels 4 --stable-levels 3 --stability-nsigma 2.0 --outdir runs/U1-example/analysis/16x32_t0_scan --prefix u1_quenched_beta8_k0p2530_16x32_pipi_i2_t0scan`
+    - outputs:
+      - `runs/U1-example/analysis/16x32_t0_scan/u1_quenched_beta8_k0p2530_16x32_pipi_i2_t0scan.png`
+      - `runs/U1-example/analysis/16x32_t0_scan/u1_quenched_beta8_k0p2530_16x32_pipi_i2_t0scan.json`
+    - result summary:
+      - common fit range chosen: `t in [5, 8]`
+      - recommended `t0 = 1`
+      - reason:
+        - the first 3 levels are stable within `2 sigma` for `t0 = 1 -> 2 -> 3 -> 4`
+      - level energies:
+        - `t0=1`: `0.6131(194)`, `1.1177(686)`, `2.2757(1096)`
+        - `t0=2`: `0.6155(198)`, `1.1190(612)`, `2.1906(1097)`
+        - `t0=3`: `0.6115(198)`, `1.0972(458)`, `2.0769(1098)`
+        - `t0=4`: `0.6049(195)`, `1.0484(310)`, `1.9480(1098)`
+      - interpretation:
+        - `16x32` still shows visible central-value drift, especially in levels 1 and 2, but the drift is within the quoted errors over this scan window
+  - `32x64` scan result on
+    - `runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_32x64_pipi_i2_spectrum_ckpt.pkl`
+    - command:
+      - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pipi_i2_t0_scan.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_32x64_pipi_i2_spectrum_ckpt.pkl --measurement pipi_i2_matrix --channel full --t0-list 1,2,3,4,5,6 --levels 4 --stable-levels 3 --stability-nsigma 2.0 --outdir runs/U1-example/analysis/32x64_t0_scan --prefix u1_quenched_beta8_k0p2530_32x64_pipi_i2_t0scan`
+    - outputs:
+      - `runs/U1-example/analysis/32x64_t0_scan/u1_quenched_beta8_k0p2530_32x64_pipi_i2_t0scan.png`
+      - `runs/U1-example/analysis/32x64_t0_scan/u1_quenched_beta8_k0p2530_32x64_pipi_i2_t0scan.json`
+    - result summary:
+      - common fit range chosen: `t in [7, 10]`
+      - block size: `23`
+      - number of blocks: `434`
+      - recommended `t0 = 1`
+      - reason:
+        - the first 3 levels are stable within `2 sigma` for the full chain `t0 = 1 -> 2 -> 3 -> 4 -> 5 -> 6`
+      - level energies:
+        - `t0=1`: `0.50047(21)`, `0.56450(26)`, `0.84216(50)`
+        - `t0=2`: `0.50038(21)`, `0.56071(26)`, `0.84503(50)`
+        - `t0=3`: `0.49997(21)`, `0.55852(27)`, `0.84682(49)`
+        - `t0=4`: `0.49950(21)`, `0.55782(27)`, `0.84750(49)`
+        - `t0=5`: `0.49918(21)`, `0.55766(28)`, `0.84772(49)`
+        - `t0=6`: `0.49900(21)`, `0.55762(28)`, `0.84777(49)`
+      - interpretation:
+        - `32x64` is materially less `t0` sensitive than `16x32`
+        - the first three levels are effectively flat under the scan, so the sensible central choice is the earliest stable point, `t0 = 1`, with the scan spread used only as a small systematic
 - Curated gauge-invariance regression matrix (new):
   - New regression cards:
     - `scripts/mcmc/regression_cards/measurement_gauge_invariance/u1_wilson_dense_4x8.toml`
@@ -163,14 +232,82 @@ Last updated: 2026-03-31
         - the single-channel script now uses:
           - `E_f + E_i` for `mu=1`
           - `p_f + p_i` for `mu=0`
+        - current component convention:
+          - default `--component auto` now resolves to:
+            - `Re[M_eff]` for `mu=1`
+            - `-Im[M_eff]` for `mu=0`
+          - this fixed the false near-zero spatial-current form factors that appeared when all channels were analyzed with the real part
         - consequence:
           - spatial-current channels are useful for `pair_mode = "all"` with `p_f + p_i != 0`
           - in Breit kinematics they vanish and do not add information
       - batch-analysis extension:
         - `scripts/mcmc/analyze_pion_form_factor.py` now supports:
           - `--all-mus`
+          - `--pair-mode q2zero` (aliases: `equal`, `diagonal`, `same`)
         - in that mode it analyzes all stored current components and builds correlated averages of all channels sharing the same `(Q^2, t_sep)`
         - this is the intended path for gaining statistics from both `mu=0` and `mu=1` once the measurement card stores both currents and non-Breit momentum pairs
+        - `--pair-mode q2zero` restricts the scan to equal-momentum channels `p_f=p_i`, which is useful for focused `F_pi(Q^2=0)` checks
+        - real-checkpoint `Q^2=0` check on the 16x32 local-current dataset:
+          - command:
+            - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pion_form_factor.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pion_form_factor_ckpt.pkl --all-mus --pair-mode q2zero --max-abs-p 2 --tsep-min 4 --tsep-max 16 --block-size 2 --zv 1.0 --prefix u1_pion_form_factor_q2zero_only --outdir runs/U1-example --no-gui`
+          - outputs:
+            - `runs/U1-example/u1_pion_form_factor_q2zero_only.json`
+            - `runs/U1-example/u1_pion_form_factor_q2zero_only.png`
+          - combined equal-momentum average over available `mu=0,1` channels:
+            - `tsep=10`: `0.90650 +/- 0.00477`
+            - `tsep=12`: `0.99259 +/- 0.00483`
+            - `tsep=14`: `1.00822 +/- 0.00346`
+            - `tsep=15`: `1.01080 +/- 0.00297`
+          - channel-level interpretation at `tsep=14`:
+            - `mu=1, p=0`: `1.01064 +/- 0.00350`
+            - `mu=0, p=1`: `0.78517 +/- 0.02851`
+            - `mu=1, p=1`: `0.93030 +/- 0.03580`
+            - higher-momentum equal-momentum channels are much noisier and should be treated cautiously in the combined average
+      - additional reduction stage (2026-03-31):
+        - the batch analyzer now also constructs a fixed-`Q^2` late-`t_sep` constant-fit summary from the already grouped `(Q^2,t_sep)` points
+        - this is recorded under `grouped_q2_constant_diag` in the JSON output
+        - important interpretation:
+          - this is a diagnostic summary only
+          - it is useful as a large-`t_sep` consistency check after kinematic-factor removal
+          - it is not a substitute for an explicit excited-state fit in `t_sep`
+      - explicit reduced-`Q^2` excited-state fit (2026-03-31):
+        - the preferred reduced result is now recorded under `grouped_q2`
+        - model:
+          - `F_eff(Q^2,tsep) = F_pi(Q^2) + A exp(-gap * tsep)`
+        - fit strategy:
+          - first group all equal-`(Q^2,tsep)` channels with their full jackknife covariance
+          - then fit the fixed-`Q^2` reduced data as a function of `tsep`
+          - the ratio and direct estimators are fit separately, using the same selected `tsep` window
+        - new CLI knobs:
+          - `--tsep-fit-range`
+          - `--tsep-fit-min-points`
+          - `--tsep-fit-chi2-min`
+          - `--tsep-fit-chi2-max`
+          - `--tsep-fit-score-window-penalty`
+          - `--tsep-fit-gap-min`
+          - `--tsep-fit-gap-max`
+          - `--tsep-fit-gap-grid`
+        - interpretation:
+          - this is more appropriate than a constant fit across all `tsep`
+          - it is still only a first excited-state model, not a global simultaneous `(C_2,C_3)` fit
+      - automatic thermal cut for reduced-`Q^2` fits (2026-03-31):
+        - new batch-analyzer CLI:
+          - `--tsep-auto-thermal-cut/--no-tsep-auto-thermal-cut`
+          - `--tsep-thermal-margin`
+        - default behavior:
+          - reduced-`Q^2` fits/diagnostics only use
+            - `tsep <= T/2 - thermal_margin`
+          - for the default `thermal_margin = 1`, an even-`T` lattice excludes `tsep >= T/2`
+        - excluded `tsep` values are recorded in:
+          - `grouped_q2[*].excluded_tseps_thermal`
+          - `grouped_q2_constant_diag[*].excluded_tseps_thermal`
+        - all per-channel data remain in the JSON; only the reduced fits are filtered
+        - metadata added to the JSON summary:
+          - `analysis_notes.per_channel_methods`
+          - `analysis_notes.q2_definition`
+          - `analysis_notes.late_tsep_reduction`
+          - `analysis_notes.preferred_reduced_result`
+          - `analysis_notes.not_implemented`
   - Run card:
     - new card:
       - `runs/U1-example/mcmc_u1_quenched_beta8_k0p2530_16x32_pion_form_factor.toml`
@@ -210,6 +347,61 @@ Last updated: 2026-03-31
       - outputs:
         - `/tmp/pion_form_factor_smoke.json`
         - `/tmp/pion_form_factor_smoke.png`
+    - real-checkpoint validation of the new late-`tsep` diagnostic:
+      - command:
+        - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pion_form_factor.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pion_form_factor_ckpt.pkl --mu 1 --pair-mode breit --max-abs-p 2 --tsep-min 4 --tsep-max 16 --zv 1.0 --prefix full_ff_tsepcombine --outdir /tmp/jaxqft_ff_test --no-gui`
+      - outputs:
+        - `/tmp/jaxqft_ff_test/full_ff_tsepcombine.json`
+        - `/tmp/jaxqft_ff_test/full_ff_tsepcombine.png`
+      - observed summary on this checkpoint:
+        - `n_channels = 13`
+        - `n_grouped_q2_tsep = 13`
+        - `n_grouped_q2 = 1`
+        - only the zero-momentum channel was present in this saved run, so the reduced fixed-`Q^2` diagnostic returned:
+          - `Q^2 = 0`
+          - selected large-`tsep` window: `tsep = 14..15`
+          - `F_pi(Q^2=0) = 1.01250 +/- 0.00293`
+    - real-checkpoint validation of the reduced-`Q^2` one-exponential fit:
+      - command:
+        - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pion_form_factor.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pion_form_factor_ckpt.pkl --mu 1 --pair-mode breit --max-abs-p 2 --tsep-min 4 --tsep-max 16 --zv 1.0 --prefix full_ff_excitedfit --outdir /tmp/jaxqft_ff_test2 --no-gui`
+      - outputs:
+        - `/tmp/jaxqft_ff_test2/full_ff_excitedfit.json`
+        - `/tmp/jaxqft_ff_test2/full_ff_excitedfit.png`
+      - observed summary on this checkpoint:
+        - `grouped_q2` contains one fit because only the zero-momentum channel was present in this saved run
+        - selected fit window:
+          - `tsep = 12..15`
+        - fitted ratio result:
+          - `F_pi(Q^2=0) = 1.01435 +/- 0.00285`
+          - `gap = 1.11445`
+          - `chi2/dof = 2.458`
+        - interpretation:
+          - the one-exponential reduced-`Q^2` fit now runs on real data
+          - on this particular `16x32` checkpoint the fit quality is only marginal, so it should be treated as a first excited-state-controlled summary rather than a final production fit
+    - real-checkpoint validation of the thermal cut:
+      - default thermal cut:
+        - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pion_form_factor.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pion_form_factor_ckpt.pkl --mu 1 --pair-mode breit --max-abs-p 2 --tsep-min 4 --tsep-max 16 --zv 1.0 --prefix full_ff_excitedfit_thermalcut --outdir /tmp/jaxqft_ff_test4 --no-gui`
+        - effective filter:
+          - `tsep_max_safe = 15`
+          - excluded:
+            - `tsep = 16`
+        - result stayed essentially unchanged:
+          - selected window `12..15`
+          - `F_pi(Q^2=0) = 1.01435 +/- 0.00285`
+          - `chi2/dof = 2.458`
+      - stricter cut:
+        - `source /opt/python/jax/bin/activate && python scripts/mcmc/analyze_pion_form_factor.py --input runs/U1-example/ckpts/u1_quenched_beta8_k0p2530_16x32_pion_form_factor_ckpt.pkl --mu 1 --pair-mode breit --max-abs-p 2 --tsep-min 4 --tsep-max 16 --tsep-thermal-margin 2 --zv 1.0 --prefix full_ff_excitedfit_thermalcut2 --outdir /tmp/jaxqft_ff_test5 --no-gui`
+        - effective filter:
+          - `tsep_max_safe = 14`
+          - excluded:
+            - `tsep = 15,16`
+        - result:
+          - selected window `11..14`
+          - `F_pi(Q^2=0) = 1.01426 +/- 0.00339`
+          - `chi2/dof = 7.29`
+        - interpretation:
+          - the exact half-`T` point is not the whole story on this `16x32` run
+          - even after stronger thermal cuts, a single-exponential reduced-`Q^2` model is still not fully adequate
     - conserved-analysis smoke:
       - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_form_factor.py --input /tmp/pion_form_factor_conserved_smoke.pkl --mu 1 --pair-mode breit --max-abs-p 1 --tsep-min 4 --tsep-max 4 --block-size 1 --pion-fit-range 1,3 --plateau-range 1,3 --prefix pion_form_factor_conserved_smoke --outdir /tmp --no-gui`
       - `JAX_PLATFORMS=cpu /opt/python/jax/bin/python scripts/mcmc/analyze_pion_vector_3pt.py --input /tmp/pion_form_factor_conserved_smoke.pkl --mu 1 --pi -1 --pf 1 --tsep 4 --block-size 1 --pion-fit-range 1,3 --plateau-range 1,3 --prefix pion_vector_conserved_smoke --outdir /tmp --no-gui`

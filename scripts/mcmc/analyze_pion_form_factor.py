@@ -103,6 +103,11 @@ def _filter_channels(
                 continue
             if int(pf) < 0:
                 continue
+        elif mode in ("equal", "diagonal", "same", "q2zero"):
+            if int(pf) != int(pi):
+                continue
+            if int(pf) < 0:
+                continue
         elif mode not in ("all", "cartesian", "full"):
             raise ValueError(f"Unsupported pair-mode filter: {pair_mode!r}")
         out.append((int(cur_mu), int(pf), int(pi), int(tsep)))
@@ -140,6 +145,33 @@ def _covariance_weighted_average(full_vals: np.ndarray, jk_vals: np.ndarray, cov
     return full, err
 
 
+def _covariance_weighted_average_with_jk(
+    full_vals: np.ndarray, jk_vals: np.ndarray, cov_reg: float
+) -> Tuple[float, float, np.ndarray]:
+    y = np.asarray(full_vals, dtype=np.float64).reshape(-1)
+    yjk = np.asarray(jk_vals, dtype=np.float64)
+    if y.size == 1:
+        jk = np.asarray(yjk[:, 0], dtype=np.float64)
+        return float(y[0]), float(PV3._scalar_jackknife_err(jk, float(y[0]))), jk
+    cov = _safe_jk_covariance(yjk)
+    diag_mean = float(np.nanmean(np.diag(cov))) if np.all(np.isfinite(np.diag(cov))) else 1.0
+    cc = np.asarray(cov + float(cov_reg) * max(1.0, diag_mean) * np.eye(y.size), dtype=np.float64)
+    try:
+        winv = np.linalg.pinv(cc, rcond=1.0e-12)
+    except np.linalg.LinAlgError:
+        winv = np.eye(y.size, dtype=np.float64)
+    one = np.ones((y.size,), dtype=np.float64)
+    denom = float(one @ winv @ one)
+    if not np.isfinite(denom) or abs(denom) < 1.0e-14:
+        w = np.full((y.size,), 1.0 / float(y.size), dtype=np.float64)
+    else:
+        w = np.asarray((winv @ one) / denom, dtype=np.float64)
+    full = float(w @ y)
+    jk = np.asarray(yjk @ w, dtype=np.float64)
+    err = float(PV3._scalar_jackknife_err(jk, full))
+    return full, err, jk
+
+
 def _group_results_by_q2_tsep(
     results: Sequence[Mapping[str, object]],
     *,
@@ -162,8 +194,12 @@ def _group_results_by_q2_tsep(
         rr_jk = np.asarray([np.asarray(r["_form_ratio_jk"], dtype=np.float64) for r in rows], dtype=np.float64).T
         rd_full = np.asarray([float(r["form_direct"]) for r in rows], dtype=np.float64)
         rd_jk = np.asarray([np.asarray(r["_form_direct_jk"], dtype=np.float64) for r in rows], dtype=np.float64).T
-        avg_ratio, avg_ratio_err = _covariance_weighted_average(rr_full, rr_jk, cov_reg=float(cov_reg))
-        avg_direct, avg_direct_err = _covariance_weighted_average(rd_full, rd_jk, cov_reg=float(cov_reg))
+        avg_ratio, avg_ratio_err, avg_ratio_jk = _covariance_weighted_average_with_jk(
+            rr_full, rr_jk, cov_reg=float(cov_reg)
+        )
+        avg_direct, avg_direct_err, avg_direct_jk = _covariance_weighted_average_with_jk(
+            rd_full, rd_jk, cov_reg=float(cov_reg)
+        )
         out.append(
             {
                 "q2_cont_like": float(q2),
@@ -182,8 +218,551 @@ def _group_results_by_q2_tsep(
                 "form_ratio_err": float(avg_ratio_err),
                 "form_direct": float(avg_direct),
                 "form_direct_err": float(avg_direct_err),
+                "_form_ratio_jk": np.asarray(avg_ratio_jk, dtype=np.float64).tolist(),
+                "_form_direct_jk": np.asarray(avg_direct_jk, dtype=np.float64).tolist(),
             }
         )
+    return out
+
+
+def _group_results_by_q2(
+    grouped_q2_tsep: Sequence[Mapping[str, object]],
+    *,
+    cov_reg: float,
+    q2_tol: float,
+    tsep_max_safe: Optional[int],
+    tsep_plateau_range: Optional[Tuple[int, int]],
+    tsep_plateau_min_points: int,
+    tsep_plateau_chi2_min: float,
+    tsep_plateau_chi2_max: float,
+    tsep_plateau_score_window_penalty: float,
+) -> List[Dict[str, object]]:
+    grouped: Dict[int, List[Mapping[str, object]]] = {}
+    for row in grouped_q2_tsep:
+        q2 = float(row["q2_cont_like"])
+        q2_bin = int(round(q2 / float(q2_tol))) if float(q2_tol) > 0.0 else int(round(q2 * 1.0e12))
+        grouped.setdefault(q2_bin, []).append(row)
+
+    out: List[Dict[str, object]] = []
+    for _, rows_unsorted in sorted(grouped.items(), key=lambda item: float(item[1][0]["q2_cont_like"])):
+        rows = sorted(rows_unsorted, key=lambda r: int(r["tsep"]))
+        rows_fit = [
+            r for r in rows
+            if (tsep_max_safe is None or int(r["tsep"]) <= int(tsep_max_safe))
+        ]
+        q2 = float(rows[0]["q2_cont_like"])
+        tseps_all = np.asarray([int(r["tsep"]) for r in rows], dtype=np.int64)
+        tseps = np.asarray([int(r["tsep"]) for r in rows_fit], dtype=np.int64)
+        if tseps.size == 0:
+            continue
+        ratio_full = np.asarray([float(r["form_ratio"]) for r in rows_fit], dtype=np.float64)
+        direct_full = np.asarray([float(r["form_direct"]) for r in rows_fit], dtype=np.float64)
+        ratio_jk = np.asarray([np.asarray(r["_form_ratio_jk"], dtype=np.float64) for r in rows_fit], dtype=np.float64).T
+        direct_jk = np.asarray([np.asarray(r["_form_direct_jk"], dtype=np.float64) for r in rows_fit], dtype=np.float64).T
+
+        plateau_candidates: List[Dict[str, object]] = []
+        if tseps.size == 1:
+            plateau = {
+                "tmin": float(tseps[0]),
+                "tmax": float(tseps[0]),
+                "chi2_dof": float("nan"),
+                "npts": 1.0,
+                "support_idx_min": 0.0,
+                "support_idx_max": 0.0,
+            }
+            weights = np.asarray([1.0], dtype=np.float64)
+            form_ratio = float(ratio_full[0])
+            form_ratio_err = float(rows[0]["form_ratio_err"])
+            form_direct = float(direct_full[0])
+            form_direct_err = float(rows[0]["form_direct_err"])
+            ratio_jk_plateau = np.asarray(ratio_jk[:, 0], dtype=np.float64)
+            direct_jk_plateau = np.asarray(direct_jk[:, 0], dtype=np.float64)
+        else:
+            if tsep_plateau_range is not None:
+                idx_min, idx_max = PV3._support_index_range(
+                    tseps, int(tsep_plateau_range[0]), int(tsep_plateau_range[1])
+                )
+                plateau = PV3._fit_constant_window_correlated(
+                    ratio_full,
+                    PV3._jackknife_covariance(ratio_jk),
+                    idx_min=int(idx_min),
+                    idx_max=int(idx_max),
+                    support_times=tseps,
+                    cov_reg=float(cov_reg),
+                )
+                if plateau is None:
+                    raise ValueError(
+                        f"Manual tsep plateau range [{tsep_plateau_range[0]},{tsep_plateau_range[1]}] failed for Q^2={q2:.8g}"
+                    )
+            else:
+                plateau, plateau_candidates = PV3._select_plateau_window(
+                    ratio_full,
+                    ratio_jk,
+                    support_times=tseps,
+                    tmin_min=int(tseps[0]),
+                    tmax_max=int(tseps[-1]),
+                    min_points=int(min(max(1, int(tsep_plateau_min_points)), tseps.size)),
+                    chi2_min=float(tsep_plateau_chi2_min),
+                    chi2_max=float(tsep_plateau_chi2_max),
+                    score_window_penalty=float(tsep_plateau_score_window_penalty),
+                    cov_reg=float(cov_reg),
+                    progress=False,
+                    progress_prefix=f"Q2={q2:.6g}",
+                )
+                if plateau is None:
+                    raise ValueError(f"No successful tsep plateau candidate found for Q^2={q2:.8g}")
+            weights = PV3._plateau_linear_weights(
+                ratio_jk,
+                idx_min=int(plateau["support_idx_min"]),
+                idx_max=int(plateau["support_idx_max"]),
+                cov_reg=float(cov_reg),
+            )
+            form_ratio, form_ratio_err = PV3._plateau_from_weights(
+                ratio_full,
+                ratio_jk,
+                weights,
+                int(plateau["support_idx_min"]),
+                int(plateau["support_idx_max"]),
+            )
+            form_direct, form_direct_err = PV3._plateau_from_weights(
+                direct_full,
+                direct_jk,
+                weights,
+                int(plateau["support_idx_min"]),
+                int(plateau["support_idx_max"]),
+            )
+            i0 = int(plateau["support_idx_min"])
+            i1 = int(plateau["support_idx_max"]) + 1
+            ratio_jk_plateau = np.asarray(ratio_jk[:, i0:i1] @ weights, dtype=np.float64)
+            direct_jk_plateau = np.asarray(direct_jk[:, i0:i1] @ weights, dtype=np.float64)
+
+        out_row = {
+            "q2_cont_like": float(q2),
+            "interpretation": "late_tsep_constant_diagnostic",
+            "note": (
+                "This reduction assumes an approximately constant large-tsep window after channel-wise "
+                "kinematic-factor removal. It is a diagnostic summary, not a substitute for a full excited-state fit."
+            ),
+            "tseps_available": tseps_all.astype(int).tolist(),
+            "tseps_used": tseps.astype(int).tolist(),
+            "excluded_tseps_thermal": [
+                int(r["tsep"]) for r in rows if (tsep_max_safe is not None and int(r["tsep"]) > int(tsep_max_safe))
+            ],
+            "n_tsep": int(tseps.size),
+            "n_total_channels": int(sum(int(r["n_channels"]) for r in rows)),
+            "tseps": tseps.astype(int).tolist(),
+            "plateau": {
+                "selected_on": "form_ratio",
+                "tsep_min": float(plateau["tmin"]),
+                "tsep_max": float(plateau["tmax"]),
+                "chi2_dof": float(plateau["chi2_dof"]),
+                "npts": float(plateau["npts"]),
+            },
+            "form_ratio": float(form_ratio),
+            "form_ratio_err": float(form_ratio_err),
+            "form_direct": float(form_direct),
+            "form_direct_err": float(form_direct_err),
+            "per_tsep": [
+                {
+                    "tsep": int(r["tsep"]),
+                    "n_channels": int(r["n_channels"]),
+                    "form_ratio": float(r["form_ratio"]),
+                    "form_ratio_err": float(r["form_ratio_err"]),
+                    "form_direct": float(r["form_direct"]),
+                    "form_direct_err": float(r["form_direct_err"]),
+                }
+                for r in rows
+            ],
+            "_form_ratio_jk": np.asarray(ratio_jk_plateau, dtype=np.float64).tolist(),
+            "_form_direct_jk": np.asarray(direct_jk_plateau, dtype=np.float64).tolist(),
+        }
+        if plateau_candidates:
+            out_row["plateau_candidates"] = [
+                {
+                    "tmin": float(c["tmin"]),
+                    "tmax": float(c["tmax"]),
+                    "chi2_dof": float(c["chi2_dof"]),
+                    "score": float(c["score"]),
+                    "in_chi2_band": float(c["in_chi2_band"]),
+                }
+                for c in plateau_candidates
+            ]
+        out.append(out_row)
+    return out
+
+
+def _fit_tsep_one_exp_window_correlated(
+    y: np.ndarray,
+    cov: np.ndarray,
+    *,
+    idx_min: int,
+    idx_max: int,
+    support_times: np.ndarray,
+    gap_min: float,
+    gap_max: float,
+    gap_grid: int,
+    cov_reg: float,
+) -> Optional[Dict[str, object]]:
+    i0 = int(idx_min)
+    i1 = int(idx_max)
+    if i0 < 0 or i1 < i0:
+        return None
+    yy = np.asarray(y, dtype=np.float64)[i0 : i1 + 1]
+    cc = np.asarray(cov, dtype=np.float64)[i0 : i1 + 1, i0 : i1 + 1]
+    tt = np.asarray(support_times, dtype=np.float64)[i0 : i1 + 1]
+    if yy.size < 4 or cc.shape[0] != yy.size:
+        return None
+    if not np.all(np.isfinite(yy)) or not np.all(np.isfinite(cc)) or not np.all(np.isfinite(tt)):
+        return None
+    gmin = max(1.0e-6, float(gap_min))
+    gmax = max(gmin + 1.0e-6, float(gap_max))
+    ngrid = max(32, int(gap_grid))
+    winv, eps = PV3.FIT2PT._regularized_inverse(cc, reg=float(cov_reg))
+    def _solve_at_gap(gap_val: float) -> Optional[Dict[str, object]]:
+        col = np.exp(-float(gap_val) * tt)
+        X = np.column_stack([np.ones_like(tt), col])
+        xtwx = np.asarray(X.T @ winv @ X, dtype=np.float64)
+        try:
+            xtwx_inv = np.linalg.pinv(xtwx, rcond=1.0e-12)
+        except np.linalg.LinAlgError:
+            return None
+        beta = np.asarray(xtwx_inv @ (X.T @ winv @ yy), dtype=np.float64)
+        resid = np.asarray(yy - X @ beta, dtype=np.float64)
+        chi2 = float(resid @ winv @ resid)
+        dof = int(yy.size - 3)
+        if dof <= 0 or not np.isfinite(chi2):
+            return None
+        return {
+            "value": float(beta[0]),
+            "amplitude": float(beta[1]),
+            "gap": float(gap_val),
+            "chi2": float(chi2),
+            "chi2_dof": float(chi2 / float(dof)),
+            "dof": float(dof),
+            "tmin": float(tt[0]),
+            "tmax": float(tt[-1]),
+            "npts": float(yy.size),
+            "cov_reg_eps": float(eps),
+            "support_idx_min": float(i0),
+            "support_idx_max": float(i1),
+            "fit_curve": np.asarray(X @ beta, dtype=np.float64).tolist(),
+        }
+
+    best: Optional[Dict[str, object]] = None
+    best_idx = -1
+    gaps = np.linspace(gmin, gmax, ngrid, dtype=np.float64)
+    coarse_rows: List[Optional[Dict[str, object]]] = []
+    for ig, gap in enumerate(gaps):
+        row = _solve_at_gap(float(gap))
+        coarse_rows.append(row)
+        if row is None:
+            continue
+        if best is None or float(row["chi2"]) < float(best["chi2"]):
+            best = row
+            best_idx = int(ig)
+    if best is None:
+        return None
+    if 0 < best_idx < gaps.size - 1:
+        y1 = coarse_rows[best_idx - 1]["chi2"] if coarse_rows[best_idx - 1] is not None else float("nan")
+        y2 = coarse_rows[best_idx]["chi2"] if coarse_rows[best_idx] is not None else float("nan")
+        y3 = coarse_rows[best_idx + 1]["chi2"] if coarse_rows[best_idx + 1] is not None else float("nan")
+        h = float(gaps[best_idx + 1] - gaps[best_idx])
+        denom = float(y1 - 2.0 * y2 + y3) if np.isfinite(y1) and np.isfinite(y2) and np.isfinite(y3) else float("nan")
+        if np.isfinite(denom) and abs(denom) > 1.0e-14:
+            delta = 0.5 * h * float(y1 - y3) / denom
+            gap_star = float(gaps[best_idx] + delta)
+            if float(gaps[best_idx - 1]) <= gap_star <= float(gaps[best_idx + 1]):
+                refined = _solve_at_gap(gap_star)
+                if refined is not None and float(refined["chi2"]) <= float(best["chi2"]):
+                    best = refined
+    return dict(best)
+
+
+def _select_tsep_one_exp_window(
+    full_curve: np.ndarray,
+    jk_curves: np.ndarray,
+    *,
+    support_times: np.ndarray,
+    tmin_min: int,
+    tmax_max: int,
+    min_points: int,
+    chi2_min: float,
+    chi2_max: float,
+    score_window_penalty: float,
+    gap_min: float,
+    gap_max: float,
+    gap_grid: int,
+    cov_reg: float,
+) -> Tuple[Optional[Dict[str, object]], List[Dict[str, object]]]:
+    support = np.asarray(support_times, dtype=np.int64).reshape(-1)
+    valid = np.where((support >= int(tmin_min)) & (support <= int(tmax_max)))[0]
+    if valid.size == 0:
+        return None, []
+    idx_lo = int(valid[0])
+    idx_hi = int(valid[-1])
+    cov = PV3._jackknife_covariance(np.asarray(jk_curves, dtype=np.float64))
+    candidates: List[Dict[str, object]] = []
+    for i0 in range(idx_lo, idx_hi + 1):
+        for i1 in range(i0 + int(min_points) - 1, idx_hi + 1):
+            fit = _fit_tsep_one_exp_window_correlated(
+                full_curve,
+                cov,
+                idx_min=int(i0),
+                idx_max=int(i1),
+                support_times=support,
+                gap_min=float(gap_min),
+                gap_max=float(gap_max),
+                gap_grid=int(gap_grid),
+                cov_reg=float(cov_reg),
+            )
+            if fit is None:
+                continue
+            chi2_dof = float(fit["chi2_dof"])
+            score = abs(math.log(max(1.0e-12, chi2_dof))) + float(score_window_penalty) / float(max(1.0, fit["npts"]))
+            fit["score"] = float(score)
+            fit["in_chi2_band"] = 1.0 if (chi2_dof >= float(chi2_min) and chi2_dof <= float(chi2_max)) else 0.0
+            candidates.append(fit)
+    if not candidates:
+        return None, []
+    in_band = [c for c in candidates if int(c.get("in_chi2_band", 0.0)) == 1]
+    pool = in_band if in_band else candidates
+    best = min(pool, key=lambda c: (float(c["score"]), -int(c["npts"]), int(c["tmin"])))
+    return dict(best), candidates
+
+
+def _fit_tsep_one_exp_jk(
+    full_curve: np.ndarray,
+    jk_curves: np.ndarray,
+    *,
+    support_times: np.ndarray,
+    idx_min: int,
+    idx_max: int,
+    gap_min: float,
+    gap_max: float,
+    gap_grid: int,
+    cov_reg: float,
+    full_fit: Mapping[str, object],
+) -> Dict[str, object]:
+    full = _fit_tsep_one_exp_window_correlated(
+        full_curve,
+        PV3._jackknife_covariance(np.asarray(jk_curves, dtype=np.float64)),
+        idx_min=int(idx_min),
+        idx_max=int(idx_max),
+        support_times=support_times,
+        gap_min=float(gap_min),
+        gap_max=float(gap_max),
+        gap_grid=int(gap_grid),
+        cov_reg=float(cov_reg),
+    )
+    if full is None:
+        raise ValueError("full one-exp fit unexpectedly failed on selected window")
+    nb = int(np.asarray(jk_curves, dtype=np.float64).shape[0])
+    fit_vals = np.full((nb,), float(full["value"]), dtype=np.float64)
+    fit_amps = np.full((nb,), float(full["amplitude"]), dtype=np.float64)
+    fit_gaps = np.full((nb,), float(full["gap"]), dtype=np.float64)
+    n_fail = 0
+    for ib in range(nb):
+        y = np.asarray(jk_curves[ib], dtype=np.float64)
+        fit = _fit_tsep_one_exp_window_correlated(
+            y,
+            PV3._jackknife_covariance(np.asarray(jk_curves, dtype=np.float64)),
+            idx_min=int(idx_min),
+            idx_max=int(idx_max),
+            support_times=support_times,
+            gap_min=float(gap_min),
+            gap_max=float(gap_max),
+            gap_grid=int(gap_grid),
+            cov_reg=float(cov_reg),
+        )
+        if fit is None:
+            n_fail += 1
+            continue
+        fit_vals[ib] = float(fit["value"])
+        fit_amps[ib] = float(fit["amplitude"])
+        fit_gaps[ib] = float(fit["gap"])
+    return {
+        "full": dict(full),
+        "jk_value": fit_vals,
+        "jk_amplitude": fit_amps,
+        "jk_gap": fit_gaps,
+        "n_fit_failures_jk": int(n_fail),
+        "value_err": float(PV3._scalar_jackknife_err(fit_vals, float(full["value"]))),
+        "amplitude_err": float(PV3._scalar_jackknife_err(fit_amps, float(full["amplitude"]))),
+        "gap_err": float(PV3._scalar_jackknife_err(fit_gaps, float(full["gap"]))),
+    }
+
+
+def _fit_grouped_q2_excited_state(
+    grouped_q2_tsep: Sequence[Mapping[str, object]],
+    *,
+    cov_reg: float,
+    q2_tol: float,
+    tsep_max_safe: Optional[int],
+    tsep_fit_range: Optional[Tuple[int, int]],
+    tsep_fit_min_points: int,
+    tsep_fit_chi2_min: float,
+    tsep_fit_chi2_max: float,
+    tsep_fit_score_window_penalty: float,
+    gap_min: float,
+    gap_max: float,
+    gap_grid: int,
+) -> List[Dict[str, object]]:
+    grouped: Dict[int, List[Mapping[str, object]]] = {}
+    for row in grouped_q2_tsep:
+        q2 = float(row["q2_cont_like"])
+        q2_bin = int(round(q2 / float(q2_tol))) if float(q2_tol) > 0.0 else int(round(q2 * 1.0e12))
+        grouped.setdefault(q2_bin, []).append(row)
+
+    out: List[Dict[str, object]] = []
+    for _, rows_unsorted in sorted(grouped.items(), key=lambda item: float(item[1][0]["q2_cont_like"])):
+        rows = sorted(rows_unsorted, key=lambda r: int(r["tsep"]))
+        rows_fit = [
+            r for r in rows
+            if (tsep_max_safe is None or int(r["tsep"]) <= int(tsep_max_safe))
+        ]
+        q2 = float(rows[0]["q2_cont_like"])
+        tseps_all = np.asarray([int(r["tsep"]) for r in rows], dtype=np.int64)
+        tseps = np.asarray([int(r["tsep"]) for r in rows_fit], dtype=np.int64)
+        if tseps.size == 0:
+            continue
+        ratio_full = np.asarray([float(r["form_ratio"]) for r in rows_fit], dtype=np.float64)
+        direct_full = np.asarray([float(r["form_direct"]) for r in rows_fit], dtype=np.float64)
+        ratio_jk = np.asarray([np.asarray(r["_form_ratio_jk"], dtype=np.float64) for r in rows_fit], dtype=np.float64).T
+        direct_jk = np.asarray([np.asarray(r["_form_direct_jk"], dtype=np.float64) for r in rows_fit], dtype=np.float64).T
+
+        if tseps.size < max(4, int(tsep_fit_min_points)):
+            continue
+
+        fit_candidates: List[Dict[str, object]] = []
+        if tsep_fit_range is not None:
+            idx_min, idx_max = PV3._support_index_range(
+                tseps, int(tsep_fit_range[0]), int(tsep_fit_range[1])
+            )
+            ratio_fit = _fit_tsep_one_exp_window_correlated(
+                ratio_full,
+                PV3._jackknife_covariance(ratio_jk),
+                idx_min=int(idx_min),
+                idx_max=int(idx_max),
+                support_times=tseps,
+                gap_min=float(gap_min),
+                gap_max=float(gap_max),
+                gap_grid=int(gap_grid),
+                cov_reg=float(cov_reg),
+            )
+            if ratio_fit is None:
+                raise ValueError(
+                    f"Manual tsep excited-fit range [{tsep_fit_range[0]},{tsep_fit_range[1]}] failed for Q^2={q2:.8g}"
+                )
+        else:
+            ratio_fit, fit_candidates = _select_tsep_one_exp_window(
+                ratio_full,
+                ratio_jk,
+                support_times=tseps,
+                tmin_min=int(tseps[0]),
+                tmax_max=int(tseps[-1]),
+                min_points=int(min(max(4, int(tsep_fit_min_points)), tseps.size)),
+                chi2_min=float(tsep_fit_chi2_min),
+                chi2_max=float(tsep_fit_chi2_max),
+                score_window_penalty=float(tsep_fit_score_window_penalty),
+                gap_min=float(gap_min),
+                gap_max=float(gap_max),
+                gap_grid=int(gap_grid),
+                cov_reg=float(cov_reg),
+            )
+            if ratio_fit is None:
+                raise ValueError(f"No successful tsep excited-state fit candidate found for Q^2={q2:.8g}")
+
+        idx_min = int(ratio_fit["support_idx_min"])
+        idx_max = int(ratio_fit["support_idx_max"])
+        ratio_with_jk = _fit_tsep_one_exp_jk(
+            ratio_full,
+            ratio_jk,
+            support_times=tseps,
+            idx_min=int(idx_min),
+            idx_max=int(idx_max),
+            gap_min=float(gap_min),
+            gap_max=float(gap_max),
+            gap_grid=int(gap_grid),
+            cov_reg=float(cov_reg),
+            full_fit=ratio_fit,
+        )
+        direct_with_jk = _fit_tsep_one_exp_jk(
+            direct_full,
+            direct_jk,
+            support_times=tseps,
+            idx_min=int(idx_min),
+            idx_max=int(idx_max),
+            gap_min=float(gap_min),
+            gap_max=float(gap_max),
+            gap_grid=int(gap_grid),
+            cov_reg=float(cov_reg),
+            full_fit=ratio_fit,
+        )
+
+        row = {
+            "q2_cont_like": float(q2),
+            "model": "F + A exp(-gap * tsep)",
+            "n_tsep": int(tseps.size),
+            "tseps_available": tseps_all.astype(int).tolist(),
+            "tseps": tseps.astype(int).tolist(),
+            "excluded_tseps_thermal": [
+                int(r["tsep"]) for r in rows if (tsep_max_safe is not None and int(r["tsep"]) > int(tsep_max_safe))
+            ],
+            "fit_window": {
+                "tsep_min": float(ratio_with_jk["full"]["tmin"]),
+                "tsep_max": float(ratio_with_jk["full"]["tmax"]),
+                "chi2_dof": float(ratio_with_jk["full"]["chi2_dof"]),
+                "npts": float(ratio_with_jk["full"]["npts"]),
+            },
+            "ratio_fit": {
+                "form_factor": float(ratio_with_jk["full"]["value"]),
+                "form_factor_err": float(ratio_with_jk["value_err"]),
+                "amplitude": float(ratio_with_jk["full"]["amplitude"]),
+                "amplitude_err": float(ratio_with_jk["amplitude_err"]),
+                "gap": float(ratio_with_jk["full"]["gap"]),
+                "gap_err": float(ratio_with_jk["gap_err"]),
+                "chi2_dof": float(ratio_with_jk["full"]["chi2_dof"]),
+                "n_fit_failures_jk": int(ratio_with_jk["n_fit_failures_jk"]),
+                "fit_tseps": tseps[idx_min : idx_max + 1].astype(int).tolist(),
+                "fit_curve": np.asarray(ratio_with_jk["full"]["fit_curve"], dtype=np.float64).tolist(),
+            },
+            "direct_fit": {
+                "form_factor": float(direct_with_jk["full"]["value"]),
+                "form_factor_err": float(direct_with_jk["value_err"]),
+                "amplitude": float(direct_with_jk["full"]["amplitude"]),
+                "amplitude_err": float(direct_with_jk["amplitude_err"]),
+                "gap": float(direct_with_jk["full"]["gap"]),
+                "gap_err": float(direct_with_jk["gap_err"]),
+                "chi2_dof": float(direct_with_jk["full"]["chi2_dof"]),
+                "n_fit_failures_jk": int(direct_with_jk["n_fit_failures_jk"]),
+                "fit_tseps": tseps[idx_min : idx_max + 1].astype(int).tolist(),
+                "fit_curve": np.asarray(direct_with_jk["full"]["fit_curve"], dtype=np.float64).tolist(),
+            },
+            "per_tsep": [
+                {
+                    "tsep": int(r["tsep"]),
+                    "n_channels": int(r["n_channels"]),
+                    "form_ratio": float(r["form_ratio"]),
+                    "form_ratio_err": float(r["form_ratio_err"]),
+                    "form_direct": float(r["form_direct"]),
+                    "form_direct_err": float(r["form_direct_err"]),
+                }
+                for r in rows
+            ],
+        }
+        if fit_candidates:
+            row["fit_candidates"] = [
+                {
+                    "tmin": float(c["tmin"]),
+                    "tmax": float(c["tmax"]),
+                    "chi2_dof": float(c["chi2_dof"]),
+                    "gap": float(c["gap"]),
+                    "score": float(c["score"]),
+                    "in_chi2_band": float(c["in_chi2_band"]),
+                }
+                for c in fit_candidates
+            ]
+        out.append(row)
     return out
 
 
@@ -194,6 +773,7 @@ def _analyze_channel(
     pion_samples_by_p: Mapping[int, np.ndarray],
     pion_steps_by_p: Mapping[int, np.ndarray],
     pion_meta_by_p: Mapping[int, Mapping[str, object]],
+    pion_fit_cache: Dict[Tuple[int, int, bytes], Dict[str, object]],
     mu: int,
     pi: int,
     pf: int,
@@ -225,6 +805,12 @@ def _analyze_channel(
     )
     support_taus = np.asarray(three_meta["support_taus"], dtype=np.int64)
     iat_max_lag = None if int(args.iat_max_lag) <= 0 else int(args.iat_max_lag)
+    resolved_component, resolved_sign, resolved_label = PV3._resolve_analysis_component(
+        payload,
+        mu=int(mu),
+        component=str(args.component),
+    )
+
     if int(args.block_size) > 0:
         block_size = int(args.block_size)
         block_meta = {
@@ -242,39 +828,45 @@ def _analyze_channel(
             iat_method=str(args.iat_method),
             iat_c=float(args.iat_c),
             iat_max_lag=iat_max_lag,
-            component=str(args.component),
+            component=str(resolved_component),
         )
 
     t_extent = PV3._temporal_extent_from_payload(payload, pion_meta_by_p[int(pi)]["support_times"])
     pion_fit_range = _parse_fit_range_text(args.pion_fit_range)
     pion_results: Dict[int, Dict[str, object]] = {}
+    common_steps_key = np.asarray(common_steps, dtype=np.int64).tobytes()
     for p in sorted({int(pi), int(pf)}):
         support_times = np.asarray(pion_meta_by_p[int(p)]["support_times"], dtype=np.int64)
         tmax_default = (int(t_extent) // 2) - 1
         support_half = support_times[support_times <= int(tmax_default)]
         tmax_auto = int(support_half[-1]) if support_half.size > 0 else int(support_times[-1])
         tmax_max = int(args.pion_tmax_max) if int(args.pion_tmax_max) >= 0 else int(tmax_auto)
-        pion_results[int(p)] = PV3._fit_pion_channel(
-            pion_aligned[int(p)],
-            support_times=support_times,
-            t_extent=int(t_extent),
-            block_size=int(block_size),
-            fit_range=pion_fit_range,
-            tmin_min=int(args.pion_tmin_min),
-            tmax_max=int(tmax_max),
-            min_points=int(args.pion_min_points),
-            chi2_min=float(args.pion_chi2_min),
-            chi2_max=float(args.pion_chi2_max),
-            score_window_penalty=float(args.pion_score_window_penalty),
-            fallback_two_exp=bool(args.pion_fallback_two_exp),
-            two_exp_min_points=int(args.pion_two_exp_min_points),
-            e_min=float(args.e_min),
-            e_max=float(args.e_max),
-            e_grid=int(args.e_grid),
-            cov_reg=float(args.cov_reg),
-            progress=False,
-            progress_prefix=f"p={int(p)}",
-        )
+        cache_key = (int(p), int(block_size), common_steps_key)
+        cached = pion_fit_cache.get(cache_key)
+        if cached is None:
+            cached = PV3._fit_pion_channel(
+                pion_aligned[int(p)],
+                support_times=support_times,
+                t_extent=int(t_extent),
+                block_size=int(block_size),
+                fit_range=pion_fit_range,
+                tmin_min=int(args.pion_tmin_min),
+                tmax_max=int(tmax_max),
+                min_points=int(args.pion_min_points),
+                chi2_min=float(args.pion_chi2_min),
+                chi2_max=float(args.pion_chi2_max),
+                score_window_penalty=float(args.pion_score_window_penalty),
+                fallback_two_exp=bool(args.pion_fallback_two_exp),
+                two_exp_min_points=int(args.pion_two_exp_min_points),
+                e_min=float(args.e_min),
+                e_max=float(args.e_max),
+                e_grid=int(args.e_grid),
+                cov_reg=float(args.cov_reg),
+                progress=False,
+                progress_prefix=f"p={int(p)}",
+            )
+            pion_fit_cache[cache_key] = cached
+        pion_results[int(p)] = cached
 
     nb = int(next(iter(pion_results.values()))["jk_corr"].shape[0])
     three_blocks = PV3._block_means_nd(three_aligned, block_size=int(block_size))
@@ -346,10 +938,10 @@ def _analyze_channel(
         zv=float(args.zv),
     )
 
-    ratio_comp_full = PV3._component_view(mratio_full, args.component)
-    ratio_comp_jk = PV3._component_view(mratio_jk, args.component)
-    direct_comp_full = PV3._component_view(mdir_full, args.component)
-    direct_comp_jk = PV3._component_view(mdir_jk, args.component)
+    ratio_comp_full = float(resolved_sign) * PV3._component_view(mratio_full, resolved_component)
+    ratio_comp_jk = float(resolved_sign) * PV3._component_view(mratio_jk, resolved_component)
+    direct_comp_full = float(resolved_sign) * PV3._component_view(mdir_full, resolved_component)
+    direct_comp_jk = float(resolved_sign) * PV3._component_view(mdir_jk, resolved_component)
 
     plateau_range = _parse_fit_range_text(args.plateau_range)
     if plateau_range is not None:
@@ -467,6 +1059,10 @@ def _analyze_channel(
         "form_available": bool(abs(float(kin_full)) > 1.0e-14),
         "kinematic_prefactor": float(kin_full),
         "kinematic_prefactor_label": str(kin_label),
+        "component_requested": str(args.component),
+        "component_resolved": str(resolved_component),
+        "component_sign": float(resolved_sign),
+        "component_label": str(resolved_label),
         "n_common_samples": int(common_steps.size),
         "block_size": int(block_size),
         "plateau_tmin": float(plateau["tmin"]),
@@ -500,11 +1096,33 @@ def _setup_parser() -> argparse.ArgumentParser:
     ap.add_argument("--threept-channel", default="c3")
     ap.add_argument("--mu", type=int, default=-1, help="current index; <0 selects the temporal current unless --all-mus is set")
     ap.add_argument("--all-mus", action="store_true", help="analyze all available current components")
-    ap.add_argument("--pair-mode", default="breit", choices=("breit", "all"))
+    ap.add_argument(
+        "--pair-mode",
+        default="breit",
+        choices=("breit", "all", "equal", "diagonal", "same", "q2zero"),
+        help="channel filter: breit uses pf=-pi, equal/diagonal uses pf=pi, all keeps every measured pair",
+    )
     ap.add_argument("--max-abs-p", type=int, default=99)
     ap.add_argument("--tsep-min", type=int, default=4)
     ap.add_argument("--tsep-max", type=int, default=16)
-    ap.add_argument("--component", choices=("re", "im", "abs"), default="re")
+    ap.add_argument(
+        "--tsep-auto-thermal-cut",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="for reduced-Q^2 tsep fits/diagnostics, exclude tsep > T/2 - thermal_margin",
+    )
+    ap.add_argument(
+        "--tsep-thermal-margin",
+        type=int,
+        default=1,
+        help="thermal safety margin used with --tsep-auto-thermal-cut; default excludes tsep >= T/2 on even T",
+    )
+    ap.add_argument(
+        "--component",
+        choices=("auto", "re", "im", "abs"),
+        default="auto",
+        help="3pt component used in the reduced matrix element; auto uses Re for the temporal current and -Im for spatial currents",
+    )
     ap.add_argument("--zv", type=float, default=1.0)
     ap.add_argument("--discard", type=int, default=0)
     ap.add_argument("--stride", type=int, default=1)
@@ -530,6 +1148,20 @@ def _setup_parser() -> argparse.ArgumentParser:
     ap.add_argument("--plateau-chi2-min", type=float, default=0.5)
     ap.add_argument("--plateau-chi2-max", type=float, default=2.0)
     ap.add_argument("--plateau-score-window-penalty", type=float, default=0.20)
+    ap.add_argument("--q2-tol", type=float, default=1.0e-12, help="binning tolerance used when grouping channels by Q^2")
+    ap.add_argument("--tsep-plateau-range", type=str, default="", help="optional manual source-sink separation plateau range tsep_min,tsep_max")
+    ap.add_argument("--tsep-plateau-min-points", type=int, default=2)
+    ap.add_argument("--tsep-plateau-chi2-min", type=float, default=0.5)
+    ap.add_argument("--tsep-plateau-chi2-max", type=float, default=2.0)
+    ap.add_argument("--tsep-plateau-score-window-penalty", type=float, default=0.15)
+    ap.add_argument("--tsep-fit-range", type=str, default="", help="optional manual source-sink fit range for the one-exp excited-state fit")
+    ap.add_argument("--tsep-fit-min-points", type=int, default=4)
+    ap.add_argument("--tsep-fit-chi2-min", type=float, default=0.5)
+    ap.add_argument("--tsep-fit-chi2-max", type=float, default=2.0)
+    ap.add_argument("--tsep-fit-score-window-penalty", type=float, default=0.15)
+    ap.add_argument("--tsep-fit-gap-min", type=float, default=1.0e-3)
+    ap.add_argument("--tsep-fit-gap-max", type=float, default=4.0)
+    ap.add_argument("--tsep-fit-gap-grid", type=int, default=256)
     ap.add_argument("--cov-reg", type=float, default=1.0e-10)
     ap.add_argument("--prefix", default="pion_form_factor")
     ap.add_argument("--outdir", default=".")
@@ -574,6 +1206,20 @@ def _charge_normalization_report(results: Sequence[Mapping[str, object]], *, q2_
     }
 
 
+def _default_tsep_max_safe(payload: Mapping, requested_tsep_max: int, thermal_margin: int) -> int:
+    cfg = payload.get("config", {})
+    raw_shape = None
+    if isinstance(cfg, Mapping):
+        run_cfg = cfg.get("run", {})
+        if isinstance(run_cfg, Mapping):
+            raw_shape = run_cfg.get("shape", None)
+    if isinstance(raw_shape, (list, tuple)) and raw_shape:
+        t_extent = int(raw_shape[-1])
+    else:
+        t_extent = int(requested_tsep_max) + 1
+    return int(min(int(requested_tsep_max), max(1, int(t_extent // 2) - int(max(0, thermal_margin)))))
+
+
 def main() -> int:
     ap = _setup_parser()
     args = ap.parse_args()
@@ -615,7 +1261,16 @@ def main() -> int:
     if not selected:
         raise ValueError("No 3pt channels remain after filtering")
 
+    tsep_max_safe = None
+    if bool(args.tsep_auto_thermal_cut):
+        tsep_max_safe = _default_tsep_max_safe(
+            payload,
+            requested_tsep_max=int(args.tsep_max),
+            thermal_margin=int(args.tsep_thermal_margin),
+        )
+
     results: List[Dict[str, object]] = []
+    pion_fit_cache: Dict[Tuple[int, int, bytes], Dict[str, object]] = {}
     for idx, (cur_mu, pf, pi, tsep) in enumerate(selected, start=1):
         print(
             f"[{idx}/{len(selected)}] mu={cur_mu} pf={pf} pi={pi} tsep={tsep}",
@@ -627,6 +1282,7 @@ def main() -> int:
             pion_samples_by_p=pion_samples_by_p,
             pion_steps_by_p=pion_steps_by_p,
             pion_meta_by_p=pion_meta_by_p,
+            pion_fit_cache=pion_fit_cache,
             mu=int(cur_mu),
             pi=int(pi),
             pf=int(pf),
@@ -639,7 +1295,36 @@ def main() -> int:
         {k: v for k, v in row.items() if not str(k).startswith("_")}
         for row in results
     ]
-    grouped_q2_tsep = _group_results_by_q2_tsep(results, cov_reg=float(args.cov_reg))
+    grouped_q2_tsep = _group_results_by_q2_tsep(
+        results,
+        cov_reg=float(args.cov_reg),
+        q2_tol=float(args.q2_tol),
+    )
+    grouped_q2_constant_diag = _group_results_by_q2(
+        grouped_q2_tsep,
+        cov_reg=float(args.cov_reg),
+        q2_tol=float(args.q2_tol),
+        tsep_max_safe=tsep_max_safe,
+        tsep_plateau_range=_parse_fit_range_text(args.tsep_plateau_range),
+        tsep_plateau_min_points=int(args.tsep_plateau_min_points),
+        tsep_plateau_chi2_min=float(args.tsep_plateau_chi2_min),
+        tsep_plateau_chi2_max=float(args.tsep_plateau_chi2_max),
+        tsep_plateau_score_window_penalty=float(args.tsep_plateau_score_window_penalty),
+    )
+    grouped_q2_excited_fit = _fit_grouped_q2_excited_state(
+        grouped_q2_tsep,
+        cov_reg=float(args.cov_reg),
+        q2_tol=float(args.q2_tol),
+        tsep_max_safe=tsep_max_safe,
+        tsep_fit_range=_parse_fit_range_text(args.tsep_fit_range),
+        tsep_fit_min_points=int(args.tsep_fit_min_points),
+        tsep_fit_chi2_min=float(args.tsep_fit_chi2_min),
+        tsep_fit_chi2_max=float(args.tsep_fit_chi2_max),
+        tsep_fit_score_window_penalty=float(args.tsep_fit_score_window_penalty),
+        gap_min=float(args.tsep_fit_gap_min),
+        gap_max=float(args.tsep_fit_gap_max),
+        gap_grid=int(args.tsep_fit_gap_grid),
+    )
 
     summary = {
         "input": str(ckpt_path),
@@ -656,10 +1341,47 @@ def main() -> int:
             "tsep_max": int(args.tsep_max),
             "component": str(args.component),
             "zv": float(args.zv),
+            "q2_tol": float(args.q2_tol),
+            "tsep_auto_thermal_cut": bool(args.tsep_auto_thermal_cut),
+            "tsep_thermal_margin": int(args.tsep_thermal_margin),
+            "tsep_max_safe": None if tsep_max_safe is None else int(tsep_max_safe),
+        },
+        "analysis_notes": {
+            "per_channel_methods": [
+                "ratio estimator with overlap cancellation",
+                "direct estimator using Z-factors from separate 2pt fits",
+            ],
+            "current_component_convention": (
+                "By default (--component auto), the temporal current is reduced with Re[M_eff] while spatial currents "
+                "are reduced with -Im[M_eff]. This matches the Euclidean phase convention used by the 2D Schwinger-model measurement."
+            ),
+            "q2_definition": "Q^2 = (E_f - E_i)^2 + (p_f - p_i)^2 in Euclidean conventions using fitted pion energies",
+            "late_tsep_reduction": (
+                "grouped_q2_constant_diag is a late-tsep constant diagnostic after grouping equal-(Q^2,tsep) channels. "
+                "It should not be interpreted as a full excited-state-controlled extraction."
+            ),
+            "preferred_reduced_result": (
+                "grouped_q2 uses a one-exponential excited-state fit in tsep to the reduced fixed-Q^2 data."
+            ),
+            "not_implemented": [
+                "global simultaneous correlated fit of 2pt and 3pt data across all tsep",
+                "multi-state simultaneous correlated fit of reduced Q^2 data beyond the one-exponential tsep model",
+            ],
         },
         "n_channels": int(len(serializable_results)),
         "channels": serializable_results,
-        "grouped_q2_tsep": grouped_q2_tsep,
+        "grouped_q2_tsep": [
+            {k: v for k, v in row.items() if not str(k).startswith("_")}
+            for row in grouped_q2_tsep
+        ],
+        "grouped_q2_constant_diag": [
+            {k: v for k, v in row.items() if not str(k).startswith("_")}
+            for row in grouped_q2_constant_diag
+        ],
+        "grouped_q2": [
+            {k: v for k, v in row.items() if not str(k).startswith("_")}
+            for row in grouped_q2_excited_fit
+        ],
         "charge_normalization": _charge_normalization_report(serializable_results),
     }
     with json_path.open("w", encoding="utf-8") as f:
@@ -694,6 +1416,32 @@ def main() -> int:
                 capsize=2.0,
                 alpha=0.9,
             )
+        for grp in grouped_q2_constant_diag:
+            axes[0].errorbar(
+                [float(grp["q2_cont_like"])],
+                [float(grp["form_ratio"])],
+                yerr=[float(grp["form_ratio_err"])],
+                fmt="D",
+                color="tab:red",
+                mfc="white",
+                mec="tab:red",
+                ms=6.0,
+                capsize=2.0,
+                alpha=0.95,
+            )
+        for grp in grouped_q2_excited_fit:
+            axes[0].errorbar(
+                [float(grp["q2_cont_like"])],
+                [float(grp["ratio_fit"]["form_factor"])],
+                yerr=[float(grp["ratio_fit"]["form_factor_err"])],
+                fmt="o",
+                color="tab:red",
+                mfc="tab:red",
+                mec="tab:red",
+                ms=5.5,
+                capsize=2.0,
+                alpha=0.95,
+            )
 
         grouped: Dict[Tuple[int, int], List[Dict[str, object]]] = {}
         for row in serializable_results:
@@ -721,6 +1469,30 @@ def main() -> int:
                 capsize=2.0,
                 alpha=0.9,
             )
+        cmap = plt.get_cmap("tab10")
+        for idx, grp in enumerate(grouped_q2_constant_diag):
+            color = cmap(idx % 10)
+            plat = grp["plateau"]
+            axes[1].hlines(
+                float(grp["form_ratio"]),
+                float(plat["tsep_min"]) - 0.25,
+                float(plat["tsep_max"]) + 0.25,
+                colors=[color],
+                linestyles="--",
+                linewidth=1.4,
+            )
+            axes[1].fill_between(
+                [float(plat["tsep_min"]) - 0.25, float(plat["tsep_max"]) + 0.25],
+                float(grp["form_ratio"]) - float(grp["form_ratio_err"]),
+                float(grp["form_ratio"]) + float(grp["form_ratio_err"]),
+                color=color,
+                alpha=0.10,
+            )
+        for idx, grp in enumerate(grouped_q2_excited_fit):
+            color = cmap(idx % 10)
+            xfit = np.asarray(grp["ratio_fit"]["fit_tseps"], dtype=np.float64)
+            yfit = np.asarray(grp["ratio_fit"]["fit_curve"], dtype=np.float64)
+            axes[1].plot(xfit, yfit, color=color, lw=1.6, ls="-", alpha=0.9)
         axes[1].set_xlabel("tsep")
         axes[1].set_ylabel("F_pi" if np.any(np.isfinite([r["form_ratio"] for r in serializable_results])) else "matrix element")
         axes[1].set_title("Source-sink separation scan")

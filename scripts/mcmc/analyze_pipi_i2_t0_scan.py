@@ -54,8 +54,14 @@ def _choose_common_fit_range(t0_list: Sequence[int], lt: int, eff_nt: int) -> Tu
     defs = [_default_fit_range_for_t0(int(t0), int(lt), int(eff_nt)) for t0 in t0_list]
     a = max(int(x[0]) for x in defs)
     b = min(int(x[1]) for x in defs)
-    if b < a:
-        return defs[0]
+    if b >= a and (b - a + 1) >= 2:
+        return int(a), int(b)
+    start = min(max(0, max(int(t0) for t0 in t0_list) + 1), max(0, int(eff_nt) - 1))
+    stop = min(max(start, start + 3), max(0, int(eff_nt) - 1), max(0, int(lt) // 2 - 2))
+    if stop >= start and (stop - start + 1) >= 2:
+        return int(start), int(stop)
+    if b >= a:
+        return int(a), int(b)
     return int(a), int(b)
 
 

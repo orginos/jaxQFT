@@ -538,6 +538,40 @@ def _component_view(arr: np.ndarray, component: str) -> np.ndarray:
     raise ValueError(f"Unsupported component: {component!r}")
 
 
+def _resolve_analysis_component(payload: Mapping, *, mu: int, component: str) -> Tuple[str, float, str]:
+    comp = str(component).strip().lower()
+    if comp == "auto":
+        temporal_mu = _temporal_mu_from_payload(payload)
+        if int(mu) == int(temporal_mu):
+            return "re", 1.0, "Re"
+        return "im", -1.0, "-Im"
+    if comp == "re":
+        return "re", 1.0, "Re"
+    if comp == "im":
+        return "im", 1.0, "Im"
+    if comp == "abs":
+        return "abs", 1.0, "|.|"
+    raise ValueError(f"Unsupported component: {component!r}")
+
+
+def _analysis_component_view(arr: np.ndarray, *, payload: Mapping, mu: int, component: str) -> Tuple[np.ndarray, Dict[str, object]]:
+    resolved_component, resolved_sign, resolved_label = _resolve_analysis_component(
+        payload,
+        mu=int(mu),
+        component=str(component),
+    )
+    view = _component_view(arr, resolved_component)
+    if resolved_sign != 1.0:
+        view = np.asarray(float(resolved_sign) * np.asarray(view, dtype=np.float64), dtype=np.float64)
+    meta = {
+        "requested_component": str(component),
+        "resolved_component": str(resolved_component),
+        "resolved_sign": float(resolved_sign),
+        "resolved_label": str(resolved_label),
+    }
+    return view, meta
+
+
 def _sqrt_complex_safe(x: np.ndarray) -> np.ndarray:
     arr = np.asarray(x, dtype=np.complex128)
     out = np.sqrt(arr)
@@ -859,7 +893,12 @@ def main() -> int:
     ap.add_argument("--pi", type=int, required=True, help="source momentum quantum number")
     ap.add_argument("--pf", type=int, required=True, help="sink momentum quantum number")
     ap.add_argument("--tsep", type=int, required=True, help="source-sink separation")
-    ap.add_argument("--component", choices=("re", "im", "abs"), default="re", help="component used for plateau fits")
+    ap.add_argument(
+        "--component",
+        choices=("auto", "re", "im", "abs"),
+        default="auto",
+        help="component used for plateau fits; auto uses Re for the temporal current and -Im for spatial currents",
+    )
     ap.add_argument("--zv", type=float, default=1.0, help="vector-current renormalization factor; use 1 for conserved current")
     ap.add_argument("--discard", type=int, default=0)
     ap.add_argument("--stride", type=int, default=1)
@@ -934,6 +973,12 @@ def main() -> int:
     support_taus = np.asarray(three_meta["support_taus"], dtype=np.int64)
 
     iat_max_lag = None if int(args.iat_max_lag) <= 0 else int(args.iat_max_lag)
+    resolved_component, resolved_sign, resolved_label = _resolve_analysis_component(
+        payload,
+        mu=int(args.mu),
+        component=str(args.component),
+    )
+
     if int(args.block_size) > 0:
         block_size = int(args.block_size)
         block_meta = {
@@ -951,7 +996,7 @@ def main() -> int:
             iat_method=str(args.iat_method),
             iat_c=float(args.iat_c),
             iat_max_lag=iat_max_lag,
-            component=str(args.component),
+            component=str(resolved_component),
         )
 
     if bool(args.progress):
@@ -1064,10 +1109,10 @@ def main() -> int:
         zv=float(args.zv),
     )
 
-    ratio_comp_full = _component_view(mratio_full, args.component)
-    ratio_comp_jk = _component_view(mratio_jk, args.component)
-    direct_comp_full = _component_view(mdir_full, args.component)
-    direct_comp_jk = _component_view(mdir_jk, args.component)
+    ratio_comp_full = float(resolved_sign) * _component_view(mratio_full, resolved_component)
+    ratio_comp_jk = float(resolved_sign) * _component_view(mratio_jk, resolved_component)
+    direct_comp_full = float(resolved_sign) * _component_view(mdir_full, resolved_component)
+    direct_comp_jk = float(resolved_sign) * _component_view(mdir_jk, resolved_component)
 
     if str(args.plateau_range).strip():
         plateau_range = _parse_fit_range_text(args.plateau_range)
@@ -1215,7 +1260,10 @@ def main() -> int:
         },
         "plateau": {
             "selected_on": "ratio",
-            "component": str(args.component),
+            "component_requested": str(args.component),
+            "component_resolved": str(resolved_component),
+            "component_sign": float(resolved_sign),
+            "component_label": str(resolved_label),
             "tmin": float(plateau["tmin"]),
             "tmax": float(plateau["tmax"]),
             "chi2_dof": float(plateau["chi2_dof"]),

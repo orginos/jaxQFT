@@ -131,13 +131,50 @@ nonzero. In the present 2D convention this means
   \item $\mu=1$ (temporal): divide by $E_f+E_i$,
   \item $\mu=0$ (spatial): divide by $p_f+p_i$.
 \end{itemize}
+The analysis also has to choose the correct complex component of the reduced
+matrix element. In the present Euclidean convention this is
+\begin{itemize}
+  \item $\mathrm{Re}\,M_{\rm eff}$ for the temporal current,
+  \item $-\mathrm{Im}\,M_{\rm eff}$ for the spatial current.
+\end{itemize}
+This is now the default \texttt{--component auto} behavior in both analysis
+scripts, and it is the convention used when combining $\mu=0$ and $\mu=1$
+channels into a common fixed-$Q^2$ average.
 Therefore the spatial current is useful for non-Breit kinematics, while it
 vanishes identically in the Breit frame.
+
+The script reports two estimators for the same matrix element:
+\begin{enumerate}
+  \item a ratio estimator, where the source/sink overlap factors cancel
+  against appropriate two-point functions,
+  \item a direct estimator, where the overlap factors are reconstructed from
+  separate two-point fits through
+  $Z_\pi(p)=\sqrt{2E_\pi(p)A_\pi(p)}$.
+\end{enumerate}
+In both cases the fitted pion energies are also used to determine the momentum
+transfer
+\begin{equation}
+  Q^2 = (E_f-E_i)^2 + (p_f-p_i)^2
+\end{equation}
+in Euclidean conventions. This is not approximated by the spatial momentum
+transfer alone.
 
 \subsection{Batch form-factor scan}
 \texttt{scripts/mcmc/analyze\_pion\_form\_factor.py} scans all matching
 channels in a checkpoint, runs the same blocked-jackknife extraction for each
 one, and summarizes the results in a JSON table together with a summary PNG.
+The reduction is done in two stages:
+\begin{enumerate}
+  \item First, all channels that share the same $(Q^2,t_{\rm sep})$ are
+  combined with a covariance-weighted average. This is where different current
+  components $\mu$ and different momentum routings contribute to the same
+  matrix element after the appropriate kinematic prefactors have been removed.
+  \item Second, the resulting fixed-$Q^2$ data are analyzed as a function of
+  $t_{\rm sep}$, and an optional correlated constant fit can be used as a
+  \emph{late-$t_{\rm sep}$ diagnostic}. This is useful for checking whether the
+  large-$t_{\rm sep}$ points are mutually consistent, but it should not be
+  confused with a full excited-state analysis.
+\end{enumerate}
 For the default 16\,$\times$\,32 card this means a scan over the available
 Breit-frame momentum transfers and all stored source-sink separations. If the
 measurement was done with \texttt{pair\_mode = "all"} and both current
@@ -145,6 +182,9 @@ components were stored, the batch script can additionally be run with
 \texttt{--all-mus}. In that mode it computes correlated averages of all channels
 that share the same $(Q^2,t_{\rm sep})$, so the spatial current contributes
 extra statistics whenever $p_f+p_i\neq 0$.
+For charge-normalization studies, the batch script also supports
+\texttt{--pair-mode q2zero} (aliases \texttt{equal}, \texttt{diagonal}),
+which restricts the scan to the equal-momentum channels $p_f=p_i$.
 
 \section{Statistics}
 The analysis is blocked and IAT-aware:
@@ -153,7 +193,13 @@ The analysis is blocked and IAT-aware:
   \item a block size is chosen automatically from integrated autocorrelation
   times unless overridden,
   \item pion energies and overlap factors are fit on blocked data,
-  \item the three-point plateau is chosen with correlated constant fits,
+  \item the $\tau$ plateau in each 3pt channel is chosen with correlated
+  constant fits,
+  \item channels with the same $(Q^2,t_{\rm sep})$ are combined with their full
+  jackknife covariance,
+  \item optionally, the remaining $t_{\rm sep}$ dependence at fixed $Q^2$ is
+  summarized with a second correlated constant fit as a late-$t_{\rm sep}$
+  consistency check,
   \item matrix elements and form factors are quoted from blocked jackknife
   replicas.
 \end{enumerate}
@@ -171,5 +217,58 @@ such as $4\times 8$ with $t_{\rm sep}=4$ is not a meaningful charge-normalizatio
 test because wrap-around and excited-state contamination are still large there.
 A proper physics validation should therefore be done on a thermalized ensemble
 with several source-sink separations.
+
+Another limitation should be stated explicitly: the current code does
+\emph{not} yet perform a single global simultaneous fit of the full two-point
+and three-point data set. The implemented workflow is instead
+\begin{enumerate}
+  \item separate blocked fits of the required two-point functions,
+  \item ratio/direct-overlap reconstruction of each 3pt matrix element,
+  \item correlated reduction over channels and $t_{\rm sep}$.
+\end{enumerate}
+This is already a statistically controlled extraction strategy, but it is not
+the same as a joint $(C_2,C_3)$ simultaneous fit with common energies,
+overlaps, and matrix elements.
+
+Relatedly, the current batch reduction does not yet model the residual excited
+state contamination in the $t_{\rm sep}$ dependence of the reduced form factor.
+At fixed $Q^2$ one should expect
+\begin{equation}
+  F_{\rm eff}(Q^2,t_{\rm sep})
+  =
+  F_\pi(Q^2)
+  +
+  \mathcal{O}(e^{-\Delta E\, t_{\rm sep}})
+\end{equation}
+with coefficients that depend on the chosen ratio or overlap-removal scheme.
+Therefore the optional constant fit in $t_{\rm sep}$ should be interpreted only
+as a large-separation consistency test unless a proper excited-state model is
+fit.
+
+As a first explicit excited-state model, the batch analyzer now also supports a
+correlated one-exponential fit of the reduced fixed-$Q^2$ data,
+\begin{equation}
+  F_{\rm eff}(Q^2,t_{\rm sep})
+  =
+  F_\pi(Q^2)
+  +
+  A(Q^2)\,e^{-\Delta(Q^2)\,t_{\rm sep}}.
+\end{equation}
+This fit is performed after the $(Q^2,t_{\rm sep})$ channel averaging described
+above, using the full jackknife covariance of the reduced data. It is a more
+appropriate default reduced-$Q^2$ summary than a constant fit across all
+$t_{\rm sep}$ values, but it is still only a first model. In particular, it
+does not capture more complicated source/sink excited-state structures or
+multiple gaps, so its fit quality must still be checked channel by channel.
+
+To avoid obvious thermal contamination, the reduced-$Q^2$ fits now also apply
+an automatic temporal-extent safety cut by default:
+\begin{equation}
+  t_{\rm sep} \le \frac{T}{2} - \Delta_T,
+\end{equation}
+with a configurable margin $\Delta_T$ (default $\Delta_T=1$). This removes the
+most obvious wrap-around region from the reduced fits and records the excluded
+large-$t_{\rm sep}$ values in the JSON output. This is a conservative filter,
+not a replacement for a fully derived finite-$T$ fit ansatz.
 
 \end{document}
