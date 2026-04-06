@@ -10,6 +10,7 @@ JAX transcription of core `torchQFT` utilities.
 - `jaxqft.models.phi4_rg_checkerboard_flow`: RG checkerboard conditional flow for `phi^4`, using red/black `\eta` updates plus a `(1,1)` reblocking shift cycle controlled by `--n-cycles`, with selectable conditioner `--conditioner {transformer,mlp}`.
 - `jaxqft.models.phi4_rg_checkerboard_inblock_flow`: checkerboard RG flow with the same red/black plus shifted-blocking cycle, but each color pass now does masked in-block mixing among the three block fluctuations via `--n-inner-couplings`.
 - `jaxqft.models.phi4_rg_coarse_eta_flow`: RG coarse-lattice fluctuation flow for `phi^4`, which keeps the coarse field fixed at each level and trivializes only the local `\eta \in \mathbb{R}^3` fluctuations using red/black coarse-lattice sweeps with a local neighborhood MLP.
+- `jaxqft.models.phi4_rg_coarse_eta_gaussian_flow`: independent evolution of the coarse-eta flow that adds learned multivariate Gaussian priors for the local fluctuation variables, with selectable intermediate-level modes `--eta-gaussian {none,level,coarse_patch}` and selectable terminal `4`-variate Gaussian prior `--terminal-prior {std,learned}`.
 - `jaxqft.models.stacked_mg`: stacked variant of MGFlow.
 - `jaxqft.models.su3_ym.SU3YangMills`: pure SU(3) Yang-Mills theory + HMC-compatible API.
 - `jaxqft.core.integrators`: `leapfrog`, `minnorm2`, `minnorm4pf4`, and r-RESPA variants.
@@ -28,11 +29,13 @@ JAX transcription of core `torchQFT` utilities.
   - `scripts/phi4/check_rg_checkerboard_flow.py`
   - `scripts/phi4/check_rg_checkerboard_inblock_flow.py`
   - `scripts/phi4/check_rg_coarse_eta_flow.py`
+  - `scripts/phi4/check_rg_coarse_eta_gaussian_flow.py`
   - `scripts/phi4/train_mg_single.py`
   - `scripts/phi4/train_rg_cond_flow.py`
   - `scripts/phi4/train_rg_checkerboard_flow.py`
   - `scripts/phi4/train_rg_checkerboard_inblock_flow.py`
   - `scripts/phi4/train_rg_coarse_eta_flow.py`
+  - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
   - `scripts/phi4/train_stacked_mg.py`
   - `scripts/su3_ym/hmc_su3_ym.py`
   - `scripts/su3_ym/bench_hmc_su3.py`
@@ -61,6 +64,8 @@ JAX_PLATFORMS=cpu python scripts/phi4/check_rg_checkerboard_inblock_flow.py --se
 JAX_PLATFORMS=cpu python scripts/phi4/train_rg_checkerboard_inblock_flow.py --L 16 --lam 2.4 --mass -0.4 --n-cycles 1 --n-inner-couplings 3 --validate
 JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_flow.py --selfcheck-fail
 JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_flow.py --L 16 --lam 2.4 --mass -0.4 --n-cycles 2 --radius 1 --validate
+JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_gaussian_flow.py --selfcheck-fail
+JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --L 16 --lam 2.4 --mass -0.4 --n-cycles 2 --radius 1 --eta-gaussian level --terminal-prior learned --validate
 python scripts/phi4/train_stacked_mg.py
 ```
 
@@ -73,6 +78,11 @@ python scripts/phi4/train_stacked_mg.py
 - A precise code-level note for the checkerboard RG model lives in `docs/notes/phi4_rg_checkerboard_flow.tex`.
 - A precise code-level note for the checkerboard in-block RG model lives in `docs/notes/phi4_rg_checkerboard_inblock_flow.tex`.
 - A precise code-level note for the coarse-lattice fluctuation RG model lives in `docs/notes/phi4_rg_coarse_eta_flow.tex`.
+- A precise code-level note for the Gaussian-prior coarse-eta RG model lives in `docs/notes/phi4_rg_coarse_eta_gaussian_flow.tex`.
+- The Gaussian-prior coarse-eta branch adds two intermediate-level prior options:
+  - `--eta-gaussian level`: one learned zero-mean `3x3` Gaussian per RG level.
+  - `--eta-gaussian coarse_patch`: a zero-mean `3x3` Gaussian conditioned on a local patch of coarse fields.
+- In the current `16^2`, `mass=-0.4`, `lam=2.4` tests, the cheaper `--eta-gaussian level` variant and the conditioned `--eta-gaussian coarse_patch` variant both train stably through the `32 -> 64 -> 128 -> 256 -> 512 -> 1024` batch ramp, with very similar final quality. The conditioned Gaussian is not a clear win in the current implementation.
 - The new RG-conditional trainer/checker expose `--parity {none,sym}`; `sym` enforces the old-map-style `z \mapsto -z`, `\phi \mapsto -\phi` symmetry and is the default.
 - The checkerboard RG trainer/checker expose `--n-cycles`, which counts red/black + shifted red/black update cycles per non-terminal RG level.
 - The checkerboard RG trainer/checker also expose `--conditioner {transformer,mlp}`; the MLP option is a much cheaper pointwise conditioner.

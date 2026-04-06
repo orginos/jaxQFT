@@ -1,0 +1,408 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, geometry, mathtools, booktabs, longtable}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{RG Coarse-Eta Flow with Learned Gaussian Priors for 2D $\phi^4$}
+\author{Kostas Orginos}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This note documents the independent Gaussian-prior evolution branch implemented
+in
+\texttt{jaxqft/models/phi4\_rg\_coarse\_eta\_gaussian\_flow.py},
+with trainer
+\texttt{scripts/phi4/train\_rg\_coarse\_eta\_gaussian\_flow.py}
+and checker
+\texttt{scripts/phi4/check\_rg\_coarse\_eta\_gaussian\_flow.py}.
+
+This branch leaves
+\texttt{jaxqft/models/phi4\_rg\_coarse\_eta\_flow.py}
+unchanged and adds learned multivariate Gaussian priors on top of the same
+coarse-eta Wilsonian RG structure.
+
+\section{High-Level Design}
+
+At each non-terminal RG level:
+\begin{enumerate}
+\item split the field into a coarse scalar field $c$ and local block
+fluctuations $\eta \in \mathbb{R}^3$,
+\item recursively trivialize the coarse field,
+\item apply a learned Gaussian linear map to the local latent fluctuation
+variables,
+\item apply the existing nonlinear coarse-eta fluctuation flow,
+\item merge the coarse field and fluctuations back to the finer lattice.
+\end{enumerate}
+
+The key point is that the coarse field remains fixed during the whole
+fluctuation update, so the level map remains Wilsonian in the same sense as the
+base coarse-eta model.
+
+\section{RG Split}
+
+Let the level-$k$ lattice be $\Lambda_k$ with linear size $L_k = L / 2^k$.
+Each $2 \times 2$ block is written as
+\[
+v = (v_{00}, v_{01}, v_{10}, v_{11}) \in \mathbb{R}^4.
+\]
+
+For \texttt{rg\_type="average"} the code uses the orthonormal Haar basis
+\[
+(c,\eta_1,\eta_2,\eta_3) = H v,
+\]
+with
+\[
+H=
+\begin{pmatrix}
+\tfrac12 & \tfrac12 & \tfrac12 & \tfrac12 \\
+\tfrac12 & -\tfrac12 & \tfrac12 & -\tfrac12 \\
+\tfrac12 & \tfrac12 & -\tfrac12 & -\tfrac12 \\
+\tfrac12 & -\tfrac12 & -\tfrac12 & \tfrac12
+\end{pmatrix}.
+\]
+For \texttt{rg\_type="select"} the code uses
+\[
+c=v_{00}, \qquad \eta=(v_{01},v_{10},v_{11}).
+\]
+
+Thus the level state should be viewed as a field on the coarse lattice
+\[
+y_b = (c_b,\eta_b), \qquad c_b \in \mathbb{R}, \quad \eta_b \in \mathbb{R}^3,
+\qquad b \in \Lambda_{k+1}.
+\]
+
+\section{Latent Prior and Gaussian Maps}
+
+The global latent prior remains sitewise standard normal on the original
+lattice:
+\[
+z \sim \mathcal{N}(0, I).
+\]
+
+The learned Gaussian priors are implemented as exact lower-triangular linear
+maps acting on standard-normal latent variables.
+
+\subsection{Intermediate $3 \times 3$ Gaussian}
+
+At each non-terminal RG level, before the nonlinear eta flow, the latent
+fluctuation vector $z_{\eta,b} \in \mathbb{R}^3$ is mapped to an intermediate
+variable
+\[
+\tilde z_{\eta,b} = L_b(c)\, z_{\eta,b},
+\]
+where $L_b(c)$ is lower triangular with positive diagonal. In the code this is
+parameterized by diagonal log-scales and three strictly lower-triangular
+entries:
+\[
+L_b =
+\begin{pmatrix}
+e^{\alpha_1} & 0 & 0 \\
+\ell_{21} & e^{\alpha_2} & 0 \\
+\ell_{31} & \ell_{32} & e^{\alpha_3}
+\end{pmatrix}.
+\]
+
+There are three modes:
+\begin{itemize}
+\item \texttt{eta\_gaussian = none}: $L_b = I$.
+\item \texttt{eta\_gaussian = level}: one shared learned $L^{(\ell)}$ per RG
+level.
+\item \texttt{eta\_gaussian = coarse\_patch}: $L_b$ is conditioned on a local
+patch of coarse fields only.
+\end{itemize}
+
+For the conditioned mode, the context is
+\[
+u_b = \tilde c|_{\mathcal N_{r_g}(b)},
+\]
+where $\tilde c_b$ is the physical coarse scalar used for conditioning and
+$\mathcal N_{r_g}(b)$ is the coarse-lattice patch of radius
+\texttt{gaussian\_radius}. The conditioner is a local patch MLP. It depends
+only on coarse fields, not on neighboring $\eta$ variables.
+
+\subsection{Terminal $4 \times 4$ Gaussian}
+
+At the final $2 \times 2$ block, the code uses a terminal RealNVP and an
+optional learned zero-mean $4$-variate Gaussian. The generative map is
+\[
+z_{\mathrm{term}} \xmapsto{L_{\mathrm{term}}}
+\tilde z_{\mathrm{term}} \xmapsto{\mathrm{RealNVP}}
+x_{\mathrm{term}}.
+\]
+
+Here
+\[
+L_{\mathrm{term}} \in \mathbb{R}^{4 \times 4}
+\]
+is lower triangular with positive diagonal. The mode is selected by
+\texttt{terminal\_prior}:
+\begin{itemize}
+\item \texttt{std}: $L_{\mathrm{term}} = I$,
+\item \texttt{learned}: full learned lower-triangular $4 \times 4$ map.
+\end{itemize}
+
+\section{Nonlinear Coarse-Eta Flow}
+
+After the Gaussian map, the code applies the same nonlinear coarse-eta flow as
+the base model. Suppressing the level index, the coarse lattice is split into
+red and black checkerboards:
+\[
+\Lambda = R \cup B.
+\]
+
+For one red sweep:
+\begin{itemize}
+\item all coarse scalars $c$ are visible and fixed,
+\item black fluctuations are visible and frozen,
+\item red fluctuations are updated.
+\end{itemize}
+
+At a red site $b$, the update is a conditional lower-triangular affine map on
+the local three-component fluctuation vector:
+\[
+\eta_b' = A_b(h)\, \eta_b + t_b(h),
+\]
+where $A_b(h)$ is lower triangular with positive diagonal, and the conditioner
+feature $h$ is produced by a local patch MLP from
+\[
+u_b = \bigl(\eta^{\mathrm{masked}}, \tilde c \bigr)\big|_{\mathcal N_r(b)}.
+\]
+The black sweep is analogous. Repeating red then black gives one cycle, and the
+number of cycles is controlled by \texttt{n\_cycles}.
+
+\section{Full Generative and Inverse Maps}
+
+Let $G_\ell^{\mathrm{coarse}}$ denote the recursive coarse-field map at level
+$\ell$, $G_\ell^{\mathrm{gauss}}$ the Gaussian linear map on $\eta$, and
+$G_\ell^{\eta}$ the nonlinear coarse-eta flow. Then for a non-terminal level,
+\[
+G_\ell(z_\ell) =
+\operatorname{merge}\!\Bigl(
+G_{\ell+1}^{\mathrm{coarse}}(z_{\ell+1}),
+G_\ell^{\eta}\bigl(
+G_\ell^{\mathrm{gauss}}(z_{\eta,\ell}) \,\big|\, x_{\ell+1}
+\bigr)
+\Bigr),
+\]
+with
+\[
+(z_{\ell+1}, z_{\eta,\ell}) = \operatorname{split}(z_\ell),
+\qquad
+x_{\ell+1} = G_{\ell+1}^{\mathrm{coarse}}(z_{\ell+1}).
+\]
+
+At the terminal level,
+\[
+G_{\mathrm{term}} = \mathrm{RealNVP} \circ L_{\mathrm{term}}.
+\]
+
+The inverse order is reversed:
+\[
+F_\ell = \operatorname{split}^{-1} \circ
+\Bigl(
+F_{\ell+1}^{\mathrm{coarse}},
+\left(G_\ell^{\mathrm{gauss}}\right)^{-1}
+\circ
+\left(G_\ell^{\eta}\right)^{-1}
+\Bigr).
+\]
+
+\section{Exact Log Density}
+
+Because every piece is triangular or a standard coupling flow, the log-density
+is exact. If
+\[
+z = F(x), \qquad \log p_Z(z) = -\frac12 \|z\|^2 - \frac{N}{2}\log(2\pi),
+\]
+then
+\[
+\log p_X(x) = \log p_Z(z) + \log \left| \det \frac{\partial F}{\partial x} \right|.
+\]
+
+Each intermediate $3 \times 3$ Gaussian contributes
+\[
+\log \left| \det \frac{\partial F_{\mathrm{gauss}}}{\partial x} \right|
+= -(\alpha_1 + \alpha_2 + \alpha_3),
+\]
+and the terminal $4 \times 4$ Gaussian contributes
+\[
+\log \left| \det \frac{\partial F_{\mathrm{term,gauss}}}{\partial x} \right|
+= -(\alpha_1 + \alpha_2 + \alpha_3 + \alpha_4).
+\]
+
+\section{Parity Symmetry}
+
+The branch supports
+\[
+\phi \mapsto -\phi, \qquad z \mapsto -z
+\]
+through \texttt{parity = sym}. For the conditioned intermediate Gaussian, this
+is enforced by symmetrizing the raw conditioner outputs as an even function of
+the coarse-field context:
+\[
+\mathrm{raw}(u) \mapsto \frac12 \bigl(\mathrm{raw}(u) + \mathrm{raw}(-u)\bigr).
+\]
+Since the Gaussian is zero mean, only even dependence is needed there.
+
+\section{Trainer CLI}
+
+The trainer is
+\texttt{scripts/phi4/train\_rg\_coarse\_eta\_gaussian\_flow.py}.
+
+\subsection*{Physics and geometry}
+\begin{longtable}{@{}ll@{}}
+\toprule
+Flag & Meaning \\
+\midrule
+\texttt{--L} & lattice size, requires a square power of two \\
+\texttt{--mass} & bare quadratic coupling \\
+\texttt{--lam} & quartic coupling \\
+\texttt{--rg-type \{average,select\}} & block decomposition rule \\
+\bottomrule
+\end{longtable}
+
+\subsection*{Flow architecture}
+\begin{longtable}{@{}ll@{}}
+\toprule
+Flag & Meaning \\
+\midrule
+\texttt{--width} & hidden width of the nonlinear coarse-eta conditioner \\
+\texttt{--n-cycles} & number of red/black coarse-lattice eta cycles per level \\
+\texttt{--radius} & nonlinear conditioner patch radius on the coarse lattice \\
+\texttt{--eta-gaussian \{none,level,coarse\_patch\}} & intermediate Gaussian mode \\
+\texttt{--gaussian-radius} & conditioning radius for \texttt{coarse\_patch} Gaussian \\
+\texttt{--gaussian-width} & hidden width for the conditioned Gaussian MLP \\
+\texttt{--terminal-prior \{std,learned\}} & terminal $4$-variate Gaussian mode \\
+\texttt{--terminal-n-layers} & terminal RealNVP depth \\
+\texttt{--terminal-width} & terminal RealNVP width \\
+\texttt{--output-init-scale} & small output initialization scale \\
+\texttt{--parity \{none,sym\}} & optional $Z_2$ symmetry projection \\
+\texttt{--log-scale-clip} & clip on diagonal log-scales \\
+\texttt{--offdiag-clip} & clip on lower-triangular off-diagonal entries \\
+\bottomrule
+\end{longtable}
+
+\subsection*{Training and checkpointing}
+\begin{longtable}{@{}ll@{}}
+\toprule
+Flag & Meaning \\
+\midrule
+\texttt{--epochs} & target epoch count; on resume this is the absolute target \\
+\texttt{--batch} & batch size; preserved from checkpoint unless overridden \\
+\texttt{--lr} & learning rate; preserved from checkpoint unless overridden \\
+\texttt{--resume} & checkpoint to load \\
+\texttt{--save} & checkpoint output file \\
+\texttt{--save-every} & periodic checkpoint cadence \\
+\texttt{--validate} & run validation at the end of the script \\
+\texttt{--validate-batch} & validation mini-batch size \\
+\texttt{--validate-super} & number of validation batches to aggregate \\
+\bottomrule
+\end{longtable}
+
+\section{Checker CLI}
+
+The checker is
+\texttt{scripts/phi4/check\_rg\_coarse\_eta\_gaussian\_flow.py}. It provides:
+\begin{itemize}
+\item invertibility test,
+\item Jacobian test against autodiff,
+\item timing breakdown.
+\end{itemize}
+
+Main checker-only knobs:
+\begin{itemize}
+\item \texttt{--shape H,W}
+\item \texttt{--jac-shape H,W}
+\item \texttt{--tests invertibility,jacobian,timing}
+\item \texttt{--invert-tol}
+\item \texttt{--jac-tol}
+\item \texttt{--jac-perturb-scale}
+\item \texttt{--timing-warmup}
+\item \texttt{--timing-iters}
+\item \texttt{--selfcheck-fail}
+\end{itemize}
+
+\section{Example Commands}
+
+Fresh run with the cheaper shared-per-level Gaussian:
+\begin{verbatim}
+source /opt/python/jax/bin/activate
+MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu \
+python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py \
+  --L 16 --mass -0.4 --lam 2.4 \
+  --width 64 --n-cycles 2 --radius 1 \
+  --eta-gaussian level \
+  --terminal-prior learned \
+  --batch 32 --lr 3e-4 --parity sym \
+  --epochs 1000 --validate
+\end{verbatim}
+
+Fresh run with the coarse-conditioned Gaussian:
+\begin{verbatim}
+source /opt/python/jax/bin/activate
+MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu \
+python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py \
+  --L 16 --mass -0.4 --lam 2.4 \
+  --width 64 --n-cycles 2 --radius 1 \
+  --eta-gaussian coarse_patch \
+  --gaussian-radius 1 --gaussian-width 64 \
+  --terminal-prior learned \
+  --batch 32 --lr 3e-4 --parity sym \
+  --epochs 1000 --validate
+\end{verbatim}
+
+Checker:
+\begin{verbatim}
+source /opt/python/jax/bin/activate
+MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu \
+python scripts/phi4/check_rg_coarse_eta_gaussian_flow.py --selfcheck-fail
+\end{verbatim}
+
+\section{Canonical $16^2$ Comparison}
+
+At the canonical point
+\[
+L=16, \qquad m^2=-0.4, \qquad \lambda=2.4,
+\]
+both intermediate Gaussian variants were run with the batch ramp
+\[
+32 \to 64 \to 128 \to 256 \to 512 \to 1024
+\]
+through epoch $6000$, using \texttt{terminal\_prior=learned} in both cases.
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Intermediate Gaussian & $\mathrm{std}(\Delta S)$ & $\mathrm{std}(w)$ & ESS \\
+\midrule
+\texttt{level} & 0.8416 & 0.9698 & 0.5153 \\
+\texttt{coarse\_patch} & 0.8619 & 0.9871 & 0.5065 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+So in the current implementation the coarse-conditioned intermediate Gaussian is
+not a clear improvement over the cheaper shared-per-level Gaussian.
+
+\section{Current Interpretation}
+
+The Gaussian-prior branch is useful because it cleanly separates:
+\begin{itemize}
+\item a standard-normal global latent prior,
+\item learned local Gaussian whitening at each RG level,
+\item the nonlinear fluctuation trivialization map.
+\end{itemize}
+
+The present tests suggest:
+\begin{itemize}
+\item a learned terminal $4$-variate Gaussian is worthwhile,
+\item a learned intermediate $3 \times 3$ Gaussian also works well,
+\item conditioning that intermediate Gaussian only on coarse fields does not
+yet produce a clear gain over a simpler levelwise covariance.
+\end{itemize}
+
+\end{document}

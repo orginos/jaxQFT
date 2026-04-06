@@ -12,6 +12,104 @@ Last updated: 2026-04-05
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- RG coarse-lattice fluctuation flow with learned Gaussian priors for `phi^4` (independent evolution branch):
+  - New model:
+    - `jaxqft/models/phi4_rg_coarse_eta_gaussian_flow.py`
+  - New training entry point:
+    - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
+  - New validation / profiling entry point:
+    - `scripts/phi4/check_rg_coarse_eta_gaussian_flow.py`
+  - New design note:
+    - `docs/notes/phi4_rg_coarse_eta_gaussian_flow.tex`
+  - Scope:
+    - leaves `phi4_rg_coarse_eta_flow.py` unchanged
+    - keeps the same Wilsonian coarse-eta map:
+      - split each `2x2` block into a coarse scalar field `c` and a local fluctuation vector `eta in R^3`
+      - keep `c` fixed during the whole level update
+      - trivialize only `eta` with red/black coarse-lattice sweeps
+    - adds learned multivariate Gaussian linear maps on top of the standard-normal latent prior
+      - intermediate levels:
+        - `--eta-gaussian none`
+        - `--eta-gaussian level`
+          - one learned zero-mean `3x3` Gaussian per RG level
+        - `--eta-gaussian coarse_patch`
+          - one learned zero-mean `3x3` Gaussian per coarse site, conditioned on a local patch of coarse fields only
+      - terminal level:
+        - `--terminal-prior std`
+        - `--terminal-prior learned`
+          - learned zero-mean `4x4` Gaussian on the terminal block after the terminal RealNVP coordinates
+    - the conditional Gaussian option does condition on coarse fields at the intermediate levels, but only on coarse fields, not on neighboring `eta`
+  - Public API:
+    - exported from `jaxqft.models`:
+      - `init_rg_coarse_eta_gaussian_flow`
+      - `rg_coarse_eta_gaussian_flow_g`
+      - `rg_coarse_eta_gaussian_flow_f`
+      - `rg_coarse_eta_gaussian_flow_log_prob`
+      - `rg_coarse_eta_gaussian_flow_prior_sample`
+      - `rg_coarse_eta_gaussian_flow_prior_log_prob`
+  - Training CLI highlights:
+    - all coarse-eta-flow knobs are preserved
+    - adds:
+      - `--eta-gaussian {none,level,coarse_patch}`
+      - `--gaussian-radius`
+      - `--gaussian-width`
+      - `--terminal-prior {std,learned}`
+    - fresh-run example:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --L 16 --mass -0.4 --lam 2.4 --width 64 --n-cycles 2 --radius 1 --eta-gaussian level --gaussian-radius 1 --gaussian-width 64 --terminal-prior learned --batch 32 --lr 3e-4 --parity sym --epochs 1000 --validate --save rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl`
+    - resume example:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --epochs 6000 --batch 1024 --lr 3e-4 --validate`
+  - Validation:
+    - syntax/compile validation command:
+      - `python3 -m py_compile jaxqft/models/__init__.py jaxqft/models/phi4_rg_coarse_eta_gaussian_flow.py scripts/phi4/train_rg_coarse_eta_gaussian_flow.py scripts/phi4/check_rg_coarse_eta_gaussian_flow.py`
+    - conditioned-Gaussian checker command:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_gaussian_flow.py --shape 8,8 --jac-shape 2,2 --batch-size 2 --timing-warmup 1 --timing-iters 2 --selfcheck-fail`
+    - conditioned-Gaussian checker results:
+      - invertibility:
+        - `max_abs_err = 4.172e-07`
+        - `max_rel_err = 1.547e-07`
+      - Jacobian:
+        - autodiff `log|det J| = 0.308165`
+        - network `log|det J| = 0.308165`
+        - absolute difference `= 1.788e-07`
+    - level-Gaussian checker command:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_gaussian_flow.py --shape 8,8 --jac-shape 2,2 --batch-size 2 --eta-gaussian level --timing-warmup 1 --timing-iters 2 --selfcheck-fail`
+    - level-Gaussian checker results:
+      - invertibility:
+        - `max_abs_err = 2.980e-07`
+        - `max_rel_err = 1.107e-07`
+      - Jacobian:
+        - autodiff `log|det J| = 0.308165`
+        - network `log|det J| = 0.308165`
+        - absolute difference `= 1.788e-07`
+  - Canonical `16^2` schedule test:
+    - physical point:
+      - `L = 16`
+      - `mass = -0.4`
+      - `lam = 2.4`
+    - shared training schedule:
+      - epochs `0 -> 1000`, batch `32`, lr `3e-4`
+      - epochs `1000 -> 2000`, batch `64`, lr `3e-4`
+      - epochs `2000 -> 3000`, batch `128`, lr `3e-4`
+      - epochs `3000 -> 4000`, batch `256`, lr `3e-4`
+      - epochs `4000 -> 5000`, batch `512`, lr `3e-4`
+      - epochs `5000 -> 6000`, batch `1024`, lr `3e-4`
+    - final comparison at epoch `6000`, batch `1024`:
+      - `eta_gaussian=level`:
+        - checkpoint: `rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl`
+        - mean action diff `= -93.07648`
+        - std action diff `= 0.84158325`
+        - std re-weighting factor `= 0.96977115`
+        - `ESS = 0.5153428`
+      - `eta_gaussian=coarse_patch`:
+        - checkpoint: `rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_egpatch_gr1_gw64_tglearned_parsym.pkl`
+        - mean action diff `= -93.057945`
+        - std action diff `= 0.86186767`
+        - std re-weighting factor `= 0.98711896`
+        - `ESS = 0.50648195`
+    - conclusion from the scan so far:
+      - both Gaussian-prior variants work well
+      - the intermediate-level Gaussian conditioned on coarse fields is not a clear improvement over the cheaper shared-per-level Gaussian in the current implementation
+      - the simpler `eta_gaussian=level` variant is the better default right now
 - RG coarse-lattice fluctuation flow for `phi^4` (new evolution branch):
   - New model:
     - `jaxqft/models/phi4_rg_coarse_eta_flow.py`
