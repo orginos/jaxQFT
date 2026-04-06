@@ -30,6 +30,7 @@ JAX transcription of core `torchQFT` utilities.
   - `scripts/phi4/check_rg_checkerboard_inblock_flow.py`
   - `scripts/phi4/check_rg_coarse_eta_flow.py`
   - `scripts/phi4/check_rg_coarse_eta_gaussian_flow.py`
+  - `scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py`
   - `scripts/phi4/train_mg_single.py`
   - `scripts/phi4/train_rg_cond_flow.py`
   - `scripts/phi4/train_rg_checkerboard_flow.py`
@@ -66,6 +67,7 @@ JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_flow.py --selfcheck-fa
 JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_flow.py --L 16 --lam 2.4 --mass -0.4 --n-cycles 2 --radius 1 --validate
 JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_gaussian_flow.py --selfcheck-fail
 JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --L 16 --lam 2.4 --mass -0.4 --n-cycles 2 --radius 1 --eta-gaussian level --terminal-prior learned --validate
+JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --tests hmc,knockout
 python scripts/phi4/train_stacked_mg.py
 ```
 
@@ -83,6 +85,9 @@ python scripts/phi4/train_stacked_mg.py
   - `--eta-gaussian level`: one learned zero-mean `3x3` Gaussian per RG level.
   - `--eta-gaussian coarse_patch`: a zero-mean `3x3` Gaussian conditioned on a local patch of coarse fields.
 - In the current `16^2`, `mass=-0.4`, `lam=2.4` tests, the cheaper `--eta-gaussian level` variant and the conditioned `--eta-gaussian coarse_patch` variant both train stably through the `32 -> 64 -> 128 -> 256 -> 512 -> 1024` batch ramp, with very similar final quality. The conditioned Gaussian is not a clear win in the current implementation.
+- `scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py` adds two post-training analyses for the current Gaussian branch:
+  - HMC target-sample level diagnostics that inspect how close each inverse-level output is to a standard normal.
+  - Module knockouts that replace selected level maps by the identity and re-score the resulting model on HMC target samples.
 - The new RG-conditional trainer/checker expose `--parity {none,sym}`; `sym` enforces the old-map-style `z \mapsto -z`, `\phi \mapsto -\phi` symmetry and is the default.
 - The checkerboard RG trainer/checker expose `--n-cycles`, which counts red/black + shifted red/black update cycles per non-terminal RG level.
 - The checkerboard RG trainer/checker also expose `--conditioner {transformer,mlp}`; the MLP option is a much cheaper pointwise conditioner.

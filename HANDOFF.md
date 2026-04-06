@@ -12,6 +12,88 @@ Last updated: 2026-04-05
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- HMC diagnostic and knockout analysis for the current Gaussian-prior coarse-eta branch:
+  - New analysis entry point:
+    - `scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py`
+  - Scope:
+    - loads a trained Gaussian-prior coarse-eta checkpoint
+    - generates target samples with the existing `phi^4` HMC implementation
+    - runs two complementary analyses on the same HMC sample set:
+      - HMC level diagnostic:
+        - push target samples through the inverse flow level by level
+        - compare raw blocked fluctuations, post-nonlinear-flow variables, and post-Gaussian variables
+        - report covariance error from identity, skewness, kurtosis, and nearest-neighbor residual correlations
+      - knockout analysis:
+        - replace selected modules by the identity without retraining
+        - rescore the modified model on HMC target samples via `std(ΔS)` and ESS
+        - supports per-level knockouts of:
+          - `eta_flow_Lk`
+          - `eta_gaussian_Lk`
+          - `terminal_flow`
+          - `terminal_gaussian`
+        - optional grouped knockouts:
+          - `all_eta_flow`
+          - `all_eta_gaussian`
+          - `all_terminal`
+  - Example command:
+    - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --nwarm 100 --nmeas 32 --nskip 5 --batch-size 16 --chunk-size 128 --include-grouped --tests hmc,knockout`
+  - Validation:
+    - syntax/compile validation command:
+      - `python3 -m py_compile scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py`
+    - smoke command:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --nwarm 10 --nmeas 4 --nskip 2 --batch-size 8 --chunk-size 16 --tests hmc,knockout`
+    - smoke result:
+      - completed successfully
+  - Canonical `16^2` result on the current Gaussian checkpoint:
+    - checkpoint:
+      - `rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl`
+    - HMC sampling parameters:
+      - `L=16`, `mass=-0.4`, `lam=2.4`
+      - `nwarm=100`, `nmeas=32`, `nskip=5`, `batch=16`, `nmd=7`, `tau=1.0`
+      - acceptance `= 0.9962`
+      - `512` target samples total
+    - baseline score on those HMC samples:
+      - `std(ΔS) = 0.849742`
+      - `std(w) = 1.243453`
+      - `ESS = 0.392746`
+    - HMC level diagnostic summary:
+      - finest non-terminal level `L0`:
+        - raw `cov_fro_err = 1.2861`
+        - after nonlinear flow `= 0.2684`
+        - after learned Gaussian `= 0.0320`
+      - middle level `L1`:
+        - raw `cov_fro_err = 0.7124`
+        - after nonlinear flow `= 0.2375`
+        - after learned Gaussian `= 0.0245`
+      - coarsest non-terminal level `L2`:
+        - raw `cov_fro_err = 1.2076`
+        - after nonlinear flow `= 0.2454`
+        - after learned Gaussian `= 0.0662`
+      - terminal block:
+        - raw `cov_fro_err = 10.7638`
+        - after terminal RealNVP `= 0.8461`
+        - after terminal learned Gaussian `= 0.3051`
+      - interpretation:
+        - the nonlinear eta flow does most of the first-pass whitening
+        - the learned Gaussian layers finish the covariance whitening very effectively
+        - residual nearest-neighbor correlations are strongly suppressed after the full inverse map
+    - knockout ranking by increase in `std(ΔS)`:
+      - `all_eta_flow`: `+8.1946`
+      - `eta_flow_L0`: `+6.6353`
+      - `all_terminal`: `+5.7961`
+      - `terminal_flow`: `+3.6191`
+      - `eta_flow_L1`: `+2.3662`
+      - `eta_flow_L2`: `+1.5278`
+      - `all_eta_gaussian`: `+1.0062`
+      - `eta_gaussian_L0`: `+0.8270`
+      - `eta_gaussian_L1`: `+0.2099`
+      - `terminal_gaussian`: `+0.1946`
+      - `eta_gaussian_L2`: `+0.1038`
+    - main takeaway:
+      - the finest-level nonlinear eta flow is the single most important module
+      - the terminal flow is also very important
+      - the learned Gaussian layers matter, but less than the nonlinear eta maps
+      - among the Gaussian modules, the finest-level shared `3x3` Gaussian matters the most
 - RG coarse-lattice fluctuation flow with learned Gaussian priors for `phi^4` (independent evolution branch):
   - New model:
     - `jaxqft/models/phi4_rg_coarse_eta_gaussian_flow.py`
