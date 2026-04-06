@@ -43,6 +43,14 @@ from .phi4_rg_coarse_eta_flow import (
     rg_coarse_eta_flow_prior_sample,
     rg_coarse_eta_flow_prior_log_prob,
 )
+from .phi4_rg_coarse_eta_gaussian_flow import (
+    init_rg_coarse_eta_gaussian_flow,
+    rg_coarse_eta_gaussian_flow_g,
+    rg_coarse_eta_gaussian_flow_f,
+    rg_coarse_eta_gaussian_flow_log_prob,
+    rg_coarse_eta_gaussian_flow_prior_sample,
+    rg_coarse_eta_gaussian_flow_prior_log_prob,
+)
 from .stacked_mg import (
     init_stacked_mg,
     stacked_g,
@@ -106,6 +114,12 @@ __all__ = [
     "rg_coarse_eta_flow_log_prob",
     "rg_coarse_eta_flow_prior_sample",
     "rg_coarse_eta_flow_prior_log_prob",
+    "init_rg_coarse_eta_gaussian_flow",
+    "rg_coarse_eta_gaussian_flow_g",
+    "rg_coarse_eta_gaussian_flow_f",
+    "rg_coarse_eta_gaussian_flow_log_prob",
+    "rg_coarse_eta_gaussian_flow_prior_sample",
+    "rg_coarse_eta_gaussian_flow_prior_log_prob",
     "init_stacked_mg",
     "stacked_g",
     "stacked_f",
