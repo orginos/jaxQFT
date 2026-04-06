@@ -125,6 +125,10 @@ def _field_metrics(field: np.ndarray) -> dict:
     return out
 
 
+def _normal_constant_per_component() -> float:
+    return 0.5 * (1.0 + math.log(2.0 * math.pi))
+
+
 def run_hmc_samples(
     *,
     shape: tuple[int, int],
@@ -279,6 +283,170 @@ def run_hmc_level_diagnostic(cfg: dict, weights: dict, samples: np.ndarray, chun
         ),
     }
     return {"levels": levels_out, "terminal": terminal_out}
+
+
+def _collect_conditional_terms(cfg: dict, weights: dict, x: jax.Array):
+    n_nonterminal = max(cfg["depth"] - 1, 0)
+    levels = [None] * n_nonterminal
+
+    def rec(xx: jax.Array, level: int):
+        if level >= cfg["depth"] - 1:
+            flat = xx.reshape((xx.shape[0], 4))
+            z_after_flow, ldj_flow = realnvp_f(cfg["terminal_flow_cfg"], weights["terminal_flow"], flat)
+            z_after_gauss, ldj_gauss = _triangular_linear_f4(
+                z_after_flow, *_terminal_gaussian_params(cfg, weights)
+            )
+            if getattr(ldj_flow, "ndim", 0) == 0:
+                ldj_flow = jnp.full((xx.shape[0],), ldj_flow, dtype=xx.dtype)
+            if getattr(ldj_gauss, "ndim", 0) == 0:
+                ldj_gauss = jnp.full((xx.shape[0],), ldj_gauss, dtype=xx.dtype)
+            z_term = z_after_gauss.reshape(xx.shape)
+            prior = _std_normal_log_prob(z_term, sum_axes=(1, 2))
+            term = {
+                "log_prob": prior + ldj_flow + ldj_gauss,
+                "prior_log_prob": prior,
+                "ldj_flow": ldj_flow,
+                "ldj_gaussian": ldj_gauss,
+                "latent": z_term,
+            }
+            return term
+
+        x_coarse, x_fine = _split_rg(xx, cfg["rg_mode"])
+        term = rec(x_coarse, level + 1)
+        z_after_flow, ldj_flow = _eta_flow_f(cfg, weights, x_fine, x_coarse, level)
+        z_after_gauss, ldj_gauss = _eta_gaussian_f(cfg, weights, z_after_flow, x_coarse, level)
+        prior = _std_normal_log_prob(z_after_gauss, sum_axes=(1, 2, 3))
+        levels[level] = {
+            "coarse_shape": tuple(int(v) for v in x_fine.shape[1:3]),
+            "log_prob": prior + ldj_flow + ldj_gauss,
+            "prior_log_prob": prior,
+            "ldj_flow": ldj_flow,
+            "ldj_gaussian": ldj_gauss,
+            "latent": z_after_gauss,
+        }
+        return term
+
+    terminal = rec(x, 0)
+    return levels, terminal
+
+
+def run_conditional_score_analysis(cfg: dict, weights: dict, samples: np.ndarray, chunk_size: int) -> dict:
+    n_nonterminal = max(cfg["depth"] - 1, 0)
+    level_logs = [[] for _ in range(n_nonterminal)]
+    level_prior_logs = [[] for _ in range(n_nonterminal)]
+    level_ldj_flow = [[] for _ in range(n_nonterminal)]
+    level_ldj_gauss = [[] for _ in range(n_nonterminal)]
+    level_latents = [[] for _ in range(n_nonterminal)]
+    level_shapes = [None] * n_nonterminal
+
+    terminal_logs = []
+    terminal_prior_logs = []
+    terminal_ldj_flow = []
+    terminal_ldj_gauss = []
+    terminal_latents = []
+    full_logs = []
+    sum_logs = []
+
+    for start in range(0, samples.shape[0], chunk_size):
+        stop = min(samples.shape[0], start + chunk_size)
+        xx = jnp.asarray(samples[start:stop], dtype=jnp.float32)
+        levels, terminal = _collect_conditional_terms(cfg, weights, xx)
+        full_lp = rg_coarse_eta_gaussian_flow_log_prob({"cfg": cfg, "weights": weights}, xx)
+        total_lp = terminal["log_prob"]
+
+        for level, row in enumerate(levels):
+            if level_shapes[level] is None:
+                level_shapes[level] = row["coarse_shape"]
+            level_logs[level].append(np.asarray(row["log_prob"]))
+            level_prior_logs[level].append(np.asarray(row["prior_log_prob"]))
+            level_ldj_flow[level].append(np.asarray(row["ldj_flow"]))
+            level_ldj_gauss[level].append(np.asarray(row["ldj_gaussian"]))
+            level_latents[level].append(np.asarray(row["latent"]))
+            total_lp = total_lp + row["log_prob"]
+
+        terminal_logs.append(np.asarray(terminal["log_prob"]))
+        terminal_prior_logs.append(np.asarray(terminal["prior_log_prob"]))
+        terminal_ldj_flow.append(np.asarray(terminal["ldj_flow"]))
+        terminal_ldj_gauss.append(np.asarray(terminal["ldj_gaussian"]))
+        terminal_latents.append(np.asarray(terminal["latent"]))
+        full_logs.append(np.asarray(full_lp))
+        sum_logs.append(np.asarray(total_lp))
+
+    levels_out = []
+    normal_const = _normal_constant_per_component()
+    for level in range(n_nonterminal):
+        log_prob = np.concatenate(level_logs[level], axis=0)
+        prior_log = np.concatenate(level_prior_logs[level], axis=0)
+        ldj_flow = np.concatenate(level_ldj_flow[level], axis=0)
+        ldj_gauss = np.concatenate(level_ldj_gauss[level], axis=0)
+        latent = np.concatenate(level_latents[level], axis=0)
+        ny, nx = level_shapes[level]
+        n_sites = ny * nx
+        n_comp = n_sites * 3
+        latent_prior_nll_per_comp = float(-np.mean(prior_log) / n_comp)
+        levels_out.append(
+            {
+                "level": int(level),
+                "coarse_shape": [int(ny), int(nx)],
+                "n_sites_per_sample": int(n_sites),
+                "n_components_per_sample": int(n_comp),
+                "mean_log_prob": float(np.mean(log_prob)),
+                "mean_neg_log_prob": float(-np.mean(log_prob)),
+                "std_neg_log_prob": float(np.std(-log_prob)),
+                "mean_neg_log_prob_per_site": float(-np.mean(log_prob) / n_sites),
+                "mean_neg_log_prob_per_component": float(-np.mean(log_prob) / n_comp),
+                "mean_prior_log_prob": float(np.mean(prior_log)),
+                "mean_ldj_flow": float(np.mean(ldj_flow)),
+                "mean_ldj_gaussian": float(np.mean(ldj_gauss)),
+                "latent_prior_nll_per_component": latent_prior_nll_per_comp,
+                "latent_prior_excess_per_component": float(latent_prior_nll_per_comp - normal_const),
+                "latent": _field_metrics(latent),
+            }
+        )
+
+    term_log = np.concatenate(terminal_logs, axis=0)
+    term_prior = np.concatenate(terminal_prior_logs, axis=0)
+    term_ldj_flow = np.concatenate(terminal_ldj_flow, axis=0)
+    term_ldj_gauss = np.concatenate(terminal_ldj_gauss, axis=0)
+    term_latent = np.concatenate(terminal_latents, axis=0)
+    term_latent_flat = term_latent.reshape((-1, 4))
+    term_prior_nll_per_comp = float(-np.mean(term_prior) / 4.0)
+
+    full_lp = np.concatenate(full_logs, axis=0)
+    sum_lp = np.concatenate(sum_logs, axis=0)
+    diff = full_lp - sum_lp
+
+    terminal_out = {
+        "n_sites_per_sample": 1,
+        "n_components_per_sample": 4,
+        "mean_log_prob": float(np.mean(term_log)),
+        "mean_neg_log_prob": float(-np.mean(term_log)),
+        "std_neg_log_prob": float(np.std(-term_log)),
+        "mean_neg_log_prob_per_component": float(-np.mean(term_log) / 4.0),
+        "mean_prior_log_prob": float(np.mean(term_prior)),
+        "mean_ldj_flow": float(np.mean(term_ldj_flow)),
+        "mean_ldj_gaussian": float(np.mean(term_ldj_gauss)),
+        "latent_prior_nll_per_component": term_prior_nll_per_comp,
+        "latent_prior_excess_per_component": float(term_prior_nll_per_comp - normal_const),
+        "latent": _moment_metrics(term_latent_flat),
+    }
+
+    ranked = sorted(
+        levels_out + [dict(terminal_out, level=None, name="terminal")],
+        key=lambda row: row["mean_neg_log_prob"],
+        reverse=True,
+    )
+    return {
+        "levels": levels_out,
+        "terminal": terminal_out,
+        "ranked_by_neg_log_prob": ranked,
+        "consistency": {
+            "mean_full_log_prob": float(np.mean(full_lp)),
+            "mean_sum_level_log_prob": float(np.mean(sum_lp)),
+            "max_abs_diff": float(np.max(np.abs(diff))),
+            "mean_abs_diff": float(np.mean(np.abs(diff))),
+        },
+    }
 
 
 def _default_controls(cfg: dict) -> dict:
@@ -494,10 +662,43 @@ def _print_knockout(knock: dict):
         )
 
 
+def _print_conditional_scores(cond: dict):
+    print("\nConditional score decomposition on HMC samples:")
+    for row in cond["levels"]:
+        print(
+            f"  L{row['level']} coarse={tuple(row['coarse_shape'])}"
+            f" -E[log p]={row['mean_neg_log_prob']:.6f}"
+            f" per_site={row['mean_neg_log_prob_per_site']:.6f}"
+            f" per_comp={row['mean_neg_log_prob_per_component']:.6f}"
+        )
+        print(
+            f"     latent prior NLL/comp={row['latent_prior_nll_per_component']:.6f}"
+            f" excess={row['latent_prior_excess_per_component']:+.6f}"
+            f" latent_cov={row['latent']['cov_fro_err']:.4f}"
+        )
+    term = cond["terminal"]
+    print(
+        f"  terminal -E[log p]={term['mean_neg_log_prob']:.6f}"
+        f" per_comp={term['mean_neg_log_prob_per_component']:.6f}"
+    )
+    print(
+        f"     latent prior NLL/comp={term['latent_prior_nll_per_component']:.6f}"
+        f" excess={term['latent_prior_excess_per_component']:+.6f}"
+        f" latent_cov={term['latent']['cov_fro_err']:.4f}"
+    )
+    cons = cond["consistency"]
+    print(
+        "  consistency:"
+        f" mean_full_logp={cons['mean_full_log_prob']:.6f}"
+        f" mean_sum_terms={cons['mean_sum_level_log_prob']:.6f}"
+        f" max_abs_diff={cons['max_abs_diff']:.3e}"
+    )
+
+
 def main():
     ap = argparse.ArgumentParser(description="Analyze the RG coarse-eta Gaussian flow on HMC target samples.")
     ap.add_argument("--resume", type=str, required=True, help="checkpoint to analyze")
-    ap.add_argument("--tests", type=str, default="hmc,knockout", help="comma list: hmc,knockout")
+    ap.add_argument("--tests", type=str, default="hmc,knockout", help="comma list: hmc,knockout,conditional")
     ap.add_argument("--chunk-size", type=int, default=256)
     ap.add_argument("--nwarm", type=int, default=200)
     ap.add_argument("--nmeas", type=int, default=64)
@@ -573,6 +774,11 @@ def main():
         )
         out["knockout"] = knock
         _print_knockout(knock)
+
+    if "conditional" in tests:
+        cond = run_conditional_score_analysis(cfg, weights, samples, chunk_size=args.chunk_size)
+        out["conditional"] = cond
+        _print_conditional_scores(cond)
 
     if args.json_out:
         with open(args.json_out, "w") as f:

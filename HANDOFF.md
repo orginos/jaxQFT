@@ -33,10 +33,23 @@ Last updated: 2026-04-05
           - `terminal_gaussian`
         - optional grouped knockouts:
           - `all_eta_flow`
-          - `all_eta_gaussian`
-          - `all_terminal`
+      - `all_eta_gaussian`
+      - `all_terminal`
+      - conditional score decomposition:
+        - evaluate the exact per-level conditional log-probability contributions on HMC target samples
+        - reports for each non-terminal RG level:
+          - `-E[log p_model(eta_l | coarse_l)]`
+          - per-site and per-component normalizations
+          - latent prior NLL per component after the local inverse map
+        - reports for the terminal block:
+          - `-E[log p_model(x_term)]`
+          - per-component normalization
+          - latent prior NLL per component after the terminal inverse map
+        - includes a consistency check that the sum of all reported terms matches the full model log-probability on the same HMC samples
   - Example command:
     - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --nwarm 100 --nmeas 32 --nskip 5 --batch-size 16 --chunk-size 128 --include-grouped --tests hmc,knockout`
+    - conditional-decomposition command:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --nwarm 100 --nmeas 32 --nskip 5 --batch-size 16 --chunk-size 128 --tests conditional`
   - Validation:
     - syntax/compile validation command:
       - `python3 -m py_compile scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py`
@@ -94,6 +107,35 @@ Last updated: 2026-04-05
       - the terminal flow is also very important
       - the learned Gaussian layers matter, but less than the nonlinear eta maps
       - among the Gaussian modules, the finest-level shared `3x3` Gaussian matters the most
+    - conditional score decomposition on the same HMC sample set:
+      - `L0` (`8x8` coarse lattice):
+        - `-E[log p(eta_0 | coarse_0)] = 128.3853`
+        - per site `= 2.0060`
+        - per component `= 0.6687`
+        - latent prior NLL/component after the local inverse `= 1.4236`
+      - `L1` (`4x4` coarse lattice):
+        - `-E[log p(eta_1 | coarse_1)] = 51.5386`
+        - per site `= 3.2212`
+        - per component `= 1.0737`
+        - latent prior NLL/component `= 1.4243`
+      - `L2` (`2x2` coarse lattice):
+        - `-E[log p(eta_2 | coarse_2)] = 19.0022`
+        - per site `= 4.7505`
+        - per component `= 1.5835`
+        - latent prior NLL/component `= 1.4165`
+      - terminal block:
+        - `-E[log p(x_term)] = 8.5327`
+        - per component `= 2.1332`
+        - latent prior NLL/component `= 1.4291`
+      - consistency check:
+        - full-model mean log-probability `= -207.458786`
+        - sum of reported terms `= -207.458771`
+        - max abs difference `= 2.899e-04`
+    - interpretation:
+      - the finest level dominates the total log-probability contribution because it has the most sites
+      - the cost per variable grows strongly toward the coarse end of the hierarchy
+      - on a per-component basis the terminal block is the hardest piece, followed by the coarsest non-terminal level
+      - the latent prior NLLs after the local inverse are all close to the standard-normal value `0.5*(1+log(2π)) ≈ 1.41894`, so the model is whitening each local latent space well even when the log-probability cost per variable remains high
 - RG coarse-lattice fluctuation flow with learned Gaussian priors for `phi^4` (independent evolution branch):
   - New model:
     - `jaxqft/models/phi4_rg_coarse_eta_gaussian_flow.py`
