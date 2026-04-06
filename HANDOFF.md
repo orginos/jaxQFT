@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-01
+Last updated: 2026-04-05
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -12,6 +12,408 @@ Last updated: 2026-04-01
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- RG coarse-lattice fluctuation flow for `phi^4` (new evolution branch):
+  - New model:
+    - `jaxqft/models/phi4_rg_coarse_eta_flow.py`
+  - New training entry point:
+    - `scripts/phi4/train_rg_coarse_eta_flow.py`
+  - New validation / profiling entry point:
+    - `scripts/phi4/check_rg_coarse_eta_flow.py`
+  - New design note:
+    - `docs/notes/phi4_rg_coarse_eta_flow.tex`
+  - Scope:
+    - leaves the previous RG-conditional and checkerboard branches unchanged
+    - explicitly separates RG blocking from fluctuation trivialization
+    - at each non-terminal RG level:
+      - split the current field into a coarse scalar field `c` on the next lattice and a local fluctuation vector `eta in R^3`
+      - keep `c` fixed throughout the whole level update
+      - trivialize only `eta` using red/black sweeps on the coarse lattice
+      - use a local neighborhood MLP on the coarse lattice to parameterize each updated-site map from the fixed coarse field plus neighboring frozen fluctuations
+    - the updated-site eta map is a conditional lower-triangular affine transformation on `R^3`
+      - this mixes the three local fluctuation components in one shot
+      - Jacobian is exact and cheap: the logdet is the sum of the three diagonal log-scales
+    - unlike the checkerboard branches, there is no shifted reblocking step; the coarse field of the chosen blocking is preserved across the whole level map
+  - Public API:
+    - exported from `jaxqft.models`:
+      - `init_rg_coarse_eta_flow`
+      - `rg_coarse_eta_flow_g`
+      - `rg_coarse_eta_flow_f`
+      - `rg_coarse_eta_flow_log_prob`
+      - `rg_coarse_eta_flow_prior_sample`
+      - `rg_coarse_eta_flow_prior_log_prob`
+  - Training CLI highlights:
+    - `--width`
+    - `--n-cycles`
+    - `--radius`
+    - `--terminal-n-layers`
+    - `--terminal-width`
+    - `--output-init-scale`
+    - `--parity {none,sym}`
+    - `--rg-type {average,select}`
+    - `--log-scale-clip`
+    - `--offdiag-clip`
+    - `--resume`
+    - `--validate`
+    - resume semantics are cleaner than the older trainer scripts:
+      - `--lr` and `--batch` keep the checkpoint values unless explicitly passed
+  - Example commands:
+    - fresh run:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_flow.py --L 16 --mass -0.4 --lam 2.4 --width 64 --n-cycles 2 --radius 1 --batch 32 --lr 3e-4 --parity sym --epochs 1000 --validate --save rg_coarse_eta_flow_phi4_ckpt.pkl`
+    - resume:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_flow.py --resume rg_coarse_eta_flow_phi4_ckpt.pkl --epochs 2000`
+  - Validation:
+    - syntax/compile validation command:
+      - `python3 -m py_compile jaxqft/models/__init__.py jaxqft/models/phi4_rg_coarse_eta_flow.py scripts/phi4/train_rg_coarse_eta_flow.py scripts/phi4/check_rg_coarse_eta_flow.py`
+    - runtime validation command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_flow.py --shape 8,8 --jac-shape 2,2 --batch-size 2 --timing-warmup 1 --timing-iters 2 --selfcheck-fail`
+    - runtime results:
+      - invertibility:
+        - `max_abs_err = 2.980e-07`
+        - `max_rel_err = 1.107e-07`
+      - Jacobian:
+        - autodiff `log|det J| = 0.204816`
+        - network `log|det J| = 0.204816`
+        - absolute difference `= 2.980e-08`
+      - timing breakdown (seconds per call, CPU, small smoke shape):
+        - `loss_grad = 1.493e-03`
+        - `full_f = 3.104e-04`
+        - `full_g = 2.893e-04`
+        - `log_prob = 2.094e-04`
+        - `eta_flow_f = 2.062e-04`
+        - `eta_flow_g = 1.836e-04`
+        - `terminal_f = 1.096e-04`
+        - `color_sweep_black_f = 9.608e-05`
+        - `terminal_g = 9.100e-05`
+        - `color_sweep_red_g = 8.842e-05`
+        - `conditional_params = 8.592e-05`
+        - `split_rg = 2.204e-05`
+    - trainer smoke command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_flow.py --L 4 --epochs 1 --batch 1 --save /tmp/rg_coarse_eta_flow_smoke.pkl`
+    - trainer smoke result:
+      - completed successfully
+      - final loss `= 2.8649349212646484`
+      - first-step training time on CPU at `L=4` was `~1.74 s`
+- RG checkerboard in-block conditional flow for `phi^4` (new evolution branch):
+  - New model:
+    - `jaxqft/models/phi4_rg_checkerboard_inblock_flow.py`
+  - New training entry point:
+    - `scripts/phi4/train_rg_checkerboard_inblock_flow.py`
+  - New validation / profiling entry point:
+    - `scripts/phi4/check_rg_checkerboard_inblock_flow.py`
+  - New design note:
+    - `docs/notes/phi4_rg_checkerboard_inblock_flow.tex`
+  - Scope:
+    - leaves `jaxqft/models/phi4_rg_checkerboard_flow.py` unchanged
+    - preserves the checkerboard red/black plus shifted-blocking cycle at each non-terminal RG level
+    - adds masked in-block mixing among the three local fluctuation variables inside each color pass
+    - each red or black color pass now performs `n_inner_couplings` affine-coupling subupdates with the old `3`-component in-block masks
+    - the target `eta` components are masked out of the conditioner input everywhere, so each subupdate still depends only on frozen variables
+    - the conditioner remains selectable:
+      - `transformer`
+      - `mlp`
+    - the terminal `2x2` block still uses an unconditional RealNVP
+  - Public API:
+    - exported from `jaxqft.models`:
+      - `init_rg_checkerboard_inblock_flow`
+      - `rg_checkerboard_inblock_flow_g`
+      - `rg_checkerboard_inblock_flow_f`
+      - `rg_checkerboard_inblock_flow_log_prob`
+      - `rg_checkerboard_inblock_flow_prior_sample`
+      - `rg_checkerboard_inblock_flow_prior_log_prob`
+  - Training CLI highlights:
+    - all checkerboard-flow knobs are preserved
+    - adds:
+      - `--n-inner-couplings`
+    - fresh-run example:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_checkerboard_inblock_flow.py --L 16 --mass -0.4 --lam 2.4 --width 16 --n-cycles 2 --n-inner-couplings 3 --conditioner mlp --batch 32 --lr 1e-3 --parity sym --epochs 1000 --validate`
+    - resume example:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_checkerboard_inblock_flow.py --resume rg_checkerboard_inblock_flow_phi4_ckpt.pkl --epochs 2000`
+  - Validation:
+    - syntax/compile validation command:
+      - `python3 -m py_compile jaxqft/models/__init__.py jaxqft/models/phi4_rg_checkerboard_inblock_flow.py scripts/phi4/train_rg_checkerboard_inblock_flow.py scripts/phi4/check_rg_checkerboard_inblock_flow.py`
+    - transformer correctness command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/check_rg_checkerboard_inblock_flow.py --shape 8,8 --jac-shape 2,2 --batch-size 2 --tests invertibility,jacobian --selfcheck-fail`
+    - transformer correctness results:
+      - invertibility:
+        - `max_abs_err = 4.172e-07`
+        - `max_rel_err = 1.800e-07`
+      - Jacobian:
+        - autodiff `log|det J| = 0.204816`
+        - network `log|det J| = 0.204816`
+        - absolute difference `= 2.980e-08`
+    - MLP correctness command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/check_rg_checkerboard_inblock_flow.py --conditioner mlp --shape 8,8 --jac-shape 2,2 --batch-size 2 --tests invertibility,jacobian --selfcheck-fail`
+    - MLP correctness results:
+      - invertibility:
+        - `max_abs_err = 4.768e-07`
+        - `max_rel_err = 1.789e-07`
+      - Jacobian:
+        - autodiff `log|det J| = 0.204816`
+        - network `log|det J| = 0.204816`
+        - absolute difference `= 2.980e-08`
+    - trainer smoke command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_checkerboard_inblock_flow.py --L 4 --epochs 1 --batch 1 --save /tmp/rg_checkerboard_inblock_flow_smoke.pkl`
+    - trainer smoke result:
+      - completed successfully
+      - final loss `= 2.8619537353515625`
+      - first-step compile/training cost is high on the default transformer path (`~124.6 s` on CPU for this tiny smoke run), so the MLP conditioner is the cheaper first tuning target
+- RG checkerboard conditional flow for `phi^4` (new evolution branch):
+  - New model:
+    - `jaxqft/models/phi4_rg_checkerboard_flow.py`
+  - New training entry point:
+    - `scripts/phi4/train_rg_checkerboard_flow.py`
+  - New validation / profiling entry point:
+    - `scripts/phi4/check_rg_checkerboard_flow.py`
+  - New design note:
+    - `docs/notes/phi4_rg_checkerboard_flow.tex`
+  - Scope:
+    - leaves `jaxqft/models/phi4_mg.py` and `jaxqft/models/phi4_rg_cond_flow.py` unchanged
+    - implements a new full-field level map at each non-terminal RG level:
+      - split the current field into `(coarse, eta)` on `2x2` blocks
+      - update red checkerboard `eta` blocks conditional on black `eta` blocks and the coarse field
+      - update black checkerboard `eta` blocks conditional on the updated red `eta` blocks and the coarse field
+      - roll the fine lattice by `(-1,-1)`, repeat the red/black update on the shifted blocking, then roll back by `(+1,+1)`
+      - repeat this cycle `n_cycles` times per level
+    - the transformer conditions on local coarse values plus the masked conditioning `eta` field
+    - the conditioner is now selectable:
+      - `transformer`
+        - local attention over the masked conditioning field
+      - `mlp`
+        - pointwise masked conditioner with no attention
+    - only `eta` is updated inside each red/black substep
+    - the terminal `2x2` block still uses an unconditional RealNVP
+  - Public API:
+    - exported from `jaxqft.models`:
+      - `init_rg_checkerboard_flow`
+      - `rg_checkerboard_flow_g`
+      - `rg_checkerboard_flow_f`
+      - `rg_checkerboard_flow_log_prob`
+      - `rg_checkerboard_flow_prior_sample`
+      - `rg_checkerboard_flow_prior_log_prob`
+  - Training CLI highlights:
+    - `--width`
+    - `--n-cycles`
+    - `--conditioner {transformer,mlp}`
+    - `--transformer-layers`
+    - `--n-heads`
+    - `--attn-radius`
+    - `--mlp-dim`
+    - `--terminal-n-layers`
+    - `--terminal-width`
+    - `--output-init-scale`
+    - `--parity {none,sym}`
+    - `--rg-type {average,select}`
+    - `--log-scale-clip`
+    - `--resume`
+    - `--validate`
+  - Validation:
+    - syntax/compile validation command:
+      - `python3 -m py_compile jaxqft/models/phi4_rg_checkerboard_flow.py scripts/phi4/train_rg_checkerboard_flow.py scripts/phi4/check_rg_checkerboard_flow.py`
+    - runtime validation command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/check_rg_checkerboard_flow.py --shape 8,8 --jac-shape 2,2 --batch-size 2 --timing-warmup 1 --timing-iters 2 --selfcheck-fail`
+    - runtime results:
+      - invertibility:
+        - `max_abs_err = 4.172e-07`
+        - `max_rel_err = 1.642e-07`
+      - Jacobian:
+        - autodiff `log|det J| = 0.204816`
+        - network `log|det J| = 0.204816`
+        - absolute difference `= 2.980e-08`
+      - timing breakdown (seconds per call, CPU, small smoke shape):
+        - `loss_grad = 1.563e-02`
+        - `full_g = 2.554e-03`
+        - `log_prob = 2.452e-03`
+        - `full_f = 2.390e-03`
+        - `level_flow_f = 1.710e-03`
+        - `level_flow_g = 1.448e-03`
+        - `checkerboard_pass_f = 9.245e-04`
+        - `checkerboard_pass_g = 8.939e-04`
+        - `site_update_black_f = 5.157e-04`
+        - `site_update_red_g = 5.018e-04`
+        - `conditional_st = 4.177e-04`
+        - `terminal_g = 1.071e-04`
+        - `terminal_f = 1.054e-04`
+        - `split_rg = 1.813e-05`
+    - MLP conditioner validation command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/check_rg_checkerboard_flow.py --conditioner mlp --shape 8,8 --jac-shape 2,2 --batch-size 2 --timing-warmup 1 --timing-iters 2 --selfcheck-fail`
+    - MLP conditioner runtime results:
+      - invertibility:
+        - `max_abs_err = 5.066e-07`
+        - `max_rel_err = 1.793e-07`
+      - Jacobian:
+        - autodiff `log|det J| = 0.204816`
+        - network `log|det J| = 0.204816`
+        - absolute difference `= 2.980e-08`
+      - timing breakdown (seconds per call, CPU, small smoke shape):
+        - `loss_grad = 1.206e-03`
+        - `log_prob = 3.034e-04`
+        - `full_f = 2.659e-04`
+        - `full_g = 2.236e-04`
+        - `level_flow_g = 2.044e-04`
+        - `level_flow_f = 1.607e-04`
+        - `checkerboard_pass_f = 1.341e-04`
+        - `checkerboard_pass_g = 1.270e-04`
+        - `site_update_red_g = 1.161e-04`
+        - `terminal_g = 1.007e-04`
+        - `site_update_black_f = 9.446e-05`
+        - `terminal_f = 8.858e-05`
+        - `conditional_st = 8.613e-05`
+        - `split_rg = 3.119e-05`
+    - trainer smoke command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_checkerboard_flow.py --L 4 --epochs 1 --batch 1 --save /tmp/rg_checkerboard_flow_smoke.pkl`
+    - trainer smoke result:
+      - completed successfully
+      - final loss `= 2.863710403442383`
+    - MLP trainer smoke command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_checkerboard_flow.py --conditioner mlp --L 4 --epochs 1 --batch 1 --save /tmp/rg_checkerboard_flow_mlp_smoke.pkl`
+    - MLP trainer smoke result:
+      - completed successfully
+      - final loss `= 2.863077163696289`
+- RG-first conditional transformer flow for `phi^4` (new):
+  - New model:
+    - `jaxqft/models/phi4_rg_cond_flow.py`
+  - New training entry point:
+    - `scripts/phi4/train_rg_cond_flow.py`
+  - New validation / profiling entry point:
+    - `scripts/phi4/check_rg_cond_flow.py`
+  - New design note:
+    - `docs/notes/phi4_rg_conditional_transformer_flow.tex`
+  - Scope:
+    - leaves the existing `jaxqft/models/phi4_mg.py` path unchanged
+    - replaces the old "flow on the full 2x2 block field" idea with:
+      - Sokal-style `2x2` block decomposition
+      - one coarse mode per block
+      - three local fine modes per block
+      - conditional affine coupling flow only on the three fine modes
+      - local transformer blocks used only to generate the coupling `s,t`
+      - terminal learned `2x2` RealNVP instead of a fixed Gaussian `1x1` coarse scalar
+    - recursive structure:
+      - split fine field into `(coarse, fine-modes)`
+      - recurse on the coarse field until the lattice reaches `2x2`
+      - apply an unconditional `4`-component RealNVP on that final `2x2` block
+      - condition the fine-mode flow on the coarse field and local neighboring masked fine modes
+    - RG blocking options:
+      - `average`
+        - uses a normalized Haar-style average channel plus three orthogonal fluctuation modes
+        - conditioning uses the arithmetic block average recovered from that normalized coarse channel
+      - `select`
+        - uses the selected site as the coarse field and the remaining three sites as the local fine modes
+  - Public API:
+    - exported from `jaxqft.models`:
+      - `init_rg_cond_flow`
+      - `rg_cond_flow_g`
+      - `rg_cond_flow_f`
+      - `rg_cond_flow_log_prob`
+      - `rg_cond_flow_prior_sample`
+      - `rg_cond_flow_prior_log_prob`
+  - Training CLI highlights:
+    - `--width`
+    - `--n-couplings`
+    - `--transformer-layers`
+    - `--n-heads`
+    - `--attn-radius`
+    - `--mlp-dim`
+    - `--terminal-n-layers`
+    - `--terminal-width`
+    - `--output-init-scale`
+    - `--parity {none,sym}`
+    - `--rg-type {average,select}`
+    - `--log-scale-clip`
+    - `--resume`
+    - `--validate`
+  - Resume compatibility:
+    - fresh runs default to `parity = sym`
+    - legacy checkpoints without stored parity metadata resume as `parity = none` to preserve their original semantics
+  - Current recommended defaults from the design study:
+    - `width = 64`
+    - `n_couplings = 4`
+    - `transformer_layers = 2`
+    - `n_heads = 4`
+    - `attn_radius = 1`
+    - `terminal_n_layers = 2`
+    - `output_init_scale = 1e-2`
+    - `lr = 3e-4`
+    - `rg_type = average`
+    - `parity = sym`
+  - Run commands:
+    - fresh run:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_cond_flow.py --L 16 --mass -0.4 --lam 2.4 --width 64 --n-couplings 4 --transformer-layers 2 --n-heads 4 --attn-radius 1 --terminal-n-layers 2 --output-init-scale 1e-2 --parity sym --rg-type average --epochs 500 --batch 8 --lr 3e-4 --save rg_cond_flow_phi4_ckpt.pkl --validate`
+    - resume:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_cond_flow.py --resume rg_cond_flow_phi4_ckpt.pkl --epochs 800`
+  - Validation:
+    - syntax/compile validation command:
+      - `python3 -m py_compile jaxqft/models/phi4_rg_cond_flow.py scripts/phi4/train_rg_cond_flow.py scripts/phi4/check_rg_cond_flow.py`
+    - runtime validation command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/check_rg_cond_flow.py --shape 8,8 --jac-shape 2,2 --batch-size 2 --timing-warmup 1 --timing-iters 2 --selfcheck-fail`
+    - runtime results:
+      - invertibility:
+        - `max_abs_err = 3.576e-07`
+        - `max_rel_err = 1.115e-07`
+      - Jacobian:
+        - note:
+          - the checker still perturbs a copy of the weights for a nontrivial Jacobian consistency test
+        - autodiff `log|det J| = -0.234062`
+        - network `log|det J| = -0.234062`
+        - absolute difference `= 2.980e-08`
+      - timing breakdown (seconds per call, CPU, small smoke shape):
+        - `loss_grad = 1.019e-02`
+        - `full_g = 1.374e-03`
+        - `full_f = 1.185e-03`
+        - `log_prob = 1.042e-03`
+        - `eta_flow_f_level0 = 9.395e-04`
+        - `eta_flow_g_level0 = 9.283e-04`
+        - `transformer = 2.204e-04`
+        - `terminal_f = 6.000e-05`
+        - `terminal_g = 4.027e-05`
+        - `merge_rg = 3.350e-05`
+        - `split_rg = 1.829e-05`
+      - bottleneck interpretation after optimization:
+        - end-to-end training is dominated by `loss_grad`, as expected
+        - within the model, the dominant cost is the recursive `eta_flow` / full flow application
+        - the terminal `2x2` RealNVP is not a dominant bottleneck in the current implementation
+        - `split_rg` and `merge_rg` are now negligible relative to the flow body
+    - trainer smoke command:
+      - `source /opt/python/jax/bin/activate && JAX_PLATFORMS=cpu python scripts/phi4/train_rg_cond_flow.py --L 4 --epochs 1 --batch 1 --save /tmp/rg_cond_flow_smoke.pkl`
+    - trainer smoke result:
+      - completed successfully
+      - final loss `= 2.8631553649902344`
+  - Design-study findings at `L=16`, `lam=2.4`, `mass=-0.4`, `batch=8`, `20` steps:
+    - exact-zero output initialization was the main failure mode of the first version:
+      - internal transformer gradients were exactly zero at initialization
+      - only the final output layer of each coupling net learned initially
+      - this made head count / attention radius / transformer depth appear ineffective
+    - after switching to `output_init_scale = 1e-2`, the meaningful ablation result was:
+      - local-only (`attn_radius=0`) is too weak
+      - neighbor coupling (`attn_radius=1`) helps
+      - `transformer_layers=2` matters much more than `n_heads`
+      - `rg_type=average` outperforms `rg_type=select`
+      - width below `64` hurts strongly
+      - reducing `n_couplings` from `4` to `3` hurts quality
+      - enforcing the `Z_2` symmetry (`parity=sym`) helps substantially over the otherwise identical unsymmetrized model
+    - tuned old/new comparison:
+      - old MG baseline (`width=128`, `lr=3e-4`):
+        - mean last-5 loss `= 24.42`
+        - centered `std(Delta S) = 21.76`
+        - step time `= 0.0216 s`
+      - tuned new model without symmetry (`width=64`, `n_couplings=4`, `transformer_layers=2`, `n_heads=4`, `attn_radius=1`, `terminal_n_layers=2`, `output_init_scale=1e-2`, `parity=none`, `lr=3e-4`):
+        - mean last-5 loss `= 24.24`
+        - centered `std(Delta S) = 14.73`
+        - ESS proxy `= 0.00397`
+        - step time `= 0.0668 s`
+      - best tested new model with symmetry (`width=64`, `n_couplings=4`, `transformer_layers=2`, `n_heads=4`, `attn_radius=1`, `terminal_n_layers=2`, `output_init_scale=1e-2`, `parity=sym`, `lr=3e-4`):
+        - mean last-5 loss `= 3.42`
+        - centered `std(Delta S) = 10.60`
+        - ESS proxy `= 0.00916`
+        - step time `= 0.0922 s`
+      - interpretation:
+        - the corrected new model is materially better with the symmetry enforced
+        - it improves the short-budget centered `std(Delta S)` metric relative to the old MG baseline
+        - it is still about `4x` slower per training step on CPU in the best short-budget symmetric configuration
+  - Optimization pass performed:
+    - replaced scatter-based `2x2` block pack/unpack with reshape/transpose implementations
+    - fused attention `q/k/v` projections into one `qkv` projection
+    - switched from exact-zero output initialization to small nonzero `output_init_scale = 1e-2` so gradients reach the transformer stack from step 1
+    - after these changes, no further obvious low-risk bottleneck remained outside the transformer-driven fine-mode flow itself
 - Two-pion `t0`-scan analysis for the Schwinger `I=2` GEVP (new):
   - New script:
     - `scripts/mcmc/analyze_pipi_i2_t0_scan.py`

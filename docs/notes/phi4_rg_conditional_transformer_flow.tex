@@ -1,0 +1,443 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, amsthm, geometry, mathtools, booktabs}
+\usepackage{bm}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{RG-First Conditional Transformer Flow for 2D $\phi^4$: Code-Level Mathematical Description and Design Study}
+\author{Kostas Orginos}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This note documents the model currently implemented in
+\texttt{jaxqft/models/phi4\_rg\_cond\_flow.py}. The old multigrid RealNVP
+model in \texttt{jaxqft/models/phi4\_mg.py} is left unchanged. The new model
+uses:
+\begin{itemize}
+\item a recursive $2\times 2$ RG split,
+\item conditional affine couplings acting only on the three local fine modes,
+\item a local transformer that parameterizes the coupling functions,
+\item a learned terminal RealNVP on the last $2\times 2$ block.
+\end{itemize}
+
+The note also summarizes the empirical ablation study used to tune the new
+design against the old MG-flow baseline at
+\[
+L=16,\qquad \lambda=2.4,\qquad m^2=-0.4.
+\]
+
+\section{Lattice and Prior}
+
+Let the fine lattice be $\Lambda_0$ with shape $L\times L$, where
+$L=2^K$. The model is defined for a batch of scalar fields
+\[
+\phi \in \mathbb{R}^{B\times L\times L}.
+\]
+
+The latent variable $z$ is sampled sitewise from the standard normal
+distribution,
+\begin{equation}
+p_Z(z)=\prod_{x\in\Lambda_0}\frac{1}{\sqrt{2\pi}}
+\exp\!\left(-\frac{z_x^2}{2}\right).
+\end{equation}
+
+The code samples this prior directly on the fine lattice. Because the
+``average'' RG split is orthogonal and the ``select'' RG split is a blockwise
+permutation, this is equivalent to independent standard normals for all latent
+fine modes and for the terminal $2\times 2$ block variables.
+
+\section{Blockwise RG Split}
+
+At RG level $k$ the lattice has shape
+\[
+L_k\times L_k,\qquad L_k=L/2^k.
+\]
+For $k=0,\dots,K-2$, the field is partitioned into $2\times 2$ blocks. For
+each block we write the packed site values as
+\[
+v=(v_{00},v_{01},v_{10},v_{11})\in\mathbb{R}^4.
+\]
+
+\subsection{Average Rule}
+
+For \texttt{rg\_type="average"}, the code uses the orthonormal Haar-like basis
+\begin{equation}
+H=
+\begin{pmatrix}
+\tfrac12 & \tfrac12 & \tfrac12 & \tfrac12 \\
+\tfrac12 & -\tfrac12 & \tfrac12 & -\tfrac12 \\
+\tfrac12 & \tfrac12 & -\tfrac12 & -\tfrac12 \\
+\tfrac12 & -\tfrac12 & -\tfrac12 & \tfrac12
+\end{pmatrix}.
+\end{equation}
+The block coefficients are
+\begin{equation}
+(c,\eta_1,\eta_2,\eta_3)=H\,v.
+\end{equation}
+Here $c$ is the normalized coarse mode, while
+$\eta=(\eta_1,\eta_2,\eta_3)\in\mathbb{R}^3$ spans the fluctuation subspace.
+
+The arithmetic block average is
+\begin{equation}
+\bar v = \frac{1}{4}(v_{00}+v_{01}+v_{10}+v_{11})=\frac12\,c,
+\end{equation}
+which is exactly the quantity used for conditioning in the implementation.
+
+\subsection{Select Rule}
+
+For \texttt{rg\_type="select"}, the coarse variable is the upper-left site and
+the fine modes are the remaining three entries:
+\begin{equation}
+c=v_{00},\qquad \eta=(v_{01},v_{10},v_{11}).
+\end{equation}
+
+\subsection{Inverse Block Reconstruction}
+
+At each block, reconstruction is written as
+\begin{equation}
+v = R(c,\eta).
+\end{equation}
+For the average rule this is $v=H^\top(c,\eta)$, and for the select rule it is
+the obvious concatenation.
+
+\section{Recursive Generative Structure}
+
+Let $z^{(k)}$ denote the latent field on level $k$. The recursion stops when
+$L_k=2$, so the terminal latent is a $2\times 2$ field.
+
+For $k=0,\dots,K-2$, split
+\begin{equation}
+(z_c^{(k+1)},z_f^{(k)}) = S(z^{(k)}),
+\end{equation}
+where $z_c^{(k+1)}$ is the coarse field on the next lattice and
+$z_f^{(k)}\in\mathbb{R}^{3}$ per block.
+
+The generative map is
+\begin{align}
+x_c^{(K-1)} &= g_{\mathrm{term}}(z_c^{(K-1)}), \\
+x_f^{(k)} &= g_k\!\left(z_f^{(k)} \mid x_c^{(k+1)}\right), \\
+x^{(k)} &= R\!\left(x_c^{(k+1)},x_f^{(k)}\right),
+\end{align}
+with the final sample $x=x^{(0)}$.
+
+The inverse map is
+\begin{align}
+(x_c^{(k+1)},x_f^{(k)}) &= S(x^{(k)}), \\
+z_c^{(k+1)} &= g_{\mathrm{term}}^{-1}(x_c^{(K-1)}) \quad\text{at }L_k=2, \\
+z_f^{(k)} &= g_k^{-1}\!\left(x_f^{(k)} \mid x_c^{(k+1)}\right), \\
+z^{(k)} &= R\!\left(z_c^{(k+1)},z_f^{(k)}\right).
+\end{align}
+
+\section{Conditional Fine-Mode Flow}
+
+At each non-terminal level, the flow acts only on the three fine variables of
+each block. For coupling layer $j$, the implementation uses one of the masks
+\begin{equation}
+m^{(0)}=(1,1,0),\qquad
+m^{(1)}=(0,1,1),\qquad
+m^{(2)}=(1,0,1),
+\end{equation}
+cycled as needed.
+
+Write the fine vector at one block as $\eta\in\mathbb{R}^3$. Then
+\begin{equation}
+\eta_A = m\odot \eta,\qquad \eta_B=(1-m)\odot \eta.
+\end{equation}
+The coupling is
+\begin{equation}
+\eta_B' = \eta_B \odot e^{s(\eta_A,c)} + t(\eta_A,c),
+\end{equation}
+while $\eta_A$ is unchanged. In the code, $s$ is clipped as
+\begin{equation}
+s \leftarrow s_{\max}\tanh(s),\qquad s_{\max}=\texttt{log\_scale\_clip}.
+\end{equation}
+
+The inverse is
+\begin{equation}
+\eta_B = (\eta_B' - t(\eta_A,c)) \odot e^{-s(\eta_A,c)}.
+\end{equation}
+
+The log-Jacobian contribution of one coupling layer is
+\begin{equation}
+\log \left|\det J_j^{-1}\right|
+= -\sum_{\text{blocks}}\sum_{a=1}^{3}(1-m_a)\,s_a.
+\end{equation}
+The full level log-Jacobian is the sum over all coupling layers.
+
+\section{Local Transformer Parameterization}
+
+The coupling functions $s,t$ are not parameterized by a plain MLP. Instead,
+for each coupling layer a local transformer processes a block-grid feature map.
+
+\subsection{Token Features}
+
+At each block location $b$, the token feature is
+\begin{equation}
+u_b = \bigl[m\odot \eta_b,\ \tilde c_b\bigr]\in\mathbb{R}^4,
+\end{equation}
+where
+\[
+\tilde c_b=
+\begin{cases}
+\tfrac12 c_b,& \text{average rule,} \\
+c_b,& \text{select rule.}
+\end{cases}
+\]
+Thus the transformer sees both the masked local fluctuation and the local
+coarse-field value.
+
+\subsection{Local Attention}
+
+For attention radius $r$, the neighborhood of block $b$ is
+\begin{equation}
+\mathcal N_r(b)=\{b+\delta \mid \delta=(\delta_y,\delta_x),\ 
+\delta_y,\delta_x\in\{-r,\dots,r\}\},
+\end{equation}
+with periodic wrapping implemented by lattice rolls.
+
+Each transformer block uses standard multi-head attention with a learned
+relative-bias table indexed by offset:
+\begin{align}
+q_b &= W_Q h_b, \\
+k_{b,\delta} &= W_K h_{b+\delta}, \\
+v_{b,\delta} &= W_V h_{b+\delta}, \\
+\alpha_{b,\delta}^{(h)} &=
+\mathrm{softmax}_{\delta\in\mathcal N_r(b)}
+\left(
+\frac{q_b^{(h)}\cdot k_{b,\delta}^{(h)}}{\sqrt{d_h}}
+\beta_{\delta}^{(h)}
+\right), \\
+\mathrm{Attn}(h)_b &=
+W_O \Bigl(\sum_{\delta\in\mathcal N_r(b)}
+\alpha_{b,\delta}\,v_{b,\delta}\Bigr).
+\end{align}
+
+\subsection{Residual Transformer Block}
+
+Each block applies
+\begin{align}
+h &\leftarrow h + \mathrm{Attn}(\mathrm{LN}(h)), \\
+h &\leftarrow h + \sigma(W_g\,\mathrm{LN}(h)+b_g)\odot
+\mathrm{MLP}(\mathrm{LN}(h)),
+\end{align}
+where the MLP is a two-hidden-layer GELU network and $\sigma$ is the logistic
+sigmoid.
+
+\subsection{Coupling Output}
+
+After the final transformer block, a small MLP head produces
+\begin{equation}
+(s,t)=\mathrm{Head}(h)\in\mathbb{R}^6,
+\end{equation}
+which is split into two three-vectors.
+
+\subsection{$Z_2$-Symmetric Option}
+
+The implementation exposes a parity mode
+\[
+\texttt{parity}\in\{\texttt{none},\texttt{sym}\}.
+\]
+For \texttt{parity="none"}, the transformer output is used directly.
+
+For \texttt{parity="sym"}, the code enforces the old-map-style symmetry
+\[
+z\mapsto -z,\qquad \phi\mapsto -\phi
+\]
+by requiring the scale channel to be even and the shift channel to be odd in
+the conditioning input. If the local transformer head evaluated on token field
+$u$ gives
+\[
+\mathrm{Head}(u)=\bigl(\hat s(u),\hat t(u)\bigr),
+\]
+then the actual coupling functions are
+\begin{align}
+s(u) &= \frac12\bigl(\hat s(u)+\hat s(-u)\bigr), \\
+t(u) &= \frac12\bigl(\hat t(u)-\hat t(-u)\bigr).
+\end{align}
+Therefore
+\[
+s(-u)=s(u),\qquad t(-u)=-t(u),
+\]
+which implies the desired oddness of the full bijection.
+
+\section{Terminal $2\times 2$ Flow}
+
+The recursion stops at lattice size $2\times 2$. The last coarse block is not
+left under a fixed Gaussian anymore. Instead, the code applies a standard
+unconditional RealNVP
+\begin{equation}
+g_{\mathrm{term}}:\mathbb{R}^4\to\mathbb{R}^4
+\end{equation}
+to the packed terminal block. This terminal flow uses the same mask pattern
+$(1,0,0,1)$ / $(0,1,1,0)$ as the older MG-flow implementation, and it inherits
+the same parity mode \texttt{none} or \texttt{sym}.
+
+\section{Exact Log Density}
+
+The inverse map returns $(z,\log |\det J^{-1}|)$. Hence the model log-density
+is
+\begin{equation}
+\log p_\theta(x)
+=
+\log p_Z(z)
+\;+\;
+\sum_{k=0}^{K-2}\log \left|\det J_k^{-1}\right|
+\;+\;
+\log \left|\det J_{\mathrm{term}}^{-1}\right|.
+\end{equation}
+
+Training minimizes the usual forward KL surrogate
+\begin{equation}
+\mathcal L(\theta)
+=
+\mathbb E_{z\sim p_Z}\Bigl[
+\log p_\theta(g_\theta(z)) + S(g_\theta(z))
+\Bigr].
+\end{equation}
+
+\section{Initialization and the Gradient-Flow Fix}
+
+An important empirical point is that exact-zero output initialization for the
+transformer head and residual projections is a bad choice here. With exact zero
+initialization, the model is identity-preserving, but the initial gradients of
+most transformer-internal weights vanish identically. In the measured code path,
+the initial norms of representative gradients such as
+\texttt{input/W}, \texttt{qkv/W}, and \texttt{mlp/l1/W} were exactly zero, while
+only the final output layer had nonzero gradient.
+
+To fix this, the current implementation uses a small nonzero output
+initialization scale
+\begin{equation}
+\varepsilon_{\mathrm{out}} = 10^{-2}
+\end{equation}
+for:
+\begin{itemize}
+\item the transformer head final linear map,
+\item the attention output projection,
+\item the transformer-block MLP final linear map,
+\item the terminal RealNVP final linear maps.
+\end{itemize}
+
+This preserves a near-identity initial map while allowing gradients to reach
+the transformer internals from the first optimization step.
+
+\section{Empirical Design Study}
+
+All experiments below used
+\[
+L=16,\qquad \lambda=2.4,\qquad m^2=-0.4,\qquad \text{batch}=8.
+\]
+The comparison metric is the training objective after $20$ optimization steps,
+the centered $\Delta S$ standard deviation on held-out flow samples, and the
+steady-state step time on CPU.
+
+\subsection{Untuned New Model}
+
+Before the gradient-flow fix, all transformer variants behaved nearly
+identically and underperformed the old MG baseline. This was traced directly to
+the exact-zero output initialization discussed above.
+
+\subsection{Corrected New Model}
+
+After enabling nonzero output initialization and using learning rate
+$3\times 10^{-4}$, the ablation became meaningful.
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Model & Loss & $\sigma(\Delta S-\langle \Delta S\rangle)$ & Step [s] & Comment \\
+\midrule
+Old MG, width 128 & 24.42 & 21.76 & 0.0216 & tuned baseline \\
+New, local only, $r{=}0$, 1 blk, 1 head & 85.46 & 30.75 & 0.0333 & too weak \\
+New, $r{=}1$, 1 blk, 1 head & 79.01 & 28.86 & 0.0374 & neighbor coupling helps \\
+New, $r{=}1$, 1 blk, 4 heads & 79.34 & 28.97 & 0.0383 & heads alone do little \\
+New, $r{=}1$, 2 blks, 4 heads & 24.24 & 14.73 & 0.0662 & best tested quality \\
+New, select rule, $r{=}1$, 1 blk, 1 head & 93.14 & 33.56 & 0.0376 & worse blocking choice \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Additional speed/quality sweeps around the best architecture gave:
+\begin{itemize}
+\item width $32$ or $48$ degrades strongly,
+\item reducing the number of couplings from $4$ to $3$ hurts quality,
+\item one head and four heads perform similarly in quality once gradients flow,
+but four heads were slightly faster on the tested CPU run,
+\item the dominant qualitative improvement came from using two transformer
+blocks rather than one.
+\end{itemize}
+
+\subsection{Effect of Enforcing the $Z_2$ Symmetry}
+
+Using the same tuned architecture and changing only the parity mode gives:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Model & Loss & $\sigma(\Delta S-\langle \Delta S\rangle)$ & ESS proxy & Step [s] \\
+\midrule
+New tuned, \texttt{parity=none} & 24.24 & 14.73 & 0.00397 & 0.0668 \\
+New tuned, \texttt{parity=sym} & 3.42 & 10.60 & 0.00916 & 0.0922 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Thus, in the tested short-budget regime, enforcing the symmetry improves both
+the loss and the centered reweighting-width proxy, at the cost of a moderate
+increase in per-step runtime.
+
+\section{Recommended Design}
+
+Among the tested new-model variants, the best design was:
+\begin{itemize}
+\item \texttt{rg\_type = average},
+\item \texttt{width = 64},
+\item \texttt{n\_couplings = 4},
+\item \texttt{transformer\_layers = 2},
+\item \texttt{n\_heads = 4},
+\item \texttt{attn\_radius = 1},
+\item \texttt{terminal\_n\_layers = 2},
+\item \texttt{output\_init\_scale = 1e-2},
+\item \texttt{parity = sym},
+\item \texttt{lr = 3e-4}.
+\end{itemize}
+
+This configuration improved markedly over the untuned new model and improved on
+the tuned old MG-flow baseline in the centered $\Delta S$ metric under the
+short test budget. However, it remained substantially slower per training step
+on CPU.
+
+\section{Interpretation}
+
+The main lesson from the experiments is:
+\begin{enumerate}
+\item \textbf{Neighbor coupling matters}, but only after the transformer is
+allowed to learn.
+\item \textbf{Two transformer blocks matter more than multi-head count.}
+\item \textbf{Average blocking is preferable to select blocking.}
+\item \textbf{Enforcing the $Z_2$ symmetry helps materially} for this $\phi^4$
+task in the tested regime.
+\item \textbf{The dominant failure mode of the first implementation was not the
+RG factorization itself but the exact-zero output initialization, which froze
+the attention stack.}
+\end{enumerate}
+
+\section{Open Directions}
+
+The following design directions remain plausible:
+\begin{itemize}
+\item explicit conditioning on neighboring coarse fields and neighboring masked
+fine modes at multiple radii,
+\item coupling-order variants that update coarse and fine modes more
+symmetrically,
+\item a cheaper conditional network than attention if wall-clock speed is the
+dominant objective,
+\item using the new model as a higher-quality but more expensive proposal and
+the old MG flow as a fast baseline.
+\end{itemize}
+
+\end{document}

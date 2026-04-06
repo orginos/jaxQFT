@@ -1,0 +1,507 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, geometry, mathtools, booktabs, longtable}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{RG Coarse-Lattice Fluctuation Flow for 2D $\phi^4$: Code-Level Description and CLI Reference}
+\author{Kostas Orginos}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This note documents the RG coarse-lattice fluctuation flow implemented in
+\texttt{jaxqft/models/phi4\_rg\_coarse\_eta\_flow.py}, together with its
+trainer
+\texttt{scripts/phi4/train\_rg\_coarse\_eta\_flow.py}
+and checker
+\texttt{scripts/phi4/check\_rg\_coarse\_eta\_flow.py}.
+
+This path is a new evolution branch. It leaves
+\texttt{jaxqft/models/phi4\_mg.py},
+\texttt{jaxqft/models/phi4\_rg\_cond\_flow.py},
+\texttt{jaxqft/models/phi4\_rg\_checkerboard\_flow.py}, and
+\texttt{jaxqft/models/phi4\_rg\_checkerboard\_inblock\_flow.py} unchanged.
+
+\section{High-Level Design}
+
+This architecture separates two conceptual steps:
+\begin{enumerate}
+\item RG blocking,
+\item trivialization of the local fluctuations.
+\end{enumerate}
+
+At each non-terminal RG level:
+\begin{itemize}
+\item the current field is split into a coarse scalar field $c$ on the next
+lattice and a local fluctuation vector $\eta\in\mathbb{R}^3$ on each coarse
+site,
+\item the coarse field $c$ is held fixed throughout the whole level update,
+\item only $\eta$ is transformed,
+\item the update of $\eta$ at one coarse site depends on the local coarse
+field and neighboring coarse-lattice variables.
+\end{itemize}
+
+This is the key difference from the checkerboard branches:
+\begin{quote}
+there is no shifted reblocking and no attempt to preserve multiple incompatible
+blockings. One blocking is chosen, its coarse field is fixed, and only the
+fluctuations of that blocking are trivialized.
+\end{quote}
+
+\section{Lattice, Prior, and RG Split}
+
+Let the fine lattice be
+\[
+\Lambda_0,\qquad |\Lambda_0| = L\times L,\qquad L=2^K.
+\]
+The batched field is
+\[
+\phi \in \mathbb{R}^{B\times L\times L}.
+\]
+
+The latent prior is sitewise standard normal:
+\begin{equation}
+p_Z(z)=\prod_{x\in\Lambda_0}\frac{1}{\sqrt{2\pi}}
+\exp\!\left(-\frac{z_x^2}{2}\right).
+\end{equation}
+
+At RG level $k$, the current lattice has size
+\[
+L_k = L/2^k.
+\]
+Each $2\times 2$ block is packed into
+\[
+v=(v_{00},v_{01},v_{10},v_{11})\in\mathbb{R}^4.
+\]
+
+\subsection{Average Blocking}
+
+For \texttt{rg\_type="average"}, the code uses the orthonormal basis
+\begin{equation}
+H=
+\begin{pmatrix}
+\tfrac12 & \tfrac12 & \tfrac12 & \tfrac12 \\
+\tfrac12 & -\tfrac12 & \tfrac12 & -\tfrac12 \\
+\tfrac12 & \tfrac12 & -\tfrac12 & -\tfrac12 \\
+\tfrac12 & -\tfrac12 & -\tfrac12 & \tfrac12
+\end{pmatrix}
+\end{equation}
+and defines
+\begin{equation}
+(c,\eta_1,\eta_2,\eta_3)=H\,v.
+\end{equation}
+Thus
+\[
+\eta=(\eta_1,\eta_2,\eta_3)
+\]
+spans the local fluctuation subspace.
+
+The arithmetic block average is
+\[
+\bar v = \frac14\sum_{i\in\mathrm{block}} v_i = \frac12\,c.
+\]
+This arithmetic average is the coarse scalar used in conditioning.
+
+\subsection{Select Blocking}
+
+For \texttt{rg\_type="select"}, the code uses
+\begin{equation}
+c=v_{00},\qquad \eta=(v_{01},v_{10},v_{11}).
+\end{equation}
+
+\subsection{Inverse Reconstruction}
+
+At each block the inverse reconstruction is
+\[
+v = R(c,\eta).
+\]
+For average blocking this is
+\[
+v = H^\top(c,\eta).
+\]
+
+\section{Recursive Structure}
+
+The recursion stops at the final $2\times 2$ lattice, where the remaining
+$4$-component block is mapped by an unconditional RealNVP.
+
+For each non-terminal level:
+\begin{enumerate}
+\item split the current field into coarse field $c$ and local fluctuations
+$\eta$,
+\item recursively transform the coarse field,
+\item transform $\eta$ conditional on the physical coarse field,
+\item merge the transformed coarse field and transformed fluctuations.
+\end{enumerate}
+
+Thus if
+\[
+x_k \longleftrightarrow (c_{k+1},\eta_k),
+\]
+the level map is
+\[
+(z_{k+1},z_{\eta,k})
+\mapsto
+\bigl(x_{k+1},x_{\eta,k}\bigr)
+\mapsto
+x_k,
+\]
+where the fluctuation map is conditioned on $x_{k+1}$, not on the latent
+coarse variable.
+
+\section{Coarse-Lattice Fluctuation Field}
+
+After blocking, one should think of the level-$k$ state as a field on the
+coarse lattice
+\[
+\Lambda_{k+1},
+\]
+whose value at each site $b$ is
+\[
+y_b = (c_b,\eta_b),
+\qquad
+c_b\in\mathbb{R},\quad
+\eta_b\in\mathbb{R}^3.
+\]
+
+The model does \emph{not} return to a fine lattice picture during the
+fluctuation update. The fluctuation trivialization is performed directly on
+this coarse lattice.
+
+\section{Coarse-Lattice Neighborhood Conditioner}
+
+Fix one RG level and suppress the level index. The conditioner input field is
+\[
+u_b = \bigl(\eta_b^{\mathrm{masked}}, \tilde c_b\bigr)\in\mathbb{R}^4,
+\]
+where
+\[
+\tilde c_b =
+\begin{cases}
+\tfrac12 c_b,& \text{average blocking,}\\
+c_b,& \text{select blocking.}
+\end{cases}
+\]
+
+The code uses a local patch MLP:
+\begin{itemize}
+\item choose a radius $r=\texttt{radius}$,
+\item collect the square neighborhood
+\[
+\mathcal N_r(b)=\{b+\delta:\delta_y,\delta_x\in\{-r,\dots,r\}\},
+\]
+\item stack the $4$-component features from that neighborhood,
+\item apply an MLP to the flattened patch.
+\end{itemize}
+
+Hence:
+\begin{itemize}
+\item \texttt{radius = 0} means on-site conditioning only,
+\item \texttt{radius = 1} means a $3\times 3$ neighborhood on the coarse
+lattice,
+\item in general the receptive field contains $(2r+1)^2$ coarse-lattice sites.
+\end{itemize}
+
+\section{Red/Black Sweeps on the Coarse Lattice}
+
+The coarse lattice is decomposed into red and black checkerboards:
+\[
+\Lambda_{k+1} = R \cup B,\qquad R\cap B = \varnothing.
+\]
+The corresponding masks are denoted by $M_R$ and $M_B$.
+
+For one red sweep:
+\begin{itemize}
+\item all coarse variables $c$ are visible everywhere,
+\item black fluctuations are visible and frozen,
+\item red fluctuations are updated.
+\end{itemize}
+
+The masked fluctuation field for a red sweep is
+\[
+\eta^{\mathrm{masked}} = M_B \eta.
+\]
+So at a red site the conditioner sees:
+\begin{itemize}
+\item the local coarse scalar,
+\item neighboring coarse scalars within the chosen radius,
+\item neighboring black fluctuations within the chosen radius,
+\item zero in the red fluctuation channels.
+\end{itemize}
+
+The black sweep is analogous, with red and black exchanged.
+
+\subsection{Why This Remains Invertible}
+
+The critical condition is:
+\begin{quote}
+when a site is updated, the conditioner must depend only on variables that are
+held fixed during that substep.
+\end{quote}
+
+This is satisfied because:
+\begin{itemize}
+\item all coarse variables are fixed throughout the whole level map,
+\item during a red sweep only black fluctuations are visible to the
+conditioner,
+\item during a black sweep only red fluctuations are visible to the
+conditioner.
+\end{itemize}
+
+So increasing the radius does not break invertibility. It only enlarges the
+neighborhood of frozen variables available to the conditioner.
+
+\section{Per-Site Eta Map}
+
+At each updated site $b$, the code applies a conditional lower-triangular
+affine map on the local fluctuation vector
+\[
+\eta_b=(\eta_{b,1},\eta_{b,2},\eta_{b,3})\in\mathbb{R}^3.
+\]
+
+The conditioner outputs:
+\begin{itemize}
+\item three diagonal log-scales,
+\item three strict lower-triangular entries,
+\item three shifts.
+\end{itemize}
+
+Write these as
+\[
+\ell_{b,1},\ell_{b,2},\ell_{b,3},
+\qquad
+\lambda_{b,21},\lambda_{b,31},\lambda_{b,32},
+\qquad
+t_{b,1},t_{b,2},t_{b,3}.
+\]
+Then the sitewise forward map is
+\begin{align}
+x_{b,1} &= e^{\ell_{b,1}} \eta_{b,1} + t_{b,1}, \\
+x_{b,2} &= \lambda_{b,21}\eta_{b,1} + e^{\ell_{b,2}}\eta_{b,2} + t_{b,2}, \\
+x_{b,3} &= \lambda_{b,31}\eta_{b,1} + \lambda_{b,32}\eta_{b,2}
+         + e^{\ell_{b,3}}\eta_{b,3} + t_{b,3}.
+\end{align}
+
+So the three components are mixed in one shot, but the Jacobian remains
+triangular:
+\[
+\det J_b = e^{\ell_{b,1}+\ell_{b,2}+\ell_{b,3}}.
+\]
+
+\subsection{Inverse Map}
+
+The inverse is solved exactly by forward substitution:
+\begin{align}
+\eta_{b,1} &= e^{-\ell_{b,1}}(x_{b,1}-t_{b,1}), \\
+\eta_{b,2} &= e^{-\ell_{b,2}}
+\bigl(x_{b,2}-t_{b,2}-\lambda_{b,21}\eta_{b,1}\bigr), \\
+\eta_{b,3} &= e^{-\ell_{b,3}}
+\bigl(x_{b,3}-t_{b,3}-\lambda_{b,31}\eta_{b,1}-\lambda_{b,32}\eta_{b,2}\bigr).
+\end{align}
+
+\subsection{Numerical Stabilization}
+
+The code clips the conditioner outputs by
+\[
+\ell_{b,i}\leftarrow
+\texttt{log\_scale\_clip}\cdot \tanh(\ell_{b,i}^{\mathrm{raw}})
+\]
+and
+\[
+\lambda_{b,ij}\leftarrow
+\texttt{offdiag\_clip}\cdot \tanh(\lambda_{b,ij}^{\mathrm{raw}}).
+\]
+
+\section{$Z_2$ Symmetry}
+
+The code supports
+\[
+\texttt{parity}\in\{\texttt{none},\texttt{sym}\}.
+\]
+
+For \texttt{parity="sym"}, the raw conditioner outputs are projected so that
+the scale-like channels are even and the shifts are odd:
+\begin{align}
+\ell(u) &= \frac12\bigl(\hat \ell(u) + \hat \ell(-u)\bigr), \\
+\lambda(u) &= \frac12\bigl(\hat \lambda(u) + \hat \lambda(-u)\bigr), \\
+t(u) &= \frac12\bigl(\hat t(u) - \hat t(-u)\bigr).
+\end{align}
+
+Thus
+\[
+\ell(-u)=\ell(u),\qquad
+\lambda(-u)=\lambda(u),\qquad
+t(-u)=-t(u),
+\]
+which enforces the old-model-style
+\[
+z\mapsto -z,\qquad \phi\mapsto -\phi
+\]
+symmetry.
+
+\section{One Full Level Map}
+
+Let $P_R$ denote one red sweep and $P_B$ one black sweep on the coarse lattice.
+One cycle is
+\[
+P = P_B \circ P_R.
+\]
+The code repeats this
+\[
+\texttt{n\_cycles}
+\]
+times per non-terminal level.
+
+So the level fluctuation map is
+\[
+T_\eta = P^{N_c},
+\qquad
+N_c=\texttt{n\_cycles}.
+\]
+
+Unlike the checkerboard branches, there is no shifted reblocking here. The
+coarse field of the chosen blocking remains fixed throughout the whole level
+update.
+
+\section{Terminal $2\times 2$ Flow}
+
+At the coarsest $2\times 2$ lattice, the remaining four real variables are
+packed into a vector in $\mathbb{R}^4$ and mapped by an unconditional RealNVP
+\[
+g_{\mathrm{term}}:\mathbb{R}^4\to\mathbb{R}^4.
+\]
+
+\section{Exact Log Density}
+
+The inverse map returns
+\[
+(z,\log|\det J^{-1}|).
+\]
+Hence
+\begin{equation}
+\log p_\theta(x)
+= \log p_Z(z)
++ \log|\det J_{\mathrm{term}}^{-1}|
++ \sum_k \log|\det J_k^{-1}|.
+\end{equation}
+
+At one updated site,
+\[
+\log|\det J_b^{-1}| = -(\ell_{b,1}+\ell_{b,2}+\ell_{b,3}).
+\]
+The log-Jacobian of one color sweep is the sum of this over the updated color.
+The level log-Jacobian is the sum over all red and black sweeps in all cycles.
+
+\section{Training Objective}
+
+Training uses the standard flow objective
+\begin{equation}
+\mathcal L(\theta)=
+\mathbb E_{z\sim p_Z}
+\bigl[
+\log p_\theta(g_\theta(z)) + S(g_\theta(z))
+\bigr].
+\end{equation}
+
+For reweighting quality, the more relevant validation quantity is the centered
+width of
+\[
+\Delta S = \log p_\theta(\phi) + S(\phi),
+\]
+namely
+\[
+\sigma\bigl(\Delta S-\langle\Delta S\rangle\bigr),
+\]
+because the reweighting factors are
+\[
+w=e^{-\Delta S}.
+\]
+
+\section{CLI Reference: Training Script}
+
+This section documents
+\texttt{scripts/phi4/train\_rg\_coarse\_eta\_flow.py}.
+
+\begin{longtable}{p{0.24\linewidth}p{0.70\linewidth}}
+\toprule
+Argument & Meaning \\
+\midrule
+\endhead
+\texttt{--resume} & Resume training from an existing checkpoint. \\
+\texttt{--save} & Output checkpoint path. \\
+\texttt{--save-every} & Save an intermediate checkpoint every $N$ epochs. Zero means save only at the end. \\
+\texttt{--validate} & Run the final validation routine after training. \\
+\texttt{--validate-batch} & Batch size used inside one validation draw. \\
+\texttt{--validate-super} & Number of validation draws concatenated before computing $\Delta S$ and ESS summaries. \\
+\texttt{--L} & Lattice linear size; the lattice is $L\times L$. Must be a power of two. \\
+\texttt{--lam} & Quartic coupling $\lambda$. \\
+\texttt{--mass} & Quadratic mass parameter $m^2$. \\
+\texttt{--width} & Hidden width of the local patch MLP conditioner. \\
+\texttt{--n-cycles} & Number of red/black sweep cycles per non-terminal RG level. \\
+\texttt{--radius} & Coarse-lattice neighborhood radius used to build the local conditioner patch. \\
+\texttt{--terminal-n-layers} & Number of RealNVP layers in the terminal $2\times 2$ flow. \\
+\texttt{--terminal-width} & Hidden width of the terminal RealNVP MLPs. Zero means reuse \texttt{width}. \\
+\texttt{--output-init-scale} & Small nonzero output initialization scale used to start near the identity while still allowing gradients to flow. \\
+\texttt{--parity} & Symmetry mode. \texttt{sym} enforces the $\phi\to-\phi$, $z\to-z$ symmetry; \texttt{none} does not. \\
+\texttt{--rg-type} & RG blocking rule: \texttt{average} or \texttt{select}. \\
+\texttt{--log-scale-clip} & Tanh clip applied to the diagonal log-scales of the local triangular map. \\
+\texttt{--offdiag-clip} & Tanh clip applied to the strict lower-triangular off-diagonal entries. \\
+\texttt{--epochs} & Total target epoch count. On resume this is the final epoch number, not the number of extra epochs. \\
+\texttt{--batch} & Training batch size. On resume, the checkpoint batch is reused unless this flag is explicitly passed. \\
+\texttt{--lr} & Adam learning rate. On resume, the checkpoint learning rate is reused unless this flag is explicitly passed. \\
+\texttt{--seed} & Random seed. \\
+\bottomrule
+\end{longtable}
+
+\section{CLI Reference: Checker Script}
+
+This section documents
+\texttt{scripts/phi4/check\_rg\_coarse\_eta\_flow.py}.
+
+\begin{longtable}{p{0.24\linewidth}p{0.70\linewidth}}
+\toprule
+Argument & Meaning \\
+\midrule
+\endhead
+\texttt{--shape} & Lattice shape used for invertibility and timing tests. \\
+\texttt{--jac-shape} & Small lattice shape used for the dense autodiff Jacobian check. \\
+\texttt{--batch-size} & Batch size used in invertibility and timing tests. \\
+\texttt{--width}, \texttt{--n-cycles}, \texttt{--radius}, \texttt{--terminal-n-layers}, \texttt{--terminal-width}, \texttt{--output-init-scale}, \texttt{--parity}, \texttt{--rg-type}, \texttt{--log-scale-clip}, \texttt{--offdiag-clip} & Same architectural meanings as in the training script. \\
+\texttt{--lam}, \texttt{--mass} & Theory parameters used in the timing loss-gradient benchmark. \\
+\texttt{--tests} & Comma-separated subset of \texttt{invertibility}, \texttt{jacobian}, \texttt{timing}. \\
+\texttt{--invert-tol} & Absolute tolerance for the forward-then-inverse reconstruction test. \\
+\texttt{--jac-tol} & Tolerance for the autodiff-vs-analytic logdet comparison. \\
+\texttt{--jac-perturb-scale} & Small perturbation applied to initialized weights before the Jacobian test, so the logdet is not trivially zero. \\
+\texttt{--timing-warmup} & Warmup iterations for each timed kernel. \\
+\texttt{--timing-iters} & Number of timed iterations per kernel. \\
+\texttt{--json-out} & Optional JSON output path for the checker summary. \\
+\texttt{--selfcheck-fail} & Exit with nonzero status if any selected test fails. \\
+\bottomrule
+\end{longtable}
+
+\section{Practical Interpretation}
+
+This architecture is designed for the following principle:
+\begin{quote}
+blocking should define the coarse variables; the flow should then trivialize
+only the fluctuations of that fixed blocking.
+\end{quote}
+
+So it gives up the shifted-blocking idea and instead invests model capacity in:
+\begin{itemize}
+\item preserving the physically chosen coarse field,
+\item using neighboring coarse-lattice context,
+\item mixing the three local fluctuation components exactly and cheaply.
+\end{itemize}
+
+Empirically this produces a strong quality-to-cost tradeoff:
+\begin{itemize}
+\item much cheaper than the transformer-heavy checkerboard branches,
+\item cleaner mathematically than the shifted-blocking construction,
+\item already competitive with the best previous models in reweighting quality.
+\end{itemize}
+
+\end{document}

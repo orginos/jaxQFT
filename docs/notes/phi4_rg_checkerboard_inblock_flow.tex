@@ -1,0 +1,504 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb, geometry, mathtools, booktabs, longtable}
+\usepackage{hyperref}
+\geometry{margin=1in}
+
+\title{RG Checkerboard Flow with In-Block Mixing for 2D $\phi^4$: Code-Level Description and CLI Reference}
+\author{Kostas Orginos}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This note documents the in-block checkerboard RG flow implemented in
+\texttt{jaxqft/models/phi4\_rg\_checkerboard\_inblock\_flow.py}, together with
+its trainer
+\texttt{scripts/phi4/train\_rg\_checkerboard\_inblock\_flow.py}
+and checker
+\texttt{scripts/phi4/check\_rg\_checkerboard\_inblock\_flow.py}.
+
+This path is a new evolution branch. It leaves
+\texttt{jaxqft/models/phi4\_rg\_checkerboard\_flow.py},
+\texttt{jaxqft/models/phi4\_rg\_cond\_flow.py}, and
+\texttt{jaxqft/models/phi4\_mg.py} unchanged.
+
+\section{High-Level Design}
+
+The model combines four ingredients:
+\begin{itemize}
+\item recursive $2\times 2$ RG splitting into one coarse mode and three local
+fluctuation modes,
+\item red/black checkerboard updates acting on block fluctuations,
+\item a shifted second blocking obtained by rolling the fine lattice by
+$(1,1)$ before repeating the checkerboard pass,
+\item masked in-block RealNVP-style mixing among the three fluctuation
+components inside each red or black color pass.
+\end{itemize}
+
+Relative to the earlier checkerboard branch, the essential new feature is that
+the three fluctuation components
+\[
+\eta=(\eta_1,\eta_2,\eta_3)\in\mathbb{R}^3
+\]
+inside one block are no longer updated all at once with no internal coupling.
+Instead, each red or black pass is itself decomposed into a sequence of masked
+subupdates that mix the three components while still conditioning only on
+frozen variables.
+
+\section{Lattice, Prior, and RG Split}
+
+Let the fine lattice be
+\[
+\Lambda_0,\qquad |\Lambda_0| = L\times L,\qquad L=2^K.
+\]
+The batched field is
+\[
+\phi \in \mathbb{R}^{B\times L\times L}.
+\]
+
+The latent prior is sitewise standard normal:
+\begin{equation}
+p_Z(z)=\prod_{x\in\Lambda_0}\frac{1}{\sqrt{2\pi}}
+\exp\!\left(-\frac{z_x^2}{2}\right).
+\end{equation}
+
+At RG level $k$, the current lattice has size
+\[
+L_k = L/2^k.
+\]
+Each $2\times 2$ block is packed into
+\[
+v=(v_{00},v_{01},v_{10},v_{11})\in\mathbb{R}^4.
+\]
+
+\subsection{Average Blocking}
+
+For \texttt{rg\_type="average"}, the code uses the orthonormal Haar-like basis
+\begin{equation}
+H=
+\begin{pmatrix}
+\tfrac12 & \tfrac12 & \tfrac12 & \tfrac12 \\
+\tfrac12 & -\tfrac12 & \tfrac12 & -\tfrac12 \\
+\tfrac12 & \tfrac12 & -\tfrac12 & -\tfrac12 \\
+\tfrac12 & -\tfrac12 & -\tfrac12 & \tfrac12
+\end{pmatrix}
+\end{equation}
+and defines
+\begin{equation}
+(c,\eta_1,\eta_2,\eta_3)=H\,v.
+\end{equation}
+Thus
+\[
+\eta=(\eta_1,\eta_2,\eta_3)
+\]
+spans the local fluctuation subspace.
+
+The arithmetic block average is
+\[
+\bar v = \frac14\sum_{i\in\mathrm{block}} v_i = \frac12\,c.
+\]
+This arithmetic average is the coarse scalar used in conditioning.
+
+\subsection{Select Blocking}
+
+For \texttt{rg\_type="select"}, the code uses
+\begin{equation}
+c=v_{00},\qquad \eta=(v_{01},v_{10},v_{11}).
+\end{equation}
+
+\subsection{Inverse Reconstruction}
+
+At each block the inverse reconstruction is
+\[
+v = R(c,\eta).
+\]
+For average blocking, this is simply
+\[
+v = H^\top(c,\eta).
+\]
+
+\section{Recursive Structure}
+
+The recursion stops at the final $2\times 2$ lattice, where the remaining
+$4$-component block is mapped by an unconditional RealNVP.
+
+For each non-terminal level:
+\begin{enumerate}
+\item apply a full-field level bijection $T_k$ on the current lattice,
+\item split the result into a next coarse lattice and stored fine modes,
+\item recurse on the coarse lattice,
+\item reconstruct the fine lattice by merging the recursively transformed
+coarse field with the stored fine modes.
+\end{enumerate}
+
+So, as in the previous checkerboard branch, the checkerboard dynamics is a
+\emph{full-field} map at each scale, not a post hoc correction applied only to
+previously extracted $\eta$ variables.
+
+\section{Checkerboard Plus In-Block Level Map}
+
+Fix one RG level and suppress the level index. Let
+\[
+S(x) = (c,\eta)
+\]
+denote the block split, where $c$ lives on the block lattice and
+\[
+\eta_b\in\mathbb{R}^3
+\]
+is attached to each block $b$.
+
+Let the block lattice be decomposed into red and black checkerboards:
+\[
+\Lambda_{\mathrm{blk}} = R \cup B,\qquad R\cap B = \varnothing.
+\]
+The corresponding masks are denoted by $M_R$ and $M_B$.
+
+\subsection{In-Block Masks}
+
+Inside each block, the code uses the familiar $3$-component coupling masks
+\[
+m^{(1)}=(1,1,0),\qquad
+m^{(2)}=(0,1,1),\qquad
+m^{(3)}=(1,0,1),
+\]
+or the first \texttt{n\_inner\_couplings} of this sequence if that integer is
+smaller than three. Their complements are
+\[
+\bar m^{(i)} = \mathbf 1 - m^{(i)}.
+\]
+
+For mask $m^{(i)}$:
+\begin{itemize}
+\item the components selected by $m^{(i)}$ are visible to the conditioner,
+\item the complementary components selected by $\bar m^{(i)}$ are updated.
+\end{itemize}
+
+\subsection{One Red Color Pass}
+
+Fix one in-block mask $m^{(i)}$. In a red pass:
+\begin{itemize}
+\item all black blocks are frozen and visible,
+\item on red blocks, only the components selected by $m^{(i)}$ are visible,
+\item on red blocks, only the complementary components selected by
+$\bar m^{(i)}$ are updated.
+\end{itemize}
+
+Define the visible mask
+\begin{equation}
+V_R^{(i)} = M_B + M_R\,m^{(i)},
+\end{equation}
+and the update mask
+\begin{equation}
+U_R^{(i)} = M_R\,\bar m^{(i)}.
+\end{equation}
+
+The conditioner input is
+\begin{equation}
+u_R^{(i)} = \bigl[V_R^{(i)}\eta,\ \tilde c\bigr],
+\end{equation}
+where
+\[
+\tilde c =
+\begin{cases}
+\tfrac12 c,& \text{average blocking,}\\
+c,& \text{select blocking.}
+\end{cases}
+\]
+
+Then the affine subupdate is
+\begin{align}
+s_R^{(i)},t_R^{(i)} &= \mathcal C_R^{(i)}(u_R^{(i)}), \\
+\eta &\mapsto (1-U_R^{(i)})\eta
++ U_R^{(i)}\bigl(\eta\odot e^{s_R^{(i)}} + t_R^{(i)}\bigr),
+\end{align}
+with the code-level stabilization
+\[
+s_R^{(i)} \leftarrow \texttt{log\_scale\_clip}\cdot \tanh(s_R^{(i)}).
+\]
+
+The full red color pass composes these subupdates in order
+\[
+i=1,\dots,N_{\mathrm{inner}},
+\qquad
+N_{\mathrm{inner}}=\texttt{n\_inner\_couplings}.
+\]
+
+\subsection{One Black Color Pass}
+
+The black pass is analogous, with red and black exchanged:
+\begin{equation}
+V_B^{(i)} = M_R + M_B\,m^{(i)},
+\qquad
+U_B^{(i)} = M_B\,\bar m^{(i)}.
+\end{equation}
+The black pass uses the already-updated red variables from the preceding red
+pass as part of its frozen conditioning field.
+
+\subsection{One Checkerboard Pass}
+
+One checkerboard pass on the current blocking is therefore
+\begin{equation}
+P = P_B \circ P_R,
+\end{equation}
+where each of $P_R$ and $P_B$ is itself a composition of
+\texttt{n\_inner\_couplings} masked in-block affine subupdates.
+
+\subsection{Shifted Blocking and One Full Cycle}
+
+After one checkerboard pass, the field is merged back to the fine lattice,
+rolled by $(-1,-1)$ with periodic wrapping, updated again on the shifted
+blocking, and rolled back. One cycle is
+\begin{equation}
+T = \rho^{-1}\circ P_{\mathrm{shift}}\circ \rho \circ P_{\mathrm{orig}}.
+\end{equation}
+
+The code repeats this cycle
+\[
+\texttt{n\_cycles}
+\]
+times per non-terminal RG level.
+
+\section{Why the Map Remains Invertible}
+
+The critical condition is unchanged:
+\begin{quote}
+every affine subupdate must depend only on variables that remain fixed during
+that subupdate.
+\end{quote}
+
+This is enforced at two levels.
+
+\subsection{Across Blocks}
+
+When updating red blocks, the full black checkerboard is visible but frozen.
+When updating black blocks, the full red checkerboard is visible but frozen.
+
+\subsection{Inside One Block}
+
+For a fixed in-block mask $m^{(i)}$, the updated components are the ones
+selected by $\bar m^{(i)}$, and these are masked out of the conditioner input
+everywhere. On the same-color blocks, the conditioner sees only the held-fixed
+components selected by $m^{(i)}$.
+
+\subsection{Attention Radius}
+
+Therefore increasing \texttt{attn\_radius} does \emph{not} break
+invertibility, provided the masking is applied before attention, as in the
+current code. A larger radius only exposes a larger neighborhood of frozen
+variables.
+
+So:
+\begin{itemize}
+\item larger \texttt{attn\_radius} increases cost,
+\item larger \texttt{attn\_radius} increases the frozen conditioning context,
+\item larger \texttt{attn\_radius} does not violate the triangular coupling
+structure in the current implementation.
+\end{itemize}
+
+\section{Local Conditioner}
+
+The code supports
+\[
+\texttt{conditioner}\in\{\texttt{transformer},\texttt{mlp}\}.
+\]
+
+\subsection{MLP Conditioner}
+
+For \texttt{conditioner="mlp"}, each masked subupdate uses a pointwise MLP
+applied independently at each block site:
+\[
+(s,t)=\mathrm{MLP}(u_b).
+\]
+There is no spatial attention.
+
+\subsection{Transformer Conditioner}
+
+For \texttt{conditioner="transformer"}, each masked subupdate uses a local
+transformer on the block lattice. The token at block $b$ is
+\[
+u_b\in\mathbb{R}^4,
+\]
+consisting of the masked visible fluctuation vector in $\mathbb{R}^3$ plus the
+coarse scalar.
+
+For \texttt{attn\_radius} $= r$, the attended neighborhood is
+\[
+\mathcal N_r(b)=\{b+\delta:\delta_y,\delta_x\in\{-r,\dots,r\}\}.
+\]
+Hence:
+\begin{itemize}
+\item \texttt{attn\_radius = 0} means on-site conditioning only,
+\item \texttt{attn\_radius = 1} means a $3\times 3$ neighborhood on the block
+lattice,
+\item in general the receptive field contains $(2r+1)^2$ block tokens.
+\end{itemize}
+
+\subsection{$Z_2$ Symmetry}
+
+The code supports
+\[
+\texttt{parity}\in\{\texttt{none},\texttt{sym}\}.
+\]
+
+For \texttt{parity="sym"}, the raw conditioner outputs are projected to
+\begin{align}
+s(u) &= \frac12\bigl(\hat s(u) + \hat s(-u)\bigr), \\
+t(u) &= \frac12\bigl(\hat t(u) - \hat t(-u)\bigr),
+\end{align}
+so that
+\[
+s(-u)=s(u),\qquad t(-u)=-t(u).
+\]
+This preserves the old-map-style symmetry
+\[
+z\mapsto -z,\qquad \phi\mapsto -\phi.
+\]
+
+\section{Terminal $2\times 2$ Flow}
+
+At the coarsest $2\times 2$ lattice, the remaining four real variables are
+packed into a vector in $\mathbb{R}^4$ and mapped by an unconditional RealNVP
+\[
+g_{\mathrm{term}}:\mathbb{R}^4\to\mathbb{R}^4.
+\]
+This terminal flow uses the same parity option as the in-block checkerboard
+conditioners.
+
+\section{Exact Log Density}
+
+The inverse map returns
+\[
+(z,\log|\det J^{-1}|).
+\]
+Hence
+\begin{equation}
+\log p_\theta(x)
+= \log p_Z(z)
++ \log|\det J_{\mathrm{term}}^{-1}|
++ \sum_k \log|\det J_k^{-1}|.
+\end{equation}
+
+Each masked affine subupdate contributes a diagonal Jacobian on the updated
+subset of variables only. The total log-Jacobian at one level is the sum over:
+\begin{itemize}
+\item both checkerboard colors,
+\item both blockings in each cycle,
+\item all \texttt{n\_inner\_couplings} masked in-block subupdates.
+\end{itemize}
+
+\section{Training Objective}
+
+Training uses the standard flow objective
+\begin{equation}
+\mathcal L(\theta)=
+\mathbb E_{z\sim p_Z}
+\bigl[
+\log p_\theta(g_\theta(z)) + S(g_\theta(z))
+\bigr].
+\end{equation}
+
+For reweighting quality, the practically relevant validation quantity is the
+centered width of
+\[
+\Delta S = \log p_\theta(\phi) + S(\phi),
+\]
+namely
+\[
+\sigma\bigl(\Delta S - \langle\Delta S\rangle\bigr),
+\]
+because the reweighting factors are
+\[
+w = e^{-\Delta S}.
+\]
+
+\section{CLI Reference: Training Script}
+
+This section documents
+\texttt{scripts/phi4/train\_rg\_checkerboard\_inblock\_flow.py}.
+
+\begin{longtable}{p{0.24\linewidth}p{0.70\linewidth}}
+\toprule
+Argument & Meaning \\
+\midrule
+\endhead
+\texttt{--resume} & Resume training from an existing checkpoint. \\
+\texttt{--save} & Output checkpoint path. \\
+\texttt{--save-every} & Save an intermediate checkpoint every $N$ epochs. Zero means save only at the end. \\
+\texttt{--validate} & Run the final validation routine after training. \\
+\texttt{--validate-batch} & Batch size used inside one validation draw. \\
+\texttt{--validate-super} & Number of validation draws concatenated before computing $\Delta S$ and ESS summaries. \\
+\texttt{--L} & Lattice linear size; the lattice is $L\times L$. Must be a power of two. \\
+\texttt{--lam} & Quartic coupling $\lambda$. \\
+\texttt{--mass} & Quadratic mass parameter $m^2$. \\
+\texttt{--width} & Conditioner width. For the transformer, this is the model dimension. For the MLP, this is the hidden width. \\
+\texttt{--n-cycles} & Number of original-blocking plus shifted-blocking checkerboard cycles per non-terminal RG level. \\
+\texttt{--n-inner-couplings} & Number of masked in-block affine subupdates inside each red or black color pass. \\
+\texttt{--conditioner} & Conditioner family: \texttt{transformer} or \texttt{mlp}. \\
+\texttt{--transformer-layers} & Number of transformer blocks in each masked subupdate network. Used only for \texttt{conditioner="transformer"}. \\
+\texttt{--n-heads} & Number of attention heads. Used only for \texttt{conditioner="transformer"}. \\
+\texttt{--attn-radius} & Local attention radius on the block lattice. Used only for \texttt{conditioner="transformer"}. \\
+\texttt{--mlp-dim} & Hidden width of the transformer MLP blocks. Used only for \texttt{conditioner="transformer"}. Zero means $2\times$\texttt{width}. \\
+\texttt{--terminal-n-layers} & Number of RealNVP layers in the terminal $2\times 2$ flow. \\
+\texttt{--terminal-width} & Hidden width of the terminal RealNVP MLPs. Zero means reuse \texttt{width}. \\
+\texttt{--output-init-scale} & Small nonzero output initialization scale used to start near the identity while still allowing gradients to flow. \\
+\texttt{--parity} & Symmetry mode. \texttt{sym} enforces the $\phi\to-\phi$, $z\to-z$ symmetry; \texttt{none} does not. \\
+\texttt{--rg-type} & RG blocking rule: \texttt{average} or \texttt{select}. \\
+\texttt{--log-scale-clip} & Tanh clip for affine log-scales. \\
+\texttt{--epochs} & Total target epoch count. On resume this is the final epoch number, not the number of extra epochs. \\
+\texttt{--batch} & Training batch size. \\
+\texttt{--lr} & Adam learning rate. \\
+\texttt{--seed} & Random seed. \\
+\bottomrule
+\end{longtable}
+
+\section{CLI Reference: Checker Script}
+
+This section documents
+\texttt{scripts/phi4/check\_rg\_checkerboard\_inblock\_flow.py}.
+
+\begin{longtable}{p{0.24\linewidth}p{0.70\linewidth}}
+\toprule
+Argument & Meaning \\
+\midrule
+\endhead
+\texttt{--shape} & Lattice shape used for invertibility and timing tests. \\
+\texttt{--jac-shape} & Small lattice shape used for the dense autodiff Jacobian check. \\
+\texttt{--batch-size} & Batch size used in invertibility and timing tests. \\
+\texttt{--width}, \texttt{--n-cycles}, \texttt{--n-inner-couplings}, \texttt{--conditioner}, \texttt{--transformer-layers}, \texttt{--n-heads}, \texttt{--attn-radius}, \texttt{--mlp-dim}, \texttt{--terminal-n-layers}, \texttt{--terminal-width}, \texttt{--output-init-scale}, \texttt{--parity}, \texttt{--rg-type}, \texttt{--log-scale-clip} & Same architectural meanings as in the training script. \\
+\texttt{--lam}, \texttt{--mass} & Theory parameters used in the timing loss-gradient benchmark. \\
+\texttt{--tests} & Comma-separated subset of \texttt{invertibility}, \texttt{jacobian}, \texttt{timing}. \\
+\texttt{--invert-tol} & Absolute tolerance for the forward-then-inverse reconstruction test. \\
+\texttt{--jac-tol} & Tolerance for the autodiff-vs-analytic logdet comparison. \\
+\texttt{--jac-perturb-scale} & Small perturbation applied to initialized weights before the Jacobian test, so the logdet is not trivially zero. \\
+\texttt{--timing-warmup} & Warmup iterations for each timed kernel. \\
+\texttt{--timing-iters} & Number of timed iterations per kernel. \\
+\texttt{--json-out} & Optional JSON output path for the checker summary. \\
+\texttt{--selfcheck-fail} & Exit with nonzero status if any selected test fails. \\
+\bottomrule
+\end{longtable}
+
+\section{Practical Interpretation}
+
+This architecture is a direct attempt to fix the main structural limitation of
+the earlier checkerboard branch:
+\begin{quote}
+the old checkerboard map coupled each block to its neighbors, but it did not
+mix the three fluctuation components inside the block during one color pass.
+\end{quote}
+
+The new path addresses this by nesting masked in-block couplings inside each
+color pass. So it now mixes:
+\begin{itemize}
+\item across neighboring blocks through the checkerboard and shifted-blocking
+mechanism,
+\item within one block through the sequence of masked in-block subupdates.
+\end{itemize}
+
+This makes the map more expressive, but it also increases cost. In practice,
+the first tuning knob should usually be \texttt{conditioner="mlp"} if one wants
+to isolate the effect of the in-block coupling structure before paying the full
+cost of the transformer.
+
+\end{document}
