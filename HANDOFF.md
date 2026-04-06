@@ -192,6 +192,56 @@ Last updated: 2026-04-05
       - both Gaussian-prior variants work well
       - the intermediate-level Gaussian conditioned on coarse fields is not a clear improvement over the cheaper shared-per-level Gaussian in the current implementation
       - the simpler `eta_gaussian=level` variant is the better default right now
+    - terminal-capacity ablation on the same `eta_gaussian=level` setup:
+      - larger terminal test checkpoint:
+        - `rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_tl4_tw128_parsym.pkl`
+      - modified terminal settings:
+        - `--terminal-n-layers 4`
+        - `--terminal-width 128`
+      - batch-ramp results:
+        - epoch `1000`, batch `32`:
+          - mean action diff `= -92.49665`
+          - std action diff `= 1.3441681`
+          - std re-weighting factor `= 2.1932833`
+          - `ESS = 0.17210247`
+        - epoch `2000`, batch `64`:
+          - mean action diff `= -92.77629`
+          - std action diff `= 1.2009089`
+          - std re-weighting factor `= 2.8717868`
+          - `ESS = 0.10814134`
+        - epoch `3000`, batch `128`:
+          - mean action diff `= -92.90738`
+          - std action diff `= 1.0668775`
+          - std re-weighting factor `= 1.905004`
+          - `ESS = 0.21602748`
+        - epoch `4000`, batch `256`:
+          - mean action diff `= -92.96696`
+          - std action diff `= 0.99775445`
+          - std re-weighting factor `= 1.4564725`
+          - `ESS = 0.32037807`
+        - epoch `5000`, batch `512`:
+          - mean action diff `= -93.011566`
+          - std action diff `= 0.93572736`
+          - std re-weighting factor `= 1.4590638`
+          - `ESS = 0.31960452`
+        - epoch `6000`, batch `1024`:
+          - mean action diff `= -93.073654`
+          - std action diff `= 0.8446211`
+          - std re-weighting factor `= 0.97452796`
+          - `ESS = 0.51289815`
+      - comparison to the current smaller-terminal default at epoch `6000`, batch `1024`:
+        - default terminal (`--terminal-n-layers 2 --terminal-width 64`):
+          - std action diff `= 0.84158325`
+          - std re-weighting factor `= 0.96977115`
+          - `ESS = 0.5153428`
+        - larger terminal (`--terminal-n-layers 4 --terminal-width 128`):
+          - std action diff `= 0.8446211`
+          - std re-weighting factor `= 0.97452796`
+          - `ESS = 0.51289815`
+      - interpretation:
+        - increasing batch size still materially improves the larger-terminal model
+        - however, the larger terminal does not beat the smaller-terminal default after the full schedule
+        - the final performance is essentially tied, while the larger terminal is modestly slower per step
 - RG coarse-lattice fluctuation flow for `phi^4` (new evolution branch):
   - New model:
     - `jaxqft/models/phi4_rg_coarse_eta_flow.py`
