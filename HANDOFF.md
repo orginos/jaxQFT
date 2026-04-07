@@ -70,6 +70,25 @@ Last updated: 2026-04-07
     - `cd docs/papers/paper-2 && make`
   - Current status:
     - manuscript compiles successfully to `docs/papers/paper-2/manuscript.pdf`
+  - New baseline run package for the RG paper:
+    - fixed-architecture canonical scaling configs:
+      - `configs/phi4/paper-2/canonical-scaling/L16_uniform.toml`
+      - `configs/phi4/paper-2/canonical-scaling/L32_uniform.toml`
+      - `configs/phi4/paper-2/canonical-scaling/L64_uniform.toml`
+      - `configs/phi4/paper-2/canonical-scaling/L128_uniform.toml`
+    - config README:
+      - `configs/phi4/paper-2/canonical-scaling/README.md`
+    - committed checkpoint tree:
+      - `ckpts/phi4/paper-2/README.md`
+      - `ckpts/phi4/paper-2/canonical-scaling/L16/`
+      - `ckpts/phi4/paper-2/canonical-scaling/L32/`
+      - `ckpts/phi4/paper-2/canonical-scaling/L64/`
+      - `ckpts/phi4/paper-2/canonical-scaling/L128/`
+  - Scientific purpose of the baseline:
+    - hold the model uniform across RG levels
+    - hold the staged schedule fixed across volumes
+    - measure scaling of the intensive quality metric `std(ΔS) / L`
+    - postpone volume-dependent tuning until after the baseline is established
 - Short-paper manuscript scaffold for the Wilsonian phi4 flow project:
   - Target journal style:
     - `Phys. Rev. D` (`revtex4-2`)

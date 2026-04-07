@@ -189,6 +189,24 @@ batch job.
 - stage checkpoints are already available every `1000` epochs
 - validation metrics are printed at stage boundaries
 
+For the phi4 campaign, prefer the wrapper:
+
+- `scripts/phi4/run_rg_coarse_eta_gaussian.sh`
+
+What it does:
+
+- loads the NERSC `python` module when needed
+- activates `~/venvs/jax`
+- sets `JAX_PLATFORMS=cuda`
+- sets `MPLCONFIGDIR=/tmp/mpl-cache`
+- creates an XLA autotune cache under `/tmp/xla-autotune`
+- can run from a dedicated `--workdir` so checkpoints, validation PDFs, and
+  other runtime files stay localized
+
+Default Slurm account for the helper submit script:
+
+- `hadron`
+
 
 ## Current Phi4 Priorities
 

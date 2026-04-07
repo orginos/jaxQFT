@@ -15,6 +15,40 @@ central object is the exact blocked hierarchy of the learned action.
    in the sense that all blocked levels are exact samplers for the learned
    theory?
 
+## Phase A: fixed-architecture canonical baseline
+
+Before doing any volume-dependent tuning, establish a clean baseline in which
+both the architecture and the staged training schedule are held fixed across
+volumes.
+
+Baseline architecture:
+
+- Wilsonian Gaussian coarse-eta branch
+- uniform across all nonterminal levels
+- `width = 64`
+- `n_cycles = 2`
+- `radius = 1`
+- `eta_gaussian = level`
+- `gaussian_width = 64`
+- `gaussian_radius = 1`
+- `terminal_prior = learned`
+- `terminal_n_layers = 2`
+- `terminal_width = 64`
+
+Baseline schedule:
+
+- `1000` epochs at batch `16`, lr `3e-4`
+- `1000` epochs at batch `32`, lr `3e-4`
+- `1000` epochs at batch `64`, lr `3e-4`
+- `2000` epochs at batch `64`, lr `1e-4`
+- `2000` epochs at batch `64`, lr `3e-5`
+- `4000` epochs at batch `64`, lr `1e-5`
+
+This is the right scaling test because it removes the ambiguity introduced by
+changing per-level capacity with the volume. Only after this fixed-architecture
+baseline is in hand should bottlenecks be identified and tuned models be
+introduced.
+
 ## Essential numerical program
 
 ### R1. Volume scaling at a fixed target point
@@ -31,6 +65,7 @@ Record:
 - `std(ΔS)`
 - `std(ΔS)/L`
 - `ESS`
+- time to threshold at fixed `std(ΔS)/L`
 
 This establishes whether the residual mismatch remains intensive.
 
@@ -48,6 +83,13 @@ Do this first at the canonical point:
 
 - `m^2 = -0.4`
 - `lambda = 2.4`
+
+In parallel, generate canonical HMC reference ensembles and record:
+
+- correlation length
+- connected susceptibility
+- integrated autocorrelation time
+- ESS
 
 ### R3. Bare-point scan
 
@@ -72,5 +114,8 @@ This paper will need analysis scripts that are not yet finished:
 1. blocked-observable measurement at each RG depth
 2. comparison of blocked trajectories across target points
 3. optional fitting of a truncated coarse action
+4. locality diagnostics based on score/Hessian decay
+5. threshold-crossing analysis for fixed `std(ΔS)/L`
 
-The first two are essential; the third is optional.
+The first two are essential; the third is optional. The fourth and fifth are
+central to the RG/locality scaling argument.

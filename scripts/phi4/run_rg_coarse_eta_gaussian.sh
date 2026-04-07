@@ -9,6 +9,7 @@ Usage:
 Wrapper options:
   --mode interactive|debug   Run the production L32 card or a short debug card.
   --config PATH              Override the default config for the selected mode.
+  --workdir PATH             Directory to run from. Outputs stay here. Default: repo root.
   --gpu ID|all               GPU to expose via CUDA_VISIBLE_DEVICES. Default: 0.
   --no-triton                Disable Triton GEMM kernels for this launch.
   --python EXE               Python executable to use. Default: python.
@@ -28,6 +29,7 @@ Examples:
   scripts/phi4/run_rg_coarse_eta_gaussian.sh
   scripts/phi4/run_rg_coarse_eta_gaussian.sh --mode debug
   scripts/phi4/run_rg_coarse_eta_gaussian.sh --mode interactive -- --save my_run.pkl
+  scripts/phi4/run_rg_coarse_eta_gaussian.sh --workdir runs/phi4/jobA -- --save checkpoint.pkl
 EOF
 }
 
@@ -98,6 +100,7 @@ load_nersc_python_module() {
 mode="interactive"
 config=""
 gpu="0"
+workdir=""
 no_triton=0
 python_exe="python"
 activate=1
@@ -116,6 +119,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gpu)
       gpu="${2:-}"
+      shift 2
+      ;;
+    --workdir)
+      workdir="${2:-}"
       shift 2
       ;;
     --no-triton)
@@ -171,6 +178,23 @@ if [[ -z "${config}" ]]; then
   config="${default_config}"
 fi
 
+if [[ -z "${workdir}" ]]; then
+  workdir="${repo_root}"
+elif [[ "${workdir}" != /* ]]; then
+  workdir="${repo_root}/${workdir}"
+fi
+
+if [[ "${config}" != /* ]]; then
+  config="${repo_root}/${config}"
+fi
+
+if [[ ! -f "${config}" ]]; then
+  echo "Config not found: ${config}" >&2
+  exit 2
+fi
+
+mkdir -p "${workdir}"
+
 if [[ ${activate} -eq 1 ]]; then
   if ! load_nersc_python_module; then
     echo "Failed to load the NERSC python module" >&2
@@ -184,7 +208,7 @@ if [[ ${activate} -eq 1 ]]; then
   source "${HOME}/venvs/jax/bin/activate"
 fi
 
-cd "${repo_root}"
+cd "${workdir}"
 
 if [[ "${gpu}" != "all" ]]; then
   export CUDA_VISIBLE_DEVICES="${gpu}"
@@ -207,7 +231,7 @@ fi
 
 cmd=(
   "${python_exe}"
-  "scripts/phi4/train_rg_coarse_eta_gaussian_flow.py"
+  "${repo_root}/scripts/phi4/train_rg_coarse_eta_gaussian_flow.py"
   "--config" "${config}"
 )
 if [[ ${#passthrough[@]} -gt 0 ]]; then
@@ -216,6 +240,7 @@ fi
 
 echo "phi4 launcher"
 echo "  repo_root: ${repo_root}"
+echo "  workdir: ${workdir}"
 echo "  mode: ${mode}"
 echo "  config: ${config}"
 echo "  python: ${python_exe}"
