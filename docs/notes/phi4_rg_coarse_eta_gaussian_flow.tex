@@ -42,6 +42,86 @@ The key point is that the coarse field remains fixed during the whole
 fluctuation update, so the level map remains Wilsonian in the same sense as the
 base coarse-eta model.
 
+\section{Added Flexibility}
+
+The current trainer supports two forms of flexibility that were added after the
+initial Gaussian-prior branch was implemented.
+
+\subsection{Per-Level Nonterminal Capacity}
+
+For a lattice of linear size $L=2^K$, there are $K-1$ non-terminal RG levels.
+They are ordered in the code from finest to coarsest. For example:
+\begin{itemize}
+\item for $L=16$, the non-terminal coarse lattices are $8^2$, $4^2$, $2^2$,
+\item for $L=32$, the non-terminal coarse lattices are $16^2$, $8^2$, $4^2$,
+$2^2$.
+\end{itemize}
+
+The trainer can now assign different capacities to these levels:
+\begin{itemize}
+\item \texttt{width\_levels}: nonlinear eta-flow conditioner widths,
+\item \texttt{n\_cycles\_levels}: red/black cycle counts,
+\item \texttt{radius\_levels}: nonlinear conditioner patch radii,
+\item \texttt{gaussian\_width\_levels}: widths of the conditioned Gaussian MLP,
+\item \texttt{gaussian\_radius\_levels}: Gaussian-conditioning patch radii.
+\end{itemize}
+
+If these lists are not provided, the code falls back to the uniform scalar
+values \texttt{width}, \texttt{n\_cycles}, \texttt{radius},
+\texttt{gaussian\_width}, and \texttt{gaussian\_radius}.
+
+\subsection{TOML-Driven Runs and Staged Training}
+
+The trainer supports \texttt{--config <file.toml>}. A TOML file can define:
+\begin{itemize}
+\item fresh runs or resume runs,
+\item physics parameters,
+\item model architecture,
+\item validation settings,
+\item automated batch-ramp and learning-rate schedules.
+\end{itemize}
+
+The supported schedule forms are:
+\begin{itemize}
+\item explicit stages:
+\begin{verbatim}
+[[schedule.stage]]
+epoch_end = 1000
+batch = 32
+lr = 3e-4
+\end{verbatim}
+\item generated batch-doubling ramps:
+\begin{verbatim}
+[schedule.ramp]
+initial_batch = 32
+epochs_per_stage = 1000
+num_doubles = 5
+lr = 3e-4
+\end{verbatim}
+\item late-stage learning-rate anneals:
+\begin{verbatim}
+[schedule.anneal]
+epoch_ends = [7000, 8000]
+lrs = [1e-4, 3e-5]
+batch = 1024
+\end{verbatim}
+\end{itemize}
+
+When a schedule is present, the trainer derives the total target epoch from the
+last schedule stage, switches batch size and learning rate automatically at
+stage boundaries, and preserves the schedule inside the checkpoint payload.
+
+Validation can also run at every stage boundary:
+\begin{verbatim}
+[validation]
+enabled = true
+each_stage = true
+batch = 256
+super = 4
+\end{verbatim}
+This stage validation uses a folded random key derived from the training RNG,
+so enabling it does not perturb the training trajectory.
+
 \section{RG Split}
 
 Let the level-$k$ lattice be $\Lambda_k$ with linear size $L_k = L / 2^k$.
@@ -271,11 +351,16 @@ Flag & Meaning \\
 Flag & Meaning \\
 \midrule
 \texttt{--width} & hidden width of the nonlinear coarse-eta conditioner \\
+\texttt{--width-levels} & comma-separated per-level widths, finest $\to$ coarsest \\
 \texttt{--n-cycles} & number of red/black coarse-lattice eta cycles per level \\
+\texttt{--n-cycles-levels} & comma-separated per-level cycle counts \\
 \texttt{--radius} & nonlinear conditioner patch radius on the coarse lattice \\
+\texttt{--radius-levels} & comma-separated per-level nonlinear radii \\
 \texttt{--eta-gaussian \{none,level,coarse\_patch\}} & intermediate Gaussian mode \\
 \texttt{--gaussian-radius} & conditioning radius for \texttt{coarse\_patch} Gaussian \\
+\texttt{--gaussian-radius-levels} & comma-separated per-level Gaussian radii \\
 \texttt{--gaussian-width} & hidden width for the conditioned Gaussian MLP \\
+\texttt{--gaussian-width-levels} & comma-separated per-level Gaussian widths \\
 \texttt{--terminal-prior \{std,learned\}} & terminal $4$-variate Gaussian mode \\
 \texttt{--terminal-n-layers} & terminal RealNVP depth \\
 \texttt{--terminal-width} & terminal RealNVP width \\
@@ -291,6 +376,7 @@ Flag & Meaning \\
 \toprule
 Flag & Meaning \\
 \midrule
+\texttt{--config} & TOML input card for fresh or resume runs \\
 \texttt{--epochs} & target epoch count; on resume this is the absolute target \\
 \texttt{--batch} & batch size; preserved from checkpoint unless overridden \\
 \texttt{--lr} & learning rate; preserved from checkpoint unless overridden \\
@@ -298,10 +384,51 @@ Flag & Meaning \\
 \texttt{--save} & checkpoint output file \\
 \texttt{--save-every} & periodic checkpoint cadence \\
 \texttt{--validate} & run validation at the end of the script \\
+\texttt{--validate-each-stage} & when using a schedule, validate at each stage boundary \\
 \texttt{--validate-batch} & validation mini-batch size \\
 \texttt{--validate-super} & number of validation batches to aggregate \\
 \bottomrule
 \end{longtable}
+
+\section{Input Files}
+
+The repository currently provides three useful TOML cards for this branch:
+\begin{itemize}
+\item \texttt{configs/phi4/rg\_coarse\_eta\_gaussian\_fresh.toml}
+\begin{itemize}
+\item example fresh run,
+\item uses the canonical $16^2$ physical point,
+\item uses the batch ramp $32 \to 64 \to 128 \to 256 \to 512 \to 1024$ and
+then a two-stage learning-rate anneal.
+\end{itemize}
+\item \texttt{configs/phi4/rg\_coarse\_eta\_gaussian\_resume.toml}
+\begin{itemize}
+\item example resume card,
+\item intended for continuing a saved checkpoint while preserving the same
+model family and staged training logic.
+\end{itemize}
+\item \texttt{configs/phi4/rg\_coarse\_eta\_gaussian\_L32\_perlevel.toml}
+\begin{itemize}
+\item direct $32^2$ extension of the successful per-level $16^2$ setup,
+\item keeps the simple learned terminal Gaussian and terminal RealNVP,
+\item uses per-level settings
+\[
+\texttt{width\_levels} = [128,96,64,96], \quad
+\texttt{n\_cycles\_levels} = [3,3,2,3], \quad
+\texttt{radius\_levels} = [1,1,1,2].
+\]
+\end{itemize}
+\end{itemize}
+
+The fresh/resume split is controlled by
+\[
+\texttt{mode} \in \{\texttt{"fresh"},\texttt{"resume"}\}.
+\]
+In resume mode the file must provide
+\[
+\texttt{[io] resume = "..."}.
+\]
+Regular CLI flags still override TOML defaults.
 
 \section{Checker CLI}
 
@@ -360,6 +487,24 @@ Checker:
 source /opt/python/jax/bin/activate
 MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu \
 python scripts/phi4/check_rg_coarse_eta_gaussian_flow.py --selfcheck-fail
+\end{verbatim}
+
+Fresh TOML-driven run:
+\begin{verbatim}
+source /opt/python/jax/bin/activate
+MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu \
+python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py \
+  --config configs/phi4/rg_coarse_eta_gaussian_fresh.toml
+\end{verbatim}
+
+Resume a staged run from checkpoint:
+\begin{verbatim}
+source /opt/python/jax/bin/activate
+MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu \
+python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py \
+  --config configs/phi4/rg_coarse_eta_gaussian_L32_perlevel.toml \
+  --resume rg_coarse_eta_gauss_L32_m-0.4_l2.4_perlevel_w128-96-64-96_\
+nc3-3-2-3_r1-1-1-2_eglevel_tglearned.pkl
 \end{verbatim}
 
 \section{Canonical $16^2$ Comparison}

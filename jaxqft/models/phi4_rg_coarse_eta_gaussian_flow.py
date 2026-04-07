@@ -19,7 +19,7 @@ cheap exact log-Jacobian.
 from __future__ import annotations
 
 import math
-from typing import Dict, Tuple
+from typing import Dict, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -116,6 +116,26 @@ def _eta_gaussian_context(coarse: Array, rg_mode: int) -> Array:
     return _coarse_condition(coarse, rg_mode)[..., None]
 
 
+def _expand_level_schedule(
+    value: int | Sequence[int],
+    n_levels: int,
+    *,
+    name: str,
+    min_value: int | None = None,
+) -> Tuple[int, ...]:
+    if n_levels <= 0:
+        return ()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        out = tuple(int(v) for v in value)
+    else:
+        out = tuple(int(value) for _ in range(n_levels))
+    if len(out) != n_levels:
+        raise ValueError(f"{name} must have length {n_levels}, got {len(out)}")
+    if min_value is not None and any(v < min_value for v in out):
+        raise ValueError(f"{name} entries must be >= {min_value}")
+    return out
+
+
 def _eta_gaussian_params(cfg: Dict, weights: Dict, coarse: Array, level: int) -> Tuple[Array, Array]:
     mode = cfg["eta_gaussian"]
     bsz, ny, nx = coarse.shape
@@ -131,7 +151,7 @@ def _eta_gaussian_params(cfg: Dict, weights: Dict, coarse: Array, level: int) ->
         return log_diag, lower
     if mode == "coarse_patch":
         context = _eta_gaussian_context(coarse, cfg["rg_mode"])
-        conditioner_cfg = cfg["gaussian_conditioner_cfg"]
+        conditioner_cfg = cfg["gaussian_conditioner_cfg_levels"][level]
         coupling = weights["gaussian_levels"][level]
         if cfg["parity"] == "sym":
             raw_pos = _local_patch_mlp_apply(conditioner_cfg, coupling, context)
@@ -248,11 +268,16 @@ def init_rg_coarse_eta_gaussian_flow(
     size: Tuple[int, int],
     *,
     width: int = 64,
+    width_levels: Sequence[int] | None = None,
     n_cycles: int = 2,
+    n_cycles_levels: Sequence[int] | None = None,
     radius: int = 1,
+    radius_levels: Sequence[int] | None = None,
     eta_gaussian: str = "coarse_patch",
     gaussian_radius: int | None = None,
+    gaussian_radius_levels: Sequence[int] | None = None,
     gaussian_width: int | None = None,
+    gaussian_width_levels: Sequence[int] | None = None,
     terminal_prior: str = "learned",
     rg_type: str = "average",
     log_scale_clip: float = 5.0,
@@ -280,11 +305,66 @@ def init_rg_coarse_eta_gaussian_flow(
 
     depth = int(math.log2(h))
     rg_mode = 0 if rg_type == "average" else 1
+    n_nonterminal = max(depth - 1, 0)
     terminal_width = int(terminal_width if terminal_width is not None else width)
-    gaussian_radius = int(radius if gaussian_radius is None else gaussian_radius)
-    gaussian_width = int(width if gaussian_width is None else gaussian_width)
-    if gaussian_radius < 0:
-        raise ValueError("gaussian_radius must be nonnegative")
+
+    width_levels = _expand_level_schedule(
+        width if width_levels is None else width_levels,
+        n_nonterminal,
+        name="width_levels",
+        min_value=1,
+    )
+    n_cycles_levels = _expand_level_schedule(
+        n_cycles if n_cycles_levels is None else n_cycles_levels,
+        n_nonterminal,
+        name="n_cycles_levels",
+        min_value=1,
+    )
+    radius_levels = _expand_level_schedule(
+        radius if radius_levels is None else radius_levels,
+        n_nonterminal,
+        name="radius_levels",
+        min_value=0,
+    )
+
+    if gaussian_radius_levels is None:
+        if gaussian_radius is None:
+            gaussian_radius_levels = radius_levels
+        else:
+            gaussian_radius_levels = _expand_level_schedule(
+                gaussian_radius,
+                n_nonterminal,
+                name="gaussian_radius_levels",
+                min_value=0,
+            )
+    else:
+        gaussian_radius_levels = _expand_level_schedule(
+            gaussian_radius_levels,
+            n_nonterminal,
+            name="gaussian_radius_levels",
+            min_value=0,
+        )
+
+    if gaussian_width_levels is None:
+        if gaussian_width is None:
+            gaussian_width_levels = width_levels
+        else:
+            gaussian_width_levels = _expand_level_schedule(
+                gaussian_width,
+                n_nonterminal,
+                name="gaussian_width_levels",
+                min_value=1,
+            )
+    else:
+        gaussian_width_levels = _expand_level_schedule(
+            gaussian_width_levels,
+            n_nonterminal,
+            name="gaussian_width_levels",
+            min_value=1,
+        )
+
+    gaussian_radius = int(gaussian_radius_levels[0]) if gaussian_radius_levels else int(radius)
+    gaussian_width = int(gaussian_width_levels[0]) if gaussian_width_levels else int(width)
 
     site_red = []
     site_black = []
@@ -295,30 +375,55 @@ def init_rg_coarse_eta_gaussian_flow(
         site_red.append(red)
         site_black.append(1.0 - red)
 
-    conditioner = _init_local_patch_mlp(key, in_channels=4, hidden_dim=width, out_dim=9, radius=radius)
-    conditioner_cfg = conditioner["cfg"]
+    conditioner_cfg_levels = tuple(
+        _init_local_patch_mlp(key, in_channels=4, hidden_dim=width_levels[level], out_dim=9, radius=radius_levels[level])[
+            "cfg"
+        ]
+        for level in range(n_nonterminal)
+    )
 
-    gaussian_conditioner_cfg = None
     if eta_gaussian == "coarse_patch":
-        gaussian_conditioner_cfg = _init_local_patch_mlp(
-            key,
-            in_channels=1,
-            hidden_dim=gaussian_width,
-            out_dim=6,
-            radius=gaussian_radius,
-        )["cfg"]
+        gaussian_conditioner_cfg_levels = tuple(
+            _init_local_patch_mlp(
+                key,
+                in_channels=1,
+                hidden_dim=gaussian_width_levels[level],
+                out_dim=6,
+                radius=gaussian_radius_levels[level],
+            )["cfg"]
+            for level in range(n_nonterminal)
+        )
+    else:
+        gaussian_conditioner_cfg_levels = tuple()
 
     level_weights = []
     gaussian_level_weights = []
-    for _ in range(max(depth - 1, 0)):
-        keys = jax.random.split(key, 2 * n_cycles + 2)
+    for level in range(n_nonterminal):
+        level_width = width_levels[level]
+        level_cycles = n_cycles_levels[level]
+        level_radius = radius_levels[level]
+        level_gaussian_width = gaussian_width_levels[level]
+        level_gaussian_radius = gaussian_radius_levels[level]
+        keys = jax.random.split(key, 2 * level_cycles + 2)
         key = keys[0]
         cycles = []
         idx = 1
-        for _cycle in range(n_cycles):
-            red_net = _init_local_patch_mlp(keys[idx], in_channels=4, hidden_dim=width, out_dim=9, radius=radius)["weights"]
+        for _cycle in range(level_cycles):
+            red_net = _init_local_patch_mlp(
+                keys[idx],
+                in_channels=4,
+                hidden_dim=level_width,
+                out_dim=9,
+                radius=level_radius,
+            )["weights"]
             idx += 1
-            black_net = _init_local_patch_mlp(keys[idx], in_channels=4, hidden_dim=width, out_dim=9, radius=radius)["weights"]
+            black_net = _init_local_patch_mlp(
+                keys[idx],
+                in_channels=4,
+                hidden_dim=level_width,
+                out_dim=9,
+                radius=level_radius,
+            )["weights"]
             idx += 1
             cycles.append({"red": red_net, "black": black_net})
         level_weights.append(cycles)
@@ -329,9 +434,13 @@ def init_rg_coarse_eta_gaussian_flow(
             gaussian_level_weights.append({"raw": jnp.zeros((6,), dtype=jnp.float32)})
         else:
             gaussian_level_weights.append(
-                _init_local_patch_mlp(keys[idx], in_channels=1, hidden_dim=gaussian_width, out_dim=6, radius=gaussian_radius)[
-                    "weights"
-                ]
+                _init_local_patch_mlp(
+                    keys[idx],
+                    in_channels=1,
+                    hidden_dim=level_gaussian_width,
+                    out_dim=6,
+                    radius=level_gaussian_radius,
+                )["weights"]
             )
 
     key, k_terminal = jax.random.split(key)
@@ -351,25 +460,36 @@ def init_rg_coarse_eta_gaussian_flow(
         "rg_type": str(rg_type),
         "parity": str(parity),
         "n_cycles": int(n_cycles),
+        "n_cycles_levels": tuple(int(v) for v in n_cycles_levels),
         "radius": int(radius),
+        "radius_levels": tuple(int(v) for v in radius_levels),
         "eta_gaussian": str(eta_gaussian),
         "gaussian_radius": int(gaussian_radius),
+        "gaussian_radius_levels": tuple(int(v) for v in gaussian_radius_levels),
         "gaussian_width": int(gaussian_width),
+        "gaussian_width_levels": tuple(int(v) for v in gaussian_width_levels),
         "terminal_prior": str(terminal_prior),
         "log_scale_clip": float(log_scale_clip),
         "offdiag_clip": float(offdiag_clip),
         "site_red": tuple(site_red),
         "site_black": tuple(site_black),
-        "conditioner_cfg": conditioner_cfg,
-        "gaussian_conditioner_cfg": gaussian_conditioner_cfg,
+        "conditioner_cfg": conditioner_cfg_levels[0] if conditioner_cfg_levels else None,
+        "conditioner_cfg_levels": conditioner_cfg_levels,
+        "gaussian_conditioner_cfg": gaussian_conditioner_cfg_levels[0] if gaussian_conditioner_cfg_levels else None,
+        "gaussian_conditioner_cfg_levels": gaussian_conditioner_cfg_levels,
         "terminal_flow_cfg": terminal["cfg"],
         "arch": {
             "width": int(width),
+            "width_levels": tuple(int(v) for v in width_levels),
             "n_cycles": int(n_cycles),
+            "n_cycles_levels": tuple(int(v) for v in n_cycles_levels),
             "radius": int(radius),
+            "radius_levels": tuple(int(v) for v in radius_levels),
             "eta_gaussian": str(eta_gaussian),
             "gaussian_radius": int(gaussian_radius),
+            "gaussian_radius_levels": tuple(int(v) for v in gaussian_radius_levels),
             "gaussian_width": int(gaussian_width),
+            "gaussian_width_levels": tuple(int(v) for v in gaussian_width_levels),
             "terminal_prior": str(terminal_prior),
             "rg_type": str(rg_type),
             "terminal_n_layers": int(terminal_n_layers),

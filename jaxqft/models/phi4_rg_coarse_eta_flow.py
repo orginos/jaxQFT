@@ -74,8 +74,15 @@ def _eta_context(eta_masked: Array, coarse: Array, rg_mode: int) -> Array:
     return jnp.concatenate([eta_masked, coarse_ctx], axis=-1)
 
 
-def _conditional_params(cfg: Dict, coupling: Dict, context: Array) -> Tuple[Array, Array, Array]:
-    conditioner_cfg = cfg["conditioner_cfg"]
+def _conditioner_cfg_for_level(cfg: Dict, level: int) -> Dict:
+    levels = cfg.get("conditioner_cfg_levels")
+    if levels is not None and len(levels) > 0:
+        return levels[level]
+    return cfg["conditioner_cfg"]
+
+
+def _conditional_params(cfg: Dict, coupling: Dict, context: Array, level: int) -> Tuple[Array, Array, Array]:
+    conditioner_cfg = _conditioner_cfg_for_level(cfg, level)
     parity = cfg["parity"]
     if parity == "none":
         raw = _local_patch_mlp_apply(conditioner_cfg, coupling, context)
@@ -143,7 +150,7 @@ def _color_sweep_g(cfg: Dict, cycle_weights: Dict, eta: Array, coarse: Array, le
     target_mask = red_mask if color == "red" else black_mask
     eta_masked = eta * (1.0 - target_mask)
     context = _eta_context(eta_masked, coarse, cfg["rg_mode"])
-    log_diag, lower, shift = _conditional_params(cfg, cycle_weights[color], context)
+    log_diag, lower, shift = _conditional_params(cfg, cycle_weights[color], context, level)
     eta_new = _triangular_affine_g(eta, log_diag, lower, shift)
     return eta_masked + target_mask * eta_new
 
@@ -155,7 +162,7 @@ def _color_sweep_f(
     target_mask = red_mask if color == "red" else black_mask
     eta_masked = eta * (1.0 - target_mask)
     context = _eta_context(eta_masked, coarse, cfg["rg_mode"])
-    log_diag, lower, shift = _conditional_params(cfg, cycle_weights[color], context)
+    log_diag, lower, shift = _conditional_params(cfg, cycle_weights[color], context, level)
     eta_new, ldj_site = _triangular_affine_f(eta, log_diag, lower, shift)
     eta = eta_masked + target_mask * eta_new
     ldj = jnp.sum(ldj_site * target_mask[..., 0], axis=(1, 2))

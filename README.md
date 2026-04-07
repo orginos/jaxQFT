@@ -67,6 +67,7 @@ JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_flow.py --selfcheck-fa
 JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_flow.py --L 16 --lam 2.4 --mass -0.4 --n-cycles 2 --radius 1 --validate
 JAX_PLATFORMS=cpu python scripts/phi4/check_rg_coarse_eta_gaussian_flow.py --selfcheck-fail
 JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --L 16 --lam 2.4 --mass -0.4 --n-cycles 2 --radius 1 --eta-gaussian level --terminal-prior learned --validate
+JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --config configs/phi4/rg_coarse_eta_gaussian_fresh.toml
 JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --tests hmc,knockout,conditional
 python scripts/phi4/train_stacked_mg.py
 ```
@@ -84,6 +85,23 @@ python scripts/phi4/train_stacked_mg.py
 - The Gaussian-prior coarse-eta branch adds two intermediate-level prior options:
   - `--eta-gaussian level`: one learned zero-mean `3x3` Gaussian per RG level.
   - `--eta-gaussian coarse_patch`: a zero-mean `3x3` Gaussian conditioned on a local patch of coarse fields.
+- The same trainer now supports TOML-driven runs via `--config <file.toml>`. Example templates live in:
+  - `configs/phi4/rg_coarse_eta_gaussian_fresh.toml`
+  - `configs/phi4/rg_coarse_eta_gaussian_resume.toml`
+- The TOML config also supports automated training schedules:
+  - explicit stages with `[[schedule.stage]]` and fields `epoch_end`, `batch`, `lr`
+  - a generated doubling ramp with `[schedule.ramp]`
+  - a late-stage LR anneal with `[schedule.anneal]`
+- Stage-boundary validation is also supported for schedule-driven runs:
+  - set `[validation].each_stage = true` in TOML, or pass `--validate-each-stage`
+  - validation uses a folded key derived from the training RNG, so it does not perturb the training trajectory
+- The Gaussian-prior coarse-eta trainer also supports per-level nonterminal schedules:
+  - `--width-levels`
+  - `--n-cycles-levels`
+  - `--radius-levels`
+  - `--gaussian-width-levels`
+  - `--gaussian-radius-levels`
+  ordered from finest to coarsest nonterminal RG level.
 - In the current `16^2`, `mass=-0.4`, `lam=2.4` tests, the cheaper `--eta-gaussian level` variant and the conditioned `--eta-gaussian coarse_patch` variant both train stably through the `32 -> 64 -> 128 -> 256 -> 512 -> 1024` batch ramp, with very similar final quality. The conditioned Gaussian is not a clear win in the current implementation.
 - `scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py` adds two post-training analyses for the current Gaussian branch:
   - HMC target-sample level diagnostics that inspect how close each inverse-level output is to a standard normal.

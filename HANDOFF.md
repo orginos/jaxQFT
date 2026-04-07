@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-05
+Last updated: 2026-04-06
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -141,10 +141,19 @@ Last updated: 2026-04-05
     - `jaxqft/models/phi4_rg_coarse_eta_gaussian_flow.py`
   - New training entry point:
     - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
+  - New TOML config templates:
+    - `configs/phi4/rg_coarse_eta_gaussian_fresh.toml`
+    - `configs/phi4/rg_coarse_eta_gaussian_resume.toml`
   - New validation / profiling entry point:
     - `scripts/phi4/check_rg_coarse_eta_gaussian_flow.py`
   - New design note:
     - `docs/notes/phi4_rg_coarse_eta_gaussian_flow.tex`
+    - updated to document:
+      - per-level nonterminal controls
+      - TOML-driven fresh/resume runs
+      - schedule syntax
+      - stage-boundary validation
+      - provided input cards including the `32^2` per-level card
   - Scope:
     - leaves `phi4_rg_coarse_eta_flow.py` unchanged
     - keeps the same Wilsonian coarse-eta map:
@@ -173,15 +182,64 @@ Last updated: 2026-04-05
       - `rg_coarse_eta_gaussian_flow_prior_log_prob`
   - Training CLI highlights:
     - all coarse-eta-flow knobs are preserved
+    - training can now be driven from `--config <file.toml>`; regular CLI flags still work and override TOML defaults
+    - the trainer now supports automated schedule-driven training:
+      - explicit stages:
+        - `[[schedule.stage]]`
+        - fields:
+          - `epoch_end`
+          - `batch`
+          - `lr`
+          - optional `label`
+      - generated Torch-style batch ramp:
+        - `[schedule.ramp]`
+        - fields:
+          - `initial_batch`
+          - `epochs_per_stage`
+          - `num_doubles`
+          - optional `lr`
+          - optional `start_epoch`
+      - late-stage anneal:
+        - `[schedule.anneal]`
+        - fields:
+          - `epoch_ends = [...]`
+          - `lrs = [...]`
+          - `batch = <single batch>` or `batch = [ ... ]`
+      - if a schedule is present, the trainer derives the target epoch from the last schedule stage and automatically switches batch size and learning rate at the specified boundaries
+      - on resume, the trainer picks the correct active stage from the schedule and continues from the checkpoint epoch
+      - scheduled stage validation is also supported:
+        - TOML:
+          - `[validation].each_stage = true`
+        - CLI:
+          - `--validate-each-stage`
+        - validation runs after each stage boundary using a folded key derived from the training RNG, so enabling it does not perturb the training trajectory
     - adds:
       - `--eta-gaussian {none,level,coarse_patch}`
       - `--gaussian-radius`
       - `--gaussian-width`
       - `--terminal-prior {std,learned}`
+      - `--width-levels`
+      - `--n-cycles-levels`
+      - `--radius-levels`
+      - `--gaussian-radius-levels`
+      - `--gaussian-width-levels`
+    - per-level control applies to the non-terminal RG levels ordered from finest to coarsest
+      - for `L=16`, there are `3` such levels corresponding to coarse lattices `8x8`, `4x4`, `2x2`
     - fresh-run example:
       - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --L 16 --mass -0.4 --lam 2.4 --width 64 --n-cycles 2 --radius 1 --eta-gaussian level --gaussian-radius 1 --gaussian-width 64 --terminal-prior learned --batch 32 --lr 3e-4 --parity sym --epochs 1000 --validate --save rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl`
+    - TOML-driven example:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --config configs/phi4/rg_coarse_eta_gaussian_fresh.toml --save rg_coarse_eta_gauss_L16_perlevel_test.pkl`
     - resume example:
       - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --epochs 6000 --batch 1024 --lr 3e-4 --validate`
+    - schedule smoke validation:
+      - fresh `L=4` test with a two-stage batch ramp plus one anneal stage:
+        - `batch 2 @ 1e-3` to epoch `2`
+        - `batch 4 @ 1e-3` to epoch `4`
+        - `batch 4 @ 3e-4` to epoch `6`
+      - result:
+        - stage changes applied correctly
+        - checkpoint written successfully
+        - with `validation.each_stage = true`, validation also ran at epochs `2`, `4`, and `6`, then again at final
   - Validation:
     - syntax/compile validation command:
       - `python3 -m py_compile jaxqft/models/__init__.py jaxqft/models/phi4_rg_coarse_eta_gaussian_flow.py scripts/phi4/train_rg_coarse_eta_gaussian_flow.py scripts/phi4/check_rg_coarse_eta_gaussian_flow.py`
@@ -234,6 +292,50 @@ Last updated: 2026-04-05
       - both Gaussian-prior variants work well
       - the intermediate-level Gaussian conditioned on coarse fields is not a clear improvement over the cheaper shared-per-level Gaussian in the current implementation
       - the simpler `eta_gaussian=level` variant is the better default right now
+    - first per-level-capacity screen on the canonical `16^2` problem:
+      - tested schedule:
+        - `width_levels = [96, 64, 96]`
+        - `n_cycles_levels = [3, 2, 3]`
+        - `radius_levels = [1, 1, 2]`
+        - `gaussian_width_levels = [64, 64, 64]`
+        - `gaussian_radius_levels = [1, 1, 1]`
+        - `eta_gaussian = level`
+        - `terminal_prior = learned`
+        - simple terminal kept unchanged: `terminal_n_layers = 2`, `terminal_width = 64`
+      - stage `1000`, batch `32`:
+        - checkpoint: `rg_coarse_eta_gauss_L16_perlevel_test.pkl`
+        - mean action diff `= -92.56297`
+        - std action diff `= 1.3186144`
+        - std re-weighting factor `= 1.9193007`
+        - `ESS = 0.21350574`
+      - stage `2000`, batch `64`:
+        - mean action diff `= -92.83389`
+        - std action diff `= 1.1560671`
+        - std re-weighting factor `= 1.7452258`
+        - `ESS = 0.24716912`
+      - comparison to the uniform-capacity golden schedule at the same stages:
+        - uniform stage `1000`: `std(ΔS) = 1.3410605`, `ESS = 0.1748383`
+        - per-level stage `1000`: `std(ΔS) = 1.3186144`, `ESS = 0.21350574`
+        - uniform stage `2000`: `std(ΔS) = 1.1972615`, `ESS = 0.108031385`
+        - per-level stage `2000`: `std(ΔS) = 1.1560671`, `ESS = 0.24716912`
+      - interpretation:
+        - this is the first per-level schedule tested
+        - it is clearly promising at the first two stages of the batch ramp
+        - next step is to continue this schedule through larger batches before deciding whether it should replace the uniform-capacity default
+    - `32^2` follow-up config:
+      - `configs/phi4/rg_coarse_eta_gaussian_L32_perlevel.toml`
+      - intended as a direct larger-volume extension of the promising `16^2` per-level schedule:
+        - `width_levels = [128, 96, 64, 96]`
+        - `n_cycles_levels = [3, 3, 2, 3]`
+        - `radius_levels = [1, 1, 1, 2]`
+        - `eta_gaussian = level`
+        - simple terminal retained: `terminal_n_layers = 2`, `terminal_width = 64`
+      - schedule:
+        - ramp from batch `16` to `1024` in `1000`-epoch doubling stages
+        - then anneal at batch `1024` with learning rates `1e-4` and `3e-5`
+      - validation:
+        - `each_stage = true`
+        - `save_every = 1000`, so the run writes a checkpoint at every stage boundary
     - terminal-capacity ablation on the same `eta_gaussian=level` setup:
       - larger terminal test checkpoint:
         - `rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_tl4_tw128_parsym.pkl`
