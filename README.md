@@ -95,6 +95,7 @@ python scripts/phi4/train_stacked_mg.py
 - Stage-boundary validation is also supported for schedule-driven runs:
   - set `[validation].each_stage = true` in TOML, or pass `--validate-each-stage`
   - validation uses a folded key derived from the training RNG, so it does not perturb the training trajectory
+- Checkpoint-only validation is supported with `--validate-only`; this runs the validation pass and exits without advancing training.
 - The Gaussian-prior coarse-eta trainer also supports per-level nonterminal schedules:
   - `--width-levels`
   - `--n-cycles-levels`

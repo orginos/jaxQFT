@@ -213,6 +213,10 @@ Last updated: 2026-04-06
         - CLI:
           - `--validate-each-stage`
         - validation runs after each stage boundary using a folded key derived from the training RNG, so enabling it does not perturb the training trajectory
+      - checkpoint-only validation is also supported:
+        - CLI:
+          - `--validate --validate-only`
+        - this loads the checkpoint, runs the validation pass, writes the validation PDFs, and exits without advancing training
     - adds:
       - `--eta-gaussian {none,level,coarse_patch}`
       - `--gaussian-radius`
