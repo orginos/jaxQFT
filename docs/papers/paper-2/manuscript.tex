@@ -1,0 +1,470 @@
+\documentclass[aps,prd,reprint,nofootinbib,superscriptaddress,longbibliography]{revtex4-2}
+
+\usepackage{amsmath,amssymb,mathtools,graphicx,bm,booktabs}
+\usepackage[colorlinks=true,allcolors=blue]{hyperref}
+
+\newcommand{\std}{\mathrm{std}}
+\newcommand{\ESS}{\mathrm{ESS}}
+\newcommand{\maybegraphic}[3][0.95\linewidth]{%
+  \IfFileExists{#2}{\includegraphics[width=#1]{#2}}{%
+    \fbox{\parbox[c][2.0in][c]{0.88\linewidth}{\centering \textbf{Figure placeholder}\\[0.5em]#3}}%
+  }%
+}
+
+\begin{document}
+
+\title{Learned Wilsonian Hierarchies and Renormalized Trajectories in Two-Dimensional Lattice $\phi^4$ Theory}
+
+\author{Kostas Orginos}
+
+\begin{abstract}
+We propose a Wilsonian use of hierarchical normalizing flows for lattice field
+theory that goes beyond exact reweighting. The starting point is an invertible
+multiscale transport map for two-dimensional lattice $\phi^4$ theory in which
+each $2\times2$ blocking step is decomposed into one coarse scalar field and
+three local fluctuation modes, and only the fluctuations are trivialized while
+the coarse field is held fixed. This gives the learned model a hierarchical
+factorization in which every RG level defines an exact blocked marginal of the
+learned action, even when the explicit coarse effective action is never
+parametrized. We argue that this provides an exact sampler for the blocked
+theories of the learned model and therefore an operational route to learned
+renormalization-group trajectories in measure space. The central hypothesis is
+that, after training near a target point $(g_2,g_4)$, the resulting blocked
+hierarchy flows toward a renormalized trajectory associated with a nearby point
+in coupling space, even when fine-level reweighting becomes impractical because
+the residual mismatch is extensive. This paper sets up the formalism, the
+observable-space RG program, and the numerical strategy needed to test this
+claim in two-dimensional $\phi^4$ theory.
+\end{abstract}
+
+\maketitle
+
+\section{Introduction}
+
+Normalizing flows in lattice field theory have been used primarily as exact or
+approximately exact sampling tools \cite{Dinh2017RealNVP,Albergo2019FlowMCMC,Kanwar2020Equivariant,Albergo2021FlowScaling}.
+The usual viewpoint is microscopic: train a flow to match a target measure,
+sample from the flow, and correct any residual mismatch by reweighting. This is
+powerful, but it eventually runs into an extensive problem. If the residual
+action difference is a sum of small local mismatches, then
+\begin{equation}
+\Delta S(\phi)=S(\phi)-S_\theta(\phi)
+\end{equation}
+has a width that typically grows like $\sqrt{V}$, and the reweighting factors
+become broad even when the learned action is still close to the target action in
+an intensive sense.
+
+This suggests a different use of the learned hierarchy. If the transport map is
+constructed in a Wilsonian way, with the coarse field held fixed and only the
+block fluctuations trivialized, then the model naturally defines a family of
+blocked measures at all RG levels. These blocked measures are exact marginals of
+the learned action. Therefore one does not need to parametrize the coarse
+effective action in order to sample it. One can instead study the blocked
+theories directly in the space of observables or, after an additional
+projection, in a truncated coupling space.
+
+The present manuscript is the conceptual companion to the shorter methods paper.
+There the emphasis is on the transport map itself, learned Gaussian priors, and
+the scaling of the residual mismatch. Here the emphasis is different:
+\begin{enumerate}
+\item the learned hierarchy as an exact blocked sampler for the learned action,
+\item RG trajectories in observable space without explicit coarse-action
+parametrization,
+\item the relation between approximate matching of the target action and
+universality,
+\item the possibility of replacing ``simulate the target action exactly'' by
+``simulate a nearby representative of the same renormalized trajectory.''
+\end{enumerate}
+
+\section{Exact Blocked Hierarchy of the Learned Action}
+\label{sec:exact_blocked_hierarchy}
+
+Let $q_\theta(\phi^{(0)})$ be the learned fine-lattice measure defined by the
+hierarchical transport map. At each $2\times2$ block we rewrite the field in
+terms of a coarse scalar and three local fluctuations,
+\begin{equation}
+\phi^{(k)} \longleftrightarrow \left(\phi^{(k+1)},\eta^{(k)}\right).
+\end{equation}
+Because the transport map is built recursively and remains exactly invertible,
+the model measure factorizes exactly as
+\begin{equation}
+q_\theta(\phi^{(0)})
+=
+q_\theta(\phi^{(K-1)})
+\prod_{k=0}^{K-2}
+q_\theta\!\left(\eta^{(k)} \mid \phi^{(k+1)}\right).
+\label{eq:q_factorization}
+\end{equation}
+
+Equation~\eqref{eq:q_factorization} has an immediate consequence: for each RG
+level $k$, the blocked measure
+\begin{equation}
+q_\theta^{(k)}(\phi^{(k)})
+\end{equation}
+is an exact marginal of the learned action. Therefore:
+\begin{itemize}
+\item it is sampled exactly by ancestral generation through the learned
+hierarchy,
+\item it defines an exact blocked effective action
+\begin{equation}
+S_\theta^{(k)}(\phi^{(k)})=-\log q_\theta^{(k)}(\phi^{(k)}),
+\end{equation}
+even if that action is never written in closed form,
+\item one can study the RG flow of the learned theory directly without fitting a
+separate coarse action.
+\end{itemize}
+
+This point is conceptually important. In the standard variational RG problem,
+one often introduces an ansatz for the blocked action and then fits its
+parameters. Here the blocked measures exist exactly for the learned action before
+any such projection is performed.
+
+\begin{figure}[t]
+  \centering
+  \maybegraphic{figures/blocked_sampler_hierarchy.pdf}{Planned figure: exact
+  blocked-sampler view of the learned hierarchy, showing the fine model and all
+  coarse marginals generated by ancestral sampling.}
+  \caption{The learned hierarchy as an exact blocked sampler for the learned
+  action. Even without an explicit closed-form coarse action, each blocked level
+  defines an exact marginal of the learned measure and can therefore be sampled
+  directly.}
+  \label{fig:blocked_sampler}
+\end{figure}
+
+\section{Target Theory Versus Learned Theory}
+\label{sec:target_vs_learned}
+
+The construction above is exact for the learned measure $q_\theta$, not
+necessarily for the target measure $p \propto e^{-S}$. If the learned action
+were exact, $q_\theta=p$ and the blocked hierarchy would coincide with the true
+Wilsonian RG flow of the target theory. In practice, one has instead a residual
+mismatch
+\begin{equation}
+\Delta S(\phi)=S(\phi)-S_\theta(\phi).
+\end{equation}
+
+The key observation from the current numerical evidence is that this mismatch can
+be small in an intensive sense even when fine-level reweighting is already
+difficult. If $\Delta S$ is approximately a sum of local terms,
+\begin{equation}
+\Delta S(\phi) \approx \sum_x \delta s_x(\phi),
+\end{equation}
+then
+\begin{equation}
+\mathrm{Var}(\Delta S)\propto V,
+\qquad
+\std(\Delta S)\propto \sqrt{V}.
+\end{equation}
+In this regime, exact reweighting eventually becomes costly for purely
+extensive reasons, while the learned action may still be close to the target in
+the space of local theories.
+
+This distinction motivates the present program. Instead of treating a broad
+reweighting distribution as proof that the learned theory is unusable, one asks a
+different question: is the learned blocked hierarchy flowing toward the same
+renormalized trajectory as the target theory?
+
+\section{Observable-Space RG Trajectories}
+\label{sec:observable_space}
+
+The first version of this program should avoid any unnecessary projection onto a
+specific coupling basis. The natural first object is therefore the RG trajectory
+in the space of observables.
+
+For each bare point $(g_2,g_4)$:
+\begin{enumerate}
+\item train a Wilsonian transport map near that target point,
+\item sample from the blocked marginals $q_\theta^{(k)}$ at every RG level,
+\item measure a vector of coarse observables at each level.
+\end{enumerate}
+
+Natural observables include:
+\begin{itemize}
+\item the second-moment correlation length ratio $\xi/L$,
+\item the Binder cumulant
+\begin{equation}
+U_4 = \frac{\langle M^4\rangle}{\langle M^2\rangle^2},
+\qquad
+M = \frac{1}{V}\sum_x \phi_x,
+\end{equation}
+\item susceptibilities,
+\item blocked two-point functions at small momenta,
+\item connected four-point cumulants.
+\end{itemize}
+
+This produces a discrete trajectory
+\begin{equation}
+\mathcal O^{(0)} \to \mathcal O^{(1)} \to \cdots \to \mathcal O^{(K-1)}
+\end{equation}
+for the learned theory. If two different fine-level target points yield blocked
+trajectories that merge after several RG levels, then one has direct evidence
+that the learned hierarchy is following a common renormalized trajectory in
+observable space.
+
+\section{Projection to Coupling Space}
+\label{sec:coupling_space}
+
+Once the observable-space trajectories are understood, one may project the
+blocked theory onto a truncated coupling basis,
+\begin{equation}
+S_{\mathrm{ansatz}}^{(k)}(\varphi)
+=
+\sum_i g_i^{(k)} O_i(\varphi),
+\end{equation}
+for example using the operator set
+\begin{equation}
+\phi^2,\quad \phi^4,\quad \phi^6,\quad
+\sum_{x,\mu} \phi_x \phi_{x+\hat\mu},
+\quad \ldots
+\end{equation}
+This projection is useful, but it should be viewed as a second step. The
+blocked measures of the learned theory exist before any truncation and are exact
+within the learned model.
+
+In this sense the coupling-space description is diagnostic rather than
+foundational: it provides coordinates on the trajectory, but it is not required
+for the existence of the trajectory itself.
+
+\section{Universality Interpretation}
+\label{sec:universality}
+
+For two-dimensional $\phi^4$ theory with exact $Z_2$ symmetry, the critical line
+in the bare $(g_2,g_4)$ plane flows into the Ising universality class in the
+infrared. The precise microscopic representative changes with the bare couplings,
+but long-distance observables on the critical surface share the same universal
+behavior.
+
+This suggests a nonstandard but physically natural objective for learned
+transport maps. One need not insist that the learned action reproduce a chosen
+microscopic target action with arbitrarily good fine-level reweighting on very
+large volumes. It may be enough that the learned blocked hierarchy lies on, or
+very near, the same renormalized trajectory. Then the learned theory serves as a
+practical representative of the same universality class.
+
+From this point of view, the learned hierarchy functions as a kind of
+\emph{quantum perfect action} construction: not because it reproduces the exact
+continuum fixed-point action in closed form, but because it provides exact
+blocked samplers for a learned theory that may lie very close to the relevant
+renormalized trajectory.
+
+\section{Numerical Program}
+\label{sec:numerical_program}
+
+The numerical program for this paper has four stages.
+
+\subsection{Stage 1: volume scaling}
+
+Train the current Wilsonian transport map at
+\begin{equation}
+L=16,\ 32,\ 64,\ 128
+\end{equation}
+for a fixed canonical target point, and study:
+\begin{equation}
+\std(\Delta S),\qquad \std(\Delta S)/L,\qquad \ESS.
+\end{equation}
+The goal is to determine whether the residual mismatch remains intensive as the
+volume grows.
+
+\subsection{Stage 2: blocked observables}
+
+At each RG level of the learned hierarchy, measure:
+\begin{itemize}
+\item $\xi/L$,
+\item $U_4$,
+\item low-momentum two-point observables,
+\item connected four-point observables.
+\end{itemize}
+This gives the RG trajectory in observable space.
+
+\subsection{Stage 3: target-point scan}
+
+Repeat the construction for several bare points $(g_2,g_4)$, with particular
+focus on scans in $m^2$ at fixed $\lambda$. The goal is to determine whether the
+blocked trajectories merge and how the learned hierarchy maps the critical
+surface.
+
+\subsection{Stage 4: optional coupling projection}
+
+Project the blocked theory onto a truncated local operator basis to extract a
+coarse-grained flow in coupling space. This step is useful for interpretation
+but is not required for the core claim.
+
+\section{Figures for the Full Paper}
+\label{sec:figures}
+
+The natural figure set for this paper is:
+\begin{enumerate}
+\item schematic of the learned blocked-sampler hierarchy,
+\item scaling of $\std(\Delta S)$ and $\std(\Delta S)/L$ with volume,
+\item blocked observables versus RG depth for several bare points,
+\item merging of observable-space trajectories,
+\item optional projection of the same trajectories into a truncated
+$(g_2,g_4,\ldots)$ space.
+\end{enumerate}
+
+\begin{figure}[t]
+  \centering
+  \maybegraphic{figures/rg_trajectory_observable_space.pdf}{Planned figure:
+  observable-space RG trajectories for several target points, showing possible
+  convergence toward a common renormalized trajectory.}
+  \caption{Target figure for the central conceptual claim of the paper: the
+  blocked hierarchies generated by learned Wilsonian transport maps may flow
+  toward a common renormalized trajectory in observable space even when exact
+  fine-level reweighting is already difficult.}
+  \label{fig:observable_rg}
+\end{figure}
+
+\section{Scope of the Present Scaffold}
+\label{sec:scope}
+
+This manuscript is currently a scaffold rather than a finished paper. Its role
+is to fix the conceptual structure of the RG/universality project:
+\begin{itemize}
+\item the exact blocked hierarchy of the learned action,
+\item the distinction between target and learned measures,
+\item observable-space trajectories as the first-class object,
+\item coupling-space projections as a later diagnostic step,
+\item universality as the long-distance criterion of success.
+\end{itemize}
+
+The actual paper should only be completed once the large-volume runs and the
+observable-space RG scans are in hand.
+
+\section{Outlook}
+\label{sec:outlook}
+
+If this program succeeds, it will change the role of normalizing flows in
+lattice field theory. The point will no longer be only to construct a transport
+map that reweights efficiently at the fine level. The point will be to construct
+a learned Wilsonian hierarchy that gives access to renormalized trajectories and
+coarse effective theories operationally, without an explicit coarse-action
+parametrization. That would make the flow not only a sampler, but a dynamical
+tool for renormalization-group analysis.
+
+\appendix
+
+\section{Working Notes on Overlap, Locality, and Scalability}
+\label{app:working_notes}
+
+This appendix records the current working interpretation of the project and the
+near-term exploratory program. These points are intended as guidance for the
+full paper rather than as finalized claims.
+
+\subsection{Relation to the Shorter Methods Paper}
+
+There will inevitably be some overlap between the shorter methods paper and the
+present RG paper, because the RG interpretation depends on the same Wilsonian
+transport architecture. The intended division of labor is:
+\begin{itemize}
+\item the shorter paper gives the detailed model description, the learned
+Gaussian-prior construction, and the fine-level diagnostics,
+\item the present paper gives only a compact recap of the model and then focuses
+on the exact blocked hierarchy of the learned action, observable-space RG
+trajectories, locality, and universality.
+\end{itemize}
+In practice this means that paper~2 should contain one concise section
+describing the blocking map and conditional fluctuation trivialization, while
+referring the reader to the methods paper for implementation details and
+architecture ablations.
+
+\subsection{Locality Versus Ultra-Locality}
+
+For RG arguments the relevant property is not ultra-locality but locality in the
+lattice-field-theory sense, namely exponential decay of induced couplings or
+responses with distance. Ultra-locality would mean strictly finite range. The
+learned action generated by the present hierarchy is not expected to be
+ultra-local. The right question is whether it is local, in the sense that its
+effective couplings decay exponentially.
+
+The current architecture has a built-in locality advantage: the blocking map is
+fixed and local, and the conditional fluctuation updates at each level use only
+local neighborhoods on the appropriate coarse lattice. However, this does not by
+itself prove locality of the induced fine-level action $S_\theta$. That
+property should therefore be checked numerically rather than assumed.
+
+The cleanest proposed locality diagnostics are:
+\begin{enumerate}
+\item score-response locality, based on the decay with separation of
+\begin{equation}
+\frac{\delta}{\delta \phi_y}\frac{\partial S_\theta}{\partial \phi_x},
+\end{equation}
+\item Hessian locality, based on the distance dependence of
+\begin{equation}
+H_{xy}(\phi)=\frac{\partial^2 S_\theta}{\partial \phi_x\partial \phi_y},
+\end{equation}
+averaged on representative field samples,
+\item stability of blocked observables under changes of the microscopic target
+point and under replacement of the microscopic target theory by the learned
+theory.
+\end{enumerate}
+Exponential decay in the first two diagnostics would provide direct evidence
+that the learned theory is local even if it is not ultra-local.
+
+\subsection{Why Two Dimensions Require Care}
+
+The locality question is tied to universality. One would like to argue that the
+additional operators generated by the learned action do not spoil the
+long-distance physics because they are irrelevant. In two-dimensional
+$\phi^4$ theory, however, naive Gaussian power counting is not the right guide
+near the critical line. The critical infrared theory is in the Ising
+universality class, and relevance or irrelevance should ultimately be judged in
+that framework, especially in the $Z_2$-even sector relevant here.
+
+For this reason the practical universality argument should not rely only on an
+operator-by-operator classification of the microscopic learned action. A safer
+strategy is:
+\begin{itemize}
+\item establish locality of the learned action in the sense of exponential decay,
+\item preserve the exact $Z_2$ symmetry,
+\item show that blocked trajectories in observable space approach the same
+renormalized trajectory as the target theory.
+\end{itemize}
+
+\subsection{Scalability at Fixed Intensive Error}
+
+The raw quantity $\std(\Delta S)$ is extensive enough that it should not be used
+alone to compare different volumes. The present working hypothesis is that the
+right intensive measure of quality is
+\begin{equation}
+\frac{\std(\Delta S)}{L}
+\end{equation}
+in two dimensions, or equivalently $\std(\Delta S)/\sqrt{V}$. Existing
+numerical evidence already suggests that this quantity is much more stable under
+volume scaling than $\std(\Delta S)$ itself.
+
+This observation points to a sharper algorithmic question: what is the training
+cost required to reach a fixed value of $\std(\Delta S)/L$ as the volume grows?
+If the answer is polynomial in $V$, then one has strong evidence that the
+learned Wilsonian hierarchy avoids the practical exponential barrier associated
+with direct fine-level reweighting. This would not yet be a formal proof that
+critical slowing down is solved in full generality, but it would be compelling
+evidence that the cost of constructing a local representative of the same
+renormalized trajectory remains manageable.
+
+The natural scaling experiment is therefore to pick one or more intensive target
+thresholds, for example
+\begin{equation}
+\std(\Delta S)/L \in \{0.06,\,0.05,\,0.04\},
+\end{equation}
+and then measure the optimizer steps and wall-clock time required to reach these
+thresholds at
+\begin{equation}
+L=16,\ 32,\ 64,\ 128,\ \ldots
+\end{equation}
+using the same staged training protocol.
+
+\subsection{Long-Term Direction}
+
+If the locality and fixed-intensive-error scaling tests both succeed, then the
+long-term project becomes more ambitious than exact correction of a microscopic
+target action. One may instead regard the learned hierarchy as a practical route
+to constructing local representatives of a target universality class and then
+study or simulate those representatives directly. In that sense the present
+program would turn the original flow-based objective on its head: the goal would
+no longer be only to correct the microscopic theory, but to operationally follow
+the renormalized trajectory itself.
+
+\bibliographystyle{apsrev4-2}
+\bibliography{refs}
+
+\end{document}

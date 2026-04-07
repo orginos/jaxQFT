@@ -1,10 +1,13 @@
 # HANDOFF
 
-Last updated: 2026-04-06
+Last updated: 2026-04-07
 
 ## Project Snapshot
 - Repository: `jaxQFT`
 - Goal: high-performance JAX lattice QFT framework, ported from `torchQFT`.
+- Resume order:
+  - first `HANDOFF.md`
+  - then `NERSC.md` if working on Perlmutter / A100 runs
 - Core split:
   - `jaxqft/models`: model-specific physics.
   - `jaxqft/core`: generic integrators and update algorithms.
@@ -12,6 +15,25 @@ Last updated: 2026-04-06
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Longer RG / universality paper scaffold:
+  - Target journal style:
+    - `Phys. Rev. D` (`revtex4-2`, `reprint`, not preprint/draft mode)
+  - New paper workspace:
+    - `docs/papers/paper-2/manuscript.tex`
+    - `docs/papers/paper-2/refs.bib`
+    - `docs/papers/paper-2/figures/README.md`
+    - `docs/papers/paper-2/Makefile`
+    - `docs/papers/paper-2/experiment_plan.md`
+  - Scope of the draft:
+    - exact blocked hierarchy of the learned action
+    - observable-space RG trajectories without explicit coarse-action parametrization
+    - distinction between exactness for the learned action and approximation to the target theory
+    - universality / renormalized-trajectory interpretation of the learned hierarchy
+    - numerical roadmap for the larger RG paper
+  - Build command:
+    - `cd docs/papers/paper-2 && make`
+  - Current status:
+    - manuscript compiles successfully to `docs/papers/paper-2/manuscript.pdf`
 - Short-paper manuscript scaffold for the Wilsonian phi4 flow project:
   - Target journal style:
     - `Phys. Rev. D` (`revtex4-2`)
