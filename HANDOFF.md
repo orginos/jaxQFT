@@ -15,6 +15,42 @@ Last updated: 2026-04-07
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Phi4 multi-GPU planning note:
+  - New note:
+    - `docs/notes/phi4_multigpu_plan.md`
+  - Current single-GPU findings:
+    - `L64` OOMs at batch `512`
+    - `L128` runs at batch `64` and fails at batch `128`
+    - the failed `L128` stage produced an XLA rematerialization warning indicating the step could not be reduced below approximately `59.55 GiB`, versus a target budget of approximately `28.13 GiB`
+  - Main conclusion:
+    - single-GPU `128^2` is viable, but the practical one-GPU cap is batch `64`
+    - multi-GPU work is therefore an optimization path for larger effective batch / throughput, not a prerequisite for running `128^2`
+  - Agreed design direction:
+    - keep `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py` untouched
+    - add a separate multi-GPU batch-parallel trainer script
+    - keep the core `phi^4` Gaussian-flow model code unchanged unless necessary
+- Phi4 Gaussian coarse-eta GPU launcher wrapper:
+  - New launcher:
+    - `scripts/phi4/run_rg_coarse_eta_gaussian.sh`
+  - New short debug card:
+    - `configs/phi4/rg_coarse_eta_gaussian_L32_perlevel_debug.toml`
+  - Scope:
+    - provides a single entry point for the current `L=32` per-level Gaussian coarse-eta trainer on GPU nodes
+    - `--mode interactive` runs the production `L32` staged card
+    - `--mode debug` runs the same `L32` model family with a tiny 2-epoch debug card
+    - defaults to NERSC-style environment setup:
+      - applies the `python` module environment via Lmod shell output
+      - then sources `~/venvs/jax/bin/activate`
+    - defaults to a single visible GPU via `CUDA_VISIBLE_DEVICES=0`
+    - sets `MPLCONFIGDIR` and an XLA per-fusion autotune cache under `/tmp`
+    - debug mode also disables Triton GEMM autotuning for a quieter first-pass debug run
+    - `--no-triton` can be used with interactive mode when compile-time Triton/XLA noise is undesirable
+    - `--no-activate` skips both the NERSC python-module setup and the venv activation
+  - Commands:
+    - `scripts/phi4/run_rg_coarse_eta_gaussian.sh`
+    - `scripts/phi4/run_rg_coarse_eta_gaussian.sh --mode debug`
+    - `scripts/phi4/run_rg_coarse_eta_gaussian.sh --mode interactive --no-triton`
+    - `scripts/phi4/run_rg_coarse_eta_gaussian.sh --mode interactive -- --save my_run.pkl`
 - Longer RG / universality paper scaffold:
   - Target journal style:
     - `Phys. Rev. D` (`revtex4-2`, `reprint`, not preprint/draft mode)

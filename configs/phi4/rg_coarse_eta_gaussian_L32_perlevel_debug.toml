@@ -1,0 +1,47 @@
+# Short debug card for the L32 per-level Gaussian coarse-eta branch.
+# Keeps the same physics/model family as the production L32 card, but uses a
+# tiny batch and a two-epoch run so compile/runtime issues show up quickly.
+
+mode = "fresh"
+
+[io]
+save = "rg_coarse_eta_gauss_L32_m-0.4_l2.4_perlevel_debug.pkl"
+save_every = 1
+
+[physics]
+L = 32
+lam = 2.4
+mass = -0.4
+
+[model]
+width = 96
+width_levels = [128, 96, 64, 96]
+n_cycles = 3
+n_cycles_levels = [3, 3, 2, 3]
+radius = 1
+radius_levels = [1, 1, 1, 2]
+eta_gaussian = "level"
+gaussian_radius = 1
+gaussian_radius_levels = [1, 1, 1, 1]
+gaussian_width = 64
+gaussian_width_levels = [64, 64, 64, 64]
+terminal_prior = "learned"
+terminal_n_layers = 2
+terminal_width = 64
+output_init_scale = 1e-2
+parity = "sym"
+rg_type = "average"
+log_scale_clip = 5.0
+offdiag_clip = 2.0
+
+[train]
+batch = 4
+lr = 3e-4
+seed = 0
+epochs = 2
+
+[validation]
+enabled = true
+each_stage = false
+batch = 4
+super = 1
