@@ -20,6 +20,10 @@ Last updated: 2026-04-06
     - `docs/papers/paper-1/refs.bib`
     - `docs/papers/paper-1/figures/README.md`
     - `docs/papers/paper-1/Makefile`
+    - `docs/papers/paper-1/experiment_plan.md`
+    - new production config cards:
+      - `configs/phi4/rg_coarse_eta_gaussian_L64_perlevel.toml`
+      - `configs/phi4/rg_coarse_eta_gaussian_L128_perlevel.toml`
   - Scope of the draft:
     - Wilsonian transport-map formulation
     - learned Gaussian priors at each RG level
