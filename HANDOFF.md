@@ -12,6 +12,23 @@ Last updated: 2026-04-06
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Short-paper manuscript scaffold for the Wilsonian phi4 flow project:
+  - Target journal style:
+    - `Phys. Rev. D` (`revtex4-2`)
+  - New paper workspace:
+    - `docs/papers/paper-1/manuscript.tex`
+    - `docs/papers/paper-1/refs.bib`
+    - `docs/papers/paper-1/figures/README.md`
+    - `docs/papers/paper-1/Makefile`
+  - Scope of the draft:
+    - Wilsonian transport-map formulation
+    - learned Gaussian priors at each RG level
+    - HMC level diagnostics and module knockouts
+    - intensive scaling of `std(ΔS)/L` between `16^2` and `32^2`
+  - Build command:
+    - `cd docs/papers/paper-1 && make`
+  - Current status:
+    - manuscript compiles successfully to `docs/papers/paper-1/manuscript.pdf`
 - HMC diagnostic and knockout analysis for the current Gaussian-prior coarse-eta branch:
   - New analysis entry point:
     - `scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py`

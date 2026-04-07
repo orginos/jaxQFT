@@ -1,0 +1,404 @@
+\documentclass[aps,prd,preprint,nofootinbib,superscriptaddress,longbibliography]{revtex4-2}
+
+\usepackage{amsmath,amssymb,mathtools,graphicx,bm,booktabs}
+\usepackage[colorlinks=true,allcolors=blue]{hyperref}
+
+\newcommand{\phitwo}{\phi^4}
+\newcommand{\std}{\mathrm{std}}
+\newcommand{\ESS}{\mathrm{ESS}}
+\newcommand{\maybegraphic}[3][0.9\linewidth]{%
+  \IfFileExists{#2}{\includegraphics[width=#1]{#2}}{%
+    \fbox{\parbox[c][2.1in][c]{0.85\linewidth}{\centering \textbf{Figure placeholder}\\[0.5em]#3}}%
+  }%
+}
+
+\begin{document}
+
+\title{Wilsonian Transport Maps for Two-Dimensional Lattice $\phi^4$ Theory}
+
+\author{Kostas Orginos}
+
+\begin{abstract}
+We formulate a normalizing flow for two-dimensional lattice $\phi^4$ theory in
+which each renormalization-group blocking step is treated explicitly as a split
+into one coarse scalar field and three local fluctuation modes per block, and
+only the fluctuation modes are trivialized while the coarse field is held fixed.
+This gives the flow a direct Wilsonian interpretation: at each level the model
+learns the conditional measure of local fluctuations in the background of the
+coarse field. We augment this hierarchy with learned multivariate Gaussian
+priors for the fluctuation modes at every RG level and for the terminal
+$2\times2$ block. The resulting map is exactly invertible and supports exact
+likelihoods and exact reweighting. We further introduce level-resolved
+diagnostics based on HMC target samples, including module knockouts and a
+conditional decomposition of the model log probability across RG levels. At the
+canonical point $(m^2,\lambda)=(-0.4,2.4)$, the best current $16^2$ model
+reaches $\std(\Delta S)=0.7869$ and $\ESS=0.5697$, while a direct $32^2$
+extension reaches $\std(\Delta S)=1.4740$ and $\ESS=0.2213$ at the end of the
+$512$-batch stage. The intensive mismatch $\std(\Delta S)/L$ is nearly
+unchanged between $16^2$ and $32^2$, indicating that the residual error behaves
+predominantly as an extensive sum of local mismatches rather than as a
+catastrophic failure of the transport map. This suggests a useful middle ground
+between exact flow-based reweighting and a more Wilsonian program based on
+approximate effective actions and universality.
+\end{abstract}
+
+\maketitle
+
+\section{Introduction}
+
+Normalizing flows are now a standard tool in lattice field theory for exact
+reweighting, accelerated sampling, and transport-map preconditioning
+\cite{Dinh2017RealNVP,Albergo2019FlowMCMC,Kanwar2020Equivariant,Albergo2021FlowScaling}.
+Much of the existing work constructs invertible maps directly on the full fine
+lattice, with inductive bias supplied by symmetries, convolutional structure, or
+gauge equivariance. In this work we pursue a different organizing principle: the
+transport map should follow a Wilsonian decomposition as directly as possible.
+
+At each $2\times2$ block, the field is decomposed into one coarse mode and
+three local fluctuation modes. The coarse field is passed unchanged to the next
+level, while only the local fluctuations are trivialized. This makes the model a
+learned inverse RG step rather than a generic full-field flow. It also leads to
+a clean separation between three conceptually distinct objects:
+\begin{enumerate}
+\item the deterministic blocking map,
+\item the conditional fluctuation trivializer,
+\item the effective measure induced on the coarse field.
+\end{enumerate}
+
+The present paper focuses on the first two. We show that a Wilsonian
+fluctuation-only flow, augmented with learned Gaussian priors at each RG level,
+is already accurate enough to expose a nontrivial scaling pattern across
+volumes. The main point is not that the architecture is universally superior to
+all other hierarchical flows. Rather, the interesting observation is that the
+residual mismatch appears to be \emph{intensive}: when the linear size doubles
+from $L=16$ to $L=32$, the action-difference width $\std(\Delta S)$
+approximately doubles, but $\std(\Delta S)/L$ remains nearly constant.
+
+This observation motivates two complementary interpretations. In the short term,
+the model is an exactly invertible transport map with useful reweighting
+performance and a direct RG meaning. In the longer term, it suggests that the
+learned action may already sit near the target in theory space even when
+reweighting becomes volume-limited by extensivity. That viewpoint naturally
+connects the present architecture to a more Wilsonian program based on effective
+actions and universality.
+
+\section{Wilsonian Transport Map}
+\label{sec:wilsonian_map}
+
+Consider an $L\times L$ lattice with $L=2^K$. On each $2\times2$ block we write
+\begin{equation}
+v=(v_{00},v_{01},v_{10},v_{11})\in\mathbb{R}^4.
+\end{equation}
+For the default \texttt{average} blocking rule used in our best-performing
+models, the code applies the orthonormal Haar transform
+\begin{equation}
+(c,\eta_1,\eta_2,\eta_3)=Hv,
+\end{equation}
+with
+\begin{equation}
+H=
+\begin{pmatrix}
+\tfrac12 & \tfrac12 & \tfrac12 & \tfrac12 \\
+\tfrac12 & -\tfrac12 & \tfrac12 & -\tfrac12 \\
+\tfrac12 & \tfrac12 & -\tfrac12 & -\tfrac12 \\
+\tfrac12 & -\tfrac12 & -\tfrac12 & \tfrac12
+\end{pmatrix}.
+\end{equation}
+Thus each level-$k$ field is rewritten as a field on the coarse lattice,
+\begin{equation}
+y_b^{(k)} = \left(c_b^{(k+1)},\eta_b^{(k)}\right),
+\qquad
+c_b^{(k+1)}\in\mathbb{R},
+\qquad
+\eta_b^{(k)}\in\mathbb{R}^3.
+\end{equation}
+
+The defining feature of the present construction is that, at each nonterminal
+level, the coarse field is held fixed while the fluctuation field is mapped to a
+simple latent measure. If $q_\theta$ denotes the learned model, the hierarchy
+factorizes as
+\begin{equation}
+q_\theta(\phi^{(0)})=
+q_\theta(\phi^{(K-1)})
+\prod_{k=0}^{K-2}
+q_\theta\!\left(\eta^{(k)}\,\middle|\,\phi^{(k+1)}\right).
+\label{eq:hier_factorization}
+\end{equation}
+Equation~\eqref{eq:hier_factorization} is the sense in which the model is
+Wilsonian: the level map learns the conditional measure of the local
+fluctuations, while the coarse field carries the effective action to the next
+scale.
+
+\begin{figure}[t]
+  \centering
+  \maybegraphic{figures/wilsonian_hierarchy.pdf}{Schematic of the $2\times2$
+  Wilsonian split into one coarse mode and three local fluctuation modes,
+  followed by fluctuation trivialization on the coarse lattice.}
+  \caption{Schematic view of the Wilsonian transport map. Each blocking step
+  decomposes a $2\times2$ block into a coarse scalar and three local
+  fluctuations. The coarse field is propagated recursively, while only the
+  fluctuations are trivialized.}
+  \label{fig:hierarchy}
+\end{figure}
+
+\section{Model}
+\label{sec:model}
+
+\subsection{Local fluctuation update}
+
+At each nonterminal level, the fluctuation field lives on the coarse lattice and
+has three components per site. The update is performed by red/black sweeps on
+that coarse lattice. For one red sweep,
+\begin{itemize}
+\item all coarse scalars are visible and fixed,
+\item black fluctuations are visible and frozen,
+\item red fluctuations are updated.
+\end{itemize}
+The black sweep is analogous.
+
+At a coarse-lattice site $b$, the local invertible map is a lower-triangular
+affine transformation of the three-component fluctuation vector,
+\begin{equation}
+\eta_b' = A_b(h)\,\eta_b + t_b(h),
+\label{eq:eta_affine}
+\end{equation}
+where $A_b(h)$ is lower triangular with positive diagonal. The feature $h$ is
+produced by a local patch MLP that takes as input the coarse-field patch and the
+masked neighboring fluctuation patch. The full map remains triangular across the
+checkerboard split, so its Jacobian determinant is exact and cheap.
+
+\subsection{Learned Gaussian priors}
+
+The main improvement over the earlier coarse-eta branch is the addition of a
+learned Gaussian whitening layer at each RG level. Before the nonlinear
+fluctuation flow, the latent variable
+$z_{\eta,b}\sim\mathcal{N}(0,I_3)$ is mapped to
+\begin{equation}
+\tilde z_{\eta,b}=L^{(\ell)} z_{\eta,b},
+\end{equation}
+where $L^{(\ell)}$ is a level-dependent lower-triangular matrix with positive
+diagonal. In the current best branch this Gaussian is shared across sites within
+the same RG level (\texttt{eta\_gaussian = level}).
+
+At the terminal $2\times2$ block, we use a terminal RealNVP together with a
+learned zero-mean $4\times4$ Gaussian,
+\begin{equation}
+z_{\mathrm{term}}
+\xmapsto{L_{\mathrm{term}}}
+\tilde z_{\mathrm{term}}
+\xmapsto{\mathrm{RealNVP}}
+x_{\mathrm{term}}.
+\end{equation}
+
+All pieces are exactly invertible. If $F_\theta$ denotes the inverse map and
+$z=F_\theta(\phi)$, then
+\begin{equation}
+\log q_\theta(\phi)
+=
+-\frac12 \|z\|^2
+-\frac{N}{2}\log(2\pi)
++ \log\left|\det\frac{\partial F_\theta}{\partial\phi}\right|.
+\end{equation}
+
+\subsection{Level-dependent capacity}
+
+The current implementation also allows different nonterminal levels to have
+different widths, checkerboard cycle counts, and local patch radii. This matters
+numerically because the finest level dominates the aggregate mismatch, whereas
+the coarse end of the hierarchy is harder \emph{per degree of freedom}. The
+best current $16^2$ model uses
+\begin{equation}
+\texttt{width\_levels}=[96,64,96],\quad
+\texttt{n\_cycles\_levels}=[3,2,3],\quad
+\texttt{radius\_levels}=[1,1,2].
+\end{equation}
+
+\section{Diagnostics}
+\label{sec:diagnostics}
+
+The usual validation quantity is
+\begin{equation}
+\Delta S(\phi)=S(\phi)+\log q_\theta(\phi),
+\end{equation}
+up to the sign convention of the training script. The corresponding reweighting
+factors are proportional to $e^{-\Delta S}$. In practice we monitor:
+\begin{itemize}
+\item the centered width $\std(\Delta S-\langle\Delta S\rangle)$,
+\item the width of the normalized reweighting factor $w$,
+\item an effective-sample-size proxy.
+\end{itemize}
+
+To understand \emph{where} the residual error comes from, we also introduced two
+level-resolved diagnostics on HMC target samples:
+\begin{enumerate}
+\item \textbf{module knockouts}: replace selected modules by the identity and
+measure the induced degradation in $\std(\Delta S)$,
+\item \textbf{conditional decomposition}: measure the per-level conditional
+negative log probability,
+\(
+-\mathbb{E}\bigl[\log q_\theta(\eta^{(k)}\mid \phi^{(k+1)})\bigr]
+\),
+and the terminal contribution separately.
+\end{enumerate}
+
+For a representative $16^2$ learned-Gaussian checkpoint, the knockout ranking
+showed that the finest-level nonlinear fluctuation flow is the single most
+important module, followed by the terminal flow. The conditional decomposition
+showed that the cost per variable increases toward the coarse end of the
+hierarchy even though the inverse map already whitens the local latent spaces
+well. These diagnostics are important because they tell us that ``where to add
+capacity'' is a level-dependent question, not a uniform one.
+
+\section{Results}
+\label{sec:results}
+
+All results reported below use the canonical point
+\begin{equation}
+m^2=-0.4,\qquad \lambda=2.4,
+\end{equation}
+with explicit $Z_2$ symmetry enforced in the flow.
+
+\subsection{$16^2$}
+
+The best current $16^2$ model uses learned levelwise $3\times3$ Gaussians,
+a learned terminal $4\times4$ Gaussian, and the simpler terminal RealNVP
+(\texttt{terminal\_n\_layers}=2, \texttt{terminal\_width}=64). After the batch
+ramp through $1024$, it reaches
+\begin{equation}
+\std(\Delta S)=0.7869,\qquad
+\std(w)=0.8691,\qquad
+\ESS=0.5697.
+\end{equation}
+
+\subsection{$32^2$}
+
+For $32^2$ we used a direct extension with one additional fine level and the
+per-level schedule
+\begin{equation}
+\texttt{width\_levels}=[128,96,64,96],\quad
+\texttt{n\_cycles\_levels}=[3,3,2,3],\quad
+\texttt{radius\_levels}=[1,1,1,2].
+\end{equation}
+At the end of the $512$-batch stage, the ongoing run has reached
+\begin{equation}
+\std(\Delta S)=1.4740,\qquad
+\std(w)=1.8756,\qquad
+\ESS=0.2213.
+\end{equation}
+
+The raw mismatch is larger at larger volume, but the more informative intensive
+quantity is
+\begin{equation}
+\frac{\std(\Delta S)}{L}.
+\end{equation}
+For the current best $16^2$ and current $32^2$ results,
+\begin{equation}
+\frac{0.7869}{16}=0.0492,\qquad
+\frac{1.4740}{32}=0.0461.
+\end{equation}
+The near constancy of this quantity is the main empirical observation of the
+present draft.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Volume & Stage & $\std(\Delta S)$ & $\std(w)$ & $\ESS$ \\
+\midrule
+$16^2$ & final ($1024$ batch) & $0.7869$ & $0.8691$ & $0.5697$ \\
+$32^2$ & ramp\_512 & $1.4740$ & $1.8756$ & $0.2213$ \\
+\bottomrule
+\end{tabular}
+\caption{Current best $16^2$ result and the current intermediate $32^2$
+result. The $32^2$ run is still ongoing, so the second line should be regarded
+as preliminary.}
+\label{tab:main_results}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \maybegraphic{figures/std_deltaS_scaling.pdf}{Planned figure: volume scaling
+  of $\std(\Delta S)$ and of the intensive ratio $\std(\Delta S)/L$ for the
+  canonical sequence of runs.}
+  \caption{Suggested main scaling figure for the paper. The important visual is
+  not only that $\std(\Delta S)$ grows with volume, but that the growth is
+  close to the expected extensive scaling of a local mismatch.}
+  \label{fig:scaling}
+\end{figure}
+
+\section{Discussion}
+\label{sec:discussion}
+
+The present results suggest a useful reframing of the large-volume problem. A
+poor reweighting factor at large volume does not automatically imply that the
+learned action is far from the target action in coupling space. If
+\begin{equation}
+\Delta S(\phi)=\sum_x \delta s_x(\phi)
+\end{equation}
+is a sum of small local mismatches, then one expects
+\begin{equation}
+\mathrm{Var}(\Delta S)\propto V,
+\qquad
+\std(\Delta S)\propto \sqrt{V},
+\end{equation}
+so exact reweighting becomes more difficult with volume even when the mismatch
+remains small in an intensive sense.
+
+This is precisely the pattern suggested by the current $16^2\to32^2$ data. From
+the point of view of exact reweighting, the larger-volume run is naturally
+harder. From the point of view of theory space, however, the learned action may
+already be quite close to the target action. This is why the Wilsonian
+formulation matters: it encourages us to think not only in terms of exact
+sampling of one microscopic action, but also in terms of learned effective
+actions and RG trajectories.
+
+\section{Scope of the Present Paper}
+\label{sec:scope}
+
+This draft is intentionally narrow. The novelty claim is \emph{not} that the
+present architecture is a universally dominant normalizing flow. The stronger
+and more defensible claim is the following:
+\begin{quote}
+An exactly invertible Wilsonian transport map that trivializes only block
+fluctuations, augmented with learned Gaussian priors and level-resolved
+diagnostics, produces a small intensive action mismatch whose extensive growth
+with volume is predictable and controlled.
+\end{quote}
+
+That claim supports a focused near-term paper built around:
+\begin{enumerate}
+\item the Wilsonian transport-map formulation,
+\item the learned local Gaussian priors,
+\item the HMC-based level diagnostics,
+\item the intensive-scaling interpretation of the residual mismatch.
+\end{enumerate}
+
+\section{Outlook}
+\label{sec:outlook}
+
+Three immediate continuations suggest themselves.
+
+First, the exact-flow program can be pushed further with better level-dependent
+capacity allocation and stage-wise training schedules. The current evidence
+already indicates that optimization details matter at least as much as adding
+uniform expressivity everywhere.
+
+Second, the present hierarchy naturally suggests a variational RG program. Since
+the model explicitly separates blocking from fluctuation trivialization, it
+provides a natural starting point for fitting approximate effective actions on
+the coarse lattices and tracing RG trajectories in a truncated coupling basis.
+
+Third, the learned map can be used algorithmically as a transport
+preconditioner for HMC, for example by performing HMC in latent variables
+\cite{Hoffman2019NeuTra} or by embedding the hierarchy into a multilevel update
+scheme.
+
+The present paper does not attempt to solve these larger problems. Its purpose
+is to establish that Wilsonian transport maps are a useful language for
+hierarchical flows in lattice field theory, and that they already reveal a
+meaningful intensive-versus-extensive distinction in the residual model error.
+
+\bibliographystyle{apsrev4-2}
+\bibliography{refs}
+
+\end{document}
