@@ -1,0 +1,55 @@
+# Canonical 32^2 follow-up for the current best Gaussian coarse-eta branch.
+# Per-level schedules are ordered from finest to coarsest nonterminal level.
+# For L=32 these correspond to coarse lattices 16x16, 8x8, 4x4, 2x2.
+
+mode = "fresh"
+
+[io]
+save = "rg_coarse_eta_gauss_L32_m-0.4_l2.4_perlevel_w128-96-64-96_nc3-3-2-3_r1-1-1-2_eglevel_tglearned.pkl"
+save_every = 1000
+
+[physics]
+L = 32
+lam = 2.4
+mass = -0.4
+
+[model]
+width = 96
+width_levels = [128, 96, 64, 96]
+n_cycles = 3
+n_cycles_levels = [3, 3, 2, 3]
+radius = 1
+radius_levels = [1, 1, 1, 2]
+eta_gaussian = "level"
+gaussian_radius = 1
+gaussian_radius_levels = [1, 1, 1, 1]
+gaussian_width = 64
+gaussian_width_levels = [64, 64, 64, 64]
+terminal_prior = "learned"
+terminal_n_layers = 2
+terminal_width = 64
+output_init_scale = 1e-2
+parity = "sym"
+rg_type = "average"
+log_scale_clip = 5.0
+offdiag_clip = 2.0
+
+[train]
+seed = 0
+
+[schedule.ramp]
+initial_batch = 16
+epochs_per_stage = 1000
+num_doubles = 6
+lr = 3e-4
+
+[schedule.anneal]
+epoch_ends = [8000, 9000]
+lrs = [1e-4, 3e-5]
+batch = 1024
+
+[validation]
+enabled = true
+each_stage = true
+batch = 128
+super = 4

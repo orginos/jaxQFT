@@ -1,0 +1,27 @@
+mode = "resume"
+
+[io]
+resume = "rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl"
+save = "rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl"
+save_every = 0
+
+[train]
+batch = 1024
+lr = 3e-4
+
+[schedule.ramp]
+initial_batch = 32
+epochs_per_stage = 1000
+num_doubles = 5
+lr = 3e-4
+
+[schedule.anneal]
+epoch_ends = [7000, 8000]
+lrs = [1e-4, 3e-5]
+batch = 1024
+
+[validation]
+enabled = true
+each_stage = true
+batch = 256
+super = 4
