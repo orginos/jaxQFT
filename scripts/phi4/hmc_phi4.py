@@ -34,29 +34,8 @@ if str(ROOT) not in sys.path:
 from jaxqft.core.integrators import minnorm2
 from jaxqft.models.phi4 import Phi4
 from jaxqft.core.update import hmc
-from jaxqft.stats.autocorr import integrated_autocorr_time
+from scripts.phi4.analysis.hmc_common import phi4_summary_from_histories
 import jax
-
-
-def correlation_length(L, ChiM, C2p):
-    return 1 / (2 * np.sin(np.pi / L)) * np.sqrt(ChiM / C2p - 1)
-
-
-def analyze(obs2d: np.ndarray) -> dict:
-    """Compute mean, IAT-corrected sigma_mean, tau_int, and ESS.
-
-    obs2d has shape (nmeas, batch_size).  Batch elements are treated as
-    independent chains; IAT is estimated on the batch-mean series so that
-    sigma_mean already accounts for both autocorrelations and batch averaging.
-    """
-    batch_mean = obs2d.mean(axis=1)          # (nmeas,)
-    grand_mean = float(np.mean(batch_mean))
-    iat = integrated_autocorr_time(batch_mean, method="gamma")
-    sigma_mean = float(iat.get("sigma_mean", np.nan))
-    tau_int    = float(iat["tau_int"])
-    # ESS for the batch-mean series scaled by batch_size (independent chains)
-    ess_total  = float(iat["ess"]) * obs2d.shape[1]
-    return dict(mean=grand_mean, sigma=sigma_mean, tau_int=tau_int, ess=ess_total)
 
 
 def main():
@@ -71,10 +50,24 @@ def main():
     ap.add_argument("--nmd",        type=int,   default=7,        help="MD steps per trajectory")
     ap.add_argument("--tau",        type=float, default=1.0,      help="Trajectory length")
     ap.add_argument("--json-out",   type=str,   default=None,     help="Save results to JSON file")
+    ap.add_argument("--hist-out",   type=str,   default=None,     help="Save raw observable histories to .npz")
+    ap.add_argument("--iat-method", type=str,   default="gamma",  choices=["gamma", "ips", "sokal"],
+                    help="Integrated autocorrelation-time estimator")
+    ap.add_argument("--iat-c",      type=float, default=5.0,      help="Window parameter for gamma/sokal IAT")
+    ap.add_argument("--block-size", type=int,   default=0,        help="Blocked jackknife size; <=0 selects automatically")
     args = ap.parse_args()
 
     lat = [int(x) for x in args.shape.split(",")]
+    if len(lat) != 2:
+        raise ValueError(f"phi^4 HMC script expects a 2D lattice, got shape={lat}")
     Vol = int(np.prod(lat))
+    hist_out = args.hist_out
+    if hist_out is None and args.json_out:
+        hist_out = str(Path(args.json_out).with_suffix(".npz"))
+    if hist_out:
+        Path(hist_out).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+    if args.json_out:
+        Path(args.json_out).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
@@ -93,63 +86,109 @@ def main():
     print(f"Warmup done: {(toc - tic) * 1e6 / args.nwarm:.1f} μs/traj")
 
     obs_E        = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
-    obs_phi      = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
-    obs_chi_raw  = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
-    obs_C2p      = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
-    phase        = np.exp(1j * np.indices(tuple(lat))[0] * 2 * np.pi / lat[0])
+    obs_m        = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
+    obs_C2p_x    = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
+    obs_C2p_y    = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
+    phase_x      = np.exp(2j * np.pi * np.arange(lat[0], dtype=np.float64) / float(lat[0])).reshape((1, lat[0], 1))
+    phase_y      = np.exp(2j * np.pi * np.arange(lat[1], dtype=np.float64) / float(lat[1])).reshape((1, 1, lat[1]))
     print_every  = max(1, args.nmeas // 10)
 
     tic = time.perf_counter()
     for k in range(args.nmeas):
         ttE      = np.asarray(sg.action(phi) / Vol)
-        av_sigma = np.asarray(phi.reshape(sg.Bs, Vol).mean(axis=1))
-        chi_raw  = av_sigma * av_sigma * Vol
-        p1_sig   = np.asarray((phi.reshape(sg.Bs, Vol) * phase.reshape(1, Vol)).mean(axis=1))
-        C2p_k    = np.real(np.conj(p1_sig) * p1_sig) * Vol
+        av_sigma = np.asarray(phi.mean(axis=(1, 2)))
+        p1_x     = np.asarray((phi * phase_x).mean(axis=(1, 2)))
+        p1_y     = np.asarray((phi * phase_y).mean(axis=(1, 2)))
+        C2p_x_k  = np.real(np.conj(p1_x) * p1_x) * Vol
+        C2p_y_k  = np.real(np.conj(p1_y) * p1_y) * Vol
 
         obs_E[k]       = ttE
-        obs_phi[k]     = av_sigma
-        obs_chi_raw[k] = chi_raw
-        obs_C2p[k]     = C2p_k
+        obs_m[k]       = av_sigma
+        obs_C2p_x[k]   = C2p_x_k
+        obs_C2p_y[k]   = C2p_y_k
 
         if k % print_every == 0:
             print(f"  k={k:5d}  av_phi={float(av_sigma.mean()):+.4f}"
-                  f"  chi={float(chi_raw.mean()):.2f}"
-                  f"  C2p={float(C2p_k.mean()):.2f}"
+                  f"  C2p_x={float(C2p_x_k.mean()):.2f}"
+                  f"  C2p_y={float(C2p_y_k.mean()):.2f}"
                   f"  E={float(ttE.mean()):.4f}")
 
         phi = chain.evolve(phi, args.nskip)
     toc = time.perf_counter()
     print(f"Measurement done: {(toc - tic) * 1e6 / (args.nmeas * args.nskip):.1f} μs/traj")
 
-    # Connected susceptibility: chi_conn = <phi^2>*Vol - <phi>^2*Vol
-    m_phi_est   = float(np.mean(obs_phi))
-    obs_chi_conn = obs_chi_raw - m_phi_est**2 * Vol
-
-    r_phi = analyze(obs_phi)
-    r_chi = analyze(obs_chi_conn)
-    r_C2p = analyze(obs_C2p)
-    r_E   = analyze(obs_E)
-    xi    = correlation_length(lat[0], r_chi["mean"], r_C2p["mean"])
     acc   = chain.calc_Acceptance()
+    summary = phi4_summary_from_histories(
+        shape=(int(lat[0]), int(lat[1])),
+        magnetization=obs_m,
+        energy_density=obs_E,
+        c2p_x=obs_C2p_x,
+        c2p_y=obs_C2p_y,
+        iat_method=str(args.iat_method),
+        iat_c=float(args.iat_c),
+        block_size=int(args.block_size),
+    )
+    primitive = summary["primitive"]
+    derived = summary["derived"]
 
     print("\n--- Results (HMC) ---")
     print(f"{'Observable':<10}  {'mean':>13}  {'sigma_mean':>13}  {'tau_int':>9}  {'ESS':>8}")
-    print(f"{'av_phi':<10}  {r_phi['mean']:>+13.6f}  {r_phi['sigma']:>13.6f}  {r_phi['tau_int']:>9.2f}  {r_phi['ess']:>8.0f}")
-    print(f"{'Chi_m':<10}  {r_chi['mean']:>+13.4f}  {r_chi['sigma']:>13.4f}  {r_chi['tau_int']:>9.2f}  {r_chi['ess']:>8.0f}")
-    print(f"{'C2p':<10}  {r_C2p['mean']:>+13.4f}  {r_C2p['sigma']:>13.4f}  {r_C2p['tau_int']:>9.2f}  {r_C2p['ess']:>8.0f}")
-    print(f"{'E/V':<10}  {r_E['mean']:>+13.6f}  {r_E['sigma']:>13.6f}  {r_E['tau_int']:>9.2f}  {r_E['ess']:>8.0f}")
-    print(f"xi = {xi:.4f}")
+    for label, key in (
+        ("m", "magnetization"),
+        ("|m|", "abs_magnetization"),
+        ("m^2", "magnetization2"),
+        ("m^4", "magnetization4"),
+        ("C2p_x", "C2p_x"),
+        ("C2p_y", "C2p_y"),
+        ("C2p", "C2p"),
+        ("E/V", "energy_density"),
+    ):
+        row = primitive[key]
+        print(f"{label:<10}  {row['mean']:>+13.6f}  {row['sigma']:>13.6f}  {row['tau_int']:>9.2f}  {row['ess']:>8.0f}")
+    print(f"{'chi_m':<10}  {derived['chi_m']['mean']:>+13.6f} +/- {derived['chi_m']['stderr']:.6f}")
+    print(f"{'B4':<10}  {derived['binder_ratio']['mean']:>+13.6f} +/- {derived['binder_ratio']['stderr']:.6f}")
+    print(f"{'U4':<10}  {derived['binder_cumulant']['mean']:>+13.6f} +/- {derived['binder_cumulant']['stderr']:.6f}")
+    print(f"{'xi2_x':<10}  {derived['xi2_x']['mean']:>+13.6f} +/- {derived['xi2_x']['stderr']:.6f}")
+    print(f"{'xi2_y':<10}  {derived['xi2_y']['mean']:>+13.6f} +/- {derived['xi2_y']['stderr']:.6f}")
+    print(f"{'xi2':<10}  {derived['xi2']['mean']:>+13.6f} +/- {derived['xi2']['stderr']:.6f}")
+    print(f"{'xi2/L':<10}  {derived['xi2_over_L']['mean']:>+13.6f} +/- {derived['xi2_over_L']['stderr']:.6f}")
     print(f"Acceptance rate: {acc:.4f}")
 
-    if args.json_out:
-        out = dict(
-            updater="hmc", shape=lat, lam=args.lam, mass=args.mass,
-            nwarm=args.nwarm, nmeas=args.nmeas, nskip=args.nskip,
-            batch_size=args.batch_size, nmd=args.nmd, tau=args.tau,
-            phi=r_phi, chi_m=r_chi, C2p=r_C2p, E=r_E,
-            xi=float(xi), acceptance=float(acc),
+    if hist_out:
+        np.savez_compressed(
+            hist_out,
+            shape=np.asarray(lat, dtype=np.int64),
+            lam=np.asarray([args.lam], dtype=np.float64),
+            mass=np.asarray([args.mass], dtype=np.float64),
+            nwarm=np.asarray([args.nwarm], dtype=np.int64),
+            nmeas=np.asarray([args.nmeas], dtype=np.int64),
+            nskip=np.asarray([args.nskip], dtype=np.int64),
+            batch_size=np.asarray([args.batch_size], dtype=np.int64),
+            nmd=np.asarray([args.nmd], dtype=np.int64),
+            tau=np.asarray([args.tau], dtype=np.float64),
+            acceptance=np.asarray([acc], dtype=np.float64),
+            magnetization=obs_m,
+            energy_density=obs_E,
+            c2p_x=obs_C2p_x,
+            c2p_y=obs_C2p_y,
         )
+        print(f"Histories saved to {hist_out}")
+
+    if args.json_out:
+        out = {
+            **summary,
+            "updater": "hmc",
+            "lam": float(args.lam),
+            "mass": float(args.mass),
+            "nwarm": int(args.nwarm),
+            "nmeas": int(args.nmeas),
+            "nskip": int(args.nskip),
+            "batch_size": int(args.batch_size),
+            "nmd": int(args.nmd),
+            "tau": float(args.tau),
+            "acceptance": float(acc),
+            "histories": str(Path(hist_out).resolve()) if hist_out else None,
+        }
         with open(args.json_out, "w") as f:
             json.dump(out, f, indent=2)
         print(f"Results saved to {args.json_out}")

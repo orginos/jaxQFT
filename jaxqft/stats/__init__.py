@@ -6,4 +6,3 @@ __all__ = [
     "autocorrelation_fft",
     "integrated_autocorr_time",
 ]
-

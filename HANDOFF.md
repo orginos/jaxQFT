@@ -15,6 +15,36 @@ Last updated: 2026-04-07
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Phi4 HMC observable-analysis path for the paper-2 scalar campaign:
+  - New shared analysis helpers:
+    - `scripts/phi4/analysis/hmc_common.py`
+  - New standalone reanalysis entry point:
+    - `scripts/phi4/analysis/analyze_hmc_phi4.py`
+  - Updated production HMC runner:
+    - `scripts/phi4/hmc_phi4.py`
+  - Scope:
+    - `hmc_phi4.py` now measures and saves full batched histories for:
+      - signed magnetization `m`
+      - energy density `E/V`
+      - lowest-momentum structure factors `C2p_x`, `C2p_y`
+    - if `--json-out` is given and `--hist-out` is omitted, the script now auto-writes a sibling `.npz` history file
+    - the summary path now computes:
+      - Gamma-analysis primitive means/errors/IATs/ESS for:
+        - `m`, `|m|`, `m^2`, `m^4`, `C2p_x`, `C2p_y`, `C2p`, `E/V`
+      - blocked-jackknife derived errors for:
+        - `chi_m`
+        - Binder ratio `B4 = <m^4> / <m^2>^2`
+        - Binder cumulant `U4 = 1 - B4 / 3`
+        - `xi2_x`, `xi2_y`, `xi2`, `xi2/L`
+    - the reusable blocked jackknife logic now lives under the phi4 analysis directory rather than `jaxqft.stats`
+  - Smoke validation:
+    - run command:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/hmc_phi4.py --shape 4,4 --lam 2.4 --mass -0.4 --nwarm 2 --nmeas 6 --nskip 1 --batch-size 2 --nmd 2 --tau 0.5 --json-out /tmp/hmc_phi4_smoke.json`
+    - reanalysis command:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analysis/analyze_hmc_phi4.py /tmp/hmc_phi4_smoke.npz --json-out /tmp/hmc_phi4_reanalysis.json`
+    - result:
+      - both commands completed successfully
+      - the run and reanalysis summaries agree exactly on the smoke data
 - Phi4 4-seed Perlmutter launcher fix:
   - Updated:
     - `scripts/phi4/rg_coarse_eta_gaussian_4seed_perlmutter.slurm`
