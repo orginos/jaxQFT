@@ -15,6 +15,51 @@ Last updated: 2026-04-07
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Phi4 HMC NERSC campaign scaffolding:
+  - New launch wrapper:
+    - `scripts/phi4/run_hmc_phi4.sh`
+  - New single-job NERSC submit helper:
+    - `scripts/phi4/submit_hmc_phi4_nersc.sh`
+  - New NERSC tuning-campaign submitter:
+    - `scripts/phi4/submit_hmc_phi4_tuning_campaign_nersc.sh`
+  - New tracked input grids:
+    - `configs/phi4/paper-2/hmc-g2-scan/tuning_grid.tsv`
+    - `configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv`
+  - Updated campaign note:
+    - `configs/phi4/paper-2/hmc-g2-scan/README.md`
+  - Scope:
+    - the HMC wrapper mirrors the NERSC environment logic used by the flow launchers:
+      - loads the NERSC `python` module
+      - activates `~/venv/jax` with fallback to `~/venvs/jax`
+      - sets `JAX_PLATFORMS=cuda`
+      - sets `MPLCONFIGDIR=/tmp/mpl-cache`
+      - creates an XLA autotune cache under `/tmp/xla-autotune`
+    - the submit helper localizes:
+      - `hmc_phi4.json`
+      - `hmc_phi4.npz`
+      - `job.sbatch`
+      - `slurm/*.out`
+      - `slurm/*.err`
+    - the tuning campaign currently targets the canonical point:
+      - `g4 = 2.4`
+      - `g2 = -0.4`
+      - volumes `L = 16, 32, 64, 128, 256`
+      - explicit `(batch_size, nmd)` grid search rather than warmup-time `nmd` adaptation
+  - HMC timing / tuning metrics:
+    - `scripts/phi4/hmc_phi4.py` now records:
+      - `warmup_sec`
+      - `measure_sec`
+      - `warmup_usec_per_traj`
+      - `measure_usec_per_traj`
+      - tuning cost metrics for `m^2`, `C2p`, `E/V`:
+        - `time_per_trajectory * tau_int / batch_size`
+  - Local smoke validation:
+    - run:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/hmc_phi4.py --shape 4,4 --lam 2.4 --mass -0.4 --nwarm 2 --nmeas 4 --nskip 1 --batch-size 2 --nmd 2 --tau 0.5 --json-out /tmp/hmc_phi4_tuning_smoke.json`
+    - result:
+      - JSON and NPZ were written successfully
+      - the printed tuning metrics were finite
+      - the JSON now contains `performance` and `tuning_costs`
 - Phi4 flow-level observable analysis path for the paper-2 scalar campaign:
   - New level-analysis entry point:
     - `scripts/phi4/analysis/analyze_rg_coarse_eta_gaussian_levels.py`

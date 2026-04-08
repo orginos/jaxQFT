@@ -87,7 +87,9 @@ def main():
     tic = time.perf_counter()
     phi = chain.evolve(phi, args.nwarm)
     toc = time.perf_counter()
-    print(f"Warmup done: {(toc - tic) * 1e6 / args.nwarm:.1f} μs/traj")
+    warmup_sec = float(toc - tic)
+    warmup_usec_per_traj = float(warmup_sec * 1e6 / max(1, args.nwarm))
+    print(f"Warmup done: {warmup_usec_per_traj:.1f} μs/traj")
 
     obs_E        = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
     obs_m        = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
@@ -123,7 +125,9 @@ def main():
 
         phi = chain.evolve(phi, args.nskip)
     toc = time.perf_counter()
-    print(f"Measurement done: {(toc - tic) * 1e6 / (args.nmeas * args.nskip):.1f} μs/traj")
+    measure_sec = float(toc - tic)
+    measure_usec_per_traj = float(measure_sec * 1e6 / max(1, args.nmeas * args.nskip))
+    print(f"Measurement done: {measure_usec_per_traj:.1f} μs/traj")
 
     acc   = chain.calc_Acceptance()
     summary = phi4_summary_from_histories(
@@ -139,6 +143,26 @@ def main():
     )
     primitive = summary["primitive"]
     derived = summary["derived"]
+    tuning_costs = {}
+    for out_key, prim_key in (
+        ("m2", "magnetization2"),
+        ("c2p", "C2p"),
+        ("energy_density", "energy_density"),
+    ):
+        row = primitive.get(prim_key)
+        if row is None:
+            continue
+        tau_int = float(row.get("tau_int", np.nan))
+        tuning_costs[out_key] = {
+            "tau_int": tau_int,
+            "measure_usec_per_traj": float(measure_usec_per_traj),
+            "batch_size": int(args.batch_size),
+            "cost_usec_tau_over_batch": (
+                float(measure_usec_per_traj * tau_int / float(args.batch_size))
+                if np.isfinite(tau_int) and int(args.batch_size) > 0
+                else float("nan")
+            ),
+        }
 
     print("\n--- Results (HMC) ---")
     print(f"{'Observable':<10}  {'mean':>13}  {'sigma_mean':>13}  {'tau_int':>9}  {'ESS':>8}")
@@ -165,6 +189,12 @@ def main():
         print(f"{'xi2_fit_l':<10}  {derived['xi2_fit_linear']['mean']:>+13.6f} +/- {derived['xi2_fit_linear']['stderr']:.6f}")
         print(f"{'xi2_fit_q':<10}  {derived['xi2_fit_quadratic']['mean']:>+13.6f} +/- {derived['xi2_fit_quadratic']['stderr']:.6f}")
     print(f"Acceptance rate: {acc:.4f}")
+    print("\n--- Tuning Cost Metrics ---")
+    for label, row in tuning_costs.items():
+        print(
+            f"{label:<14}  tau_int={row['tau_int']:.3f}  "
+            f"cost=(t_traj*tau/batch)={row['cost_usec_tau_over_batch']:.3f} usec"
+        )
 
     if hist_out:
         np.savez_compressed(
@@ -203,6 +233,15 @@ def main():
             "nmd": int(args.nmd),
             "tau": float(args.tau),
             "acceptance": float(acc),
+            "performance": {
+                "warmup_sec": float(warmup_sec),
+                "measure_sec": float(measure_sec),
+                "warmup_usec_per_traj": float(warmup_usec_per_traj),
+                "measure_usec_per_traj": float(measure_usec_per_traj),
+                "ntraj_warmup": int(args.nwarm),
+                "ntraj_measure": int(args.nmeas * args.nskip),
+            },
+            "tuning_costs": tuning_costs,
             "histories": str(Path(hist_out).resolve()) if hist_out else None,
         }
         with open(args.json_out, "w") as f:
