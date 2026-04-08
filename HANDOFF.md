@@ -20,6 +20,8 @@ Last updated: 2026-04-07
     - `scripts/phi4/analysis/hmc_common.py`
   - New standalone reanalysis entry point:
     - `scripts/phi4/analysis/analyze_hmc_phi4.py`
+  - New analysis-guidance note:
+    - `docs/notes/phi4_reweighting_analysis_guidance.md`
   - Updated production HMC runner:
     - `scripts/phi4/hmc_phi4.py`
   - Scope:
@@ -50,6 +52,9 @@ Last updated: 2026-04-07
     - result:
       - both commands completed successfully
       - the run and reanalysis summaries agree exactly on the smoke data
+  - Analysis guidance captured for future campaigns:
+    - keep within-checkpoint batch variation separate from between-seed variation
+    - treat ESS as a tail-sensitive reweighting-risk diagnostic rather than a standalone smooth fidelity metric
 - Phi4 4-seed Perlmutter launcher fix:
   - Updated:
     - `scripts/phi4/rg_coarse_eta_gaussian_4seed_perlmutter.slurm`
