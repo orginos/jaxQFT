@@ -15,6 +15,33 @@ Last updated: 2026-04-07
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Phi4 flow-level observable analysis path for the paper-2 scalar campaign:
+  - New level-analysis entry point:
+    - `scripts/phi4/analysis/analyze_rg_coarse_eta_gaussian_levels.py`
+  - Scope:
+    - samples the trained RG coarse-eta Gaussian flow with i.i.d. model draws
+    - measures on every RG depth:
+      - `m`, `|m|`, `m^2`, `m^4`
+      - `chi_m`
+      - Binder ratio `B4`
+      - Binder cumulant `U4`
+      - `C2p_x`, `C2p_y`, `C2p`
+      - `xi2_x`, `xi2_y`, `xi2`, `xi2/L`
+      - generalized `xi2(k)` and low-momentum fitted estimators via `--k-max`
+    - performs no autocorrelation analysis; errors are blocked-jackknife over independent model samples
+    - computes fine-level reweighting diagnostics against the target phi4 action and reports:
+      - bulk reweighting metrics (`std(DeltaS)`, `std(w)`, ESS)
+      - reweighted blocked observables at every level using the fine-level importance weights
+      - automatic `reportable` flag controlled by `--reweight-ess-min`
+    - optionally measures locality of the learned effective action at every RG depth through the shell-averaged Hessian-response kernel
+  - Local smoke validation:
+    - observable-only smoke:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analysis/analyze_rg_coarse_eta_gaussian_levels.py --resume rg_coarse_eta_gauss_L16_perlevel_test.pkl --nsamples 16 --batch-size 8 --jk-bin-size 4 --k-max 2 --json-out /tmp/rg_levels_smoke.json`
+    - locality smoke:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analysis/analyze_rg_coarse_eta_gaussian_levels.py --resume rg_coarse_eta_gauss_L16_perlevel_test.pkl --nsamples 8 --batch-size 4 --jk-bin-size 2 --k-max 2 --locality --locality-nsamples 1 --locality-nsources 1 --json-out /tmp/rg_levels_locality_smoke.json`
+    - result:
+      - both commands completed successfully
+      - the script produced level-by-level unweighted and reweighted summaries plus locality lengths by RG depth
 - Phi4 HMC observable-analysis path for the paper-2 scalar campaign:
   - New shared analysis helpers:
     - `scripts/phi4/analysis/hmc_common.py`
