@@ -7,18 +7,20 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Edit these variables before submission or override them with:
 # sbatch --export=ALL,CONFIG=...,RUN_ROOT=...,SEEDS=0,1,2,3 scripts/phi4/rg_coarse_eta_gaussian_4seed_perlmutter.slurm
 
-REPO_ROOT="${REPO_ROOT:-$PWD}"
-CONFIG="${CONFIG:-configs/phi4/paper-2/canonical-scaling/L128_uniform.toml}"
-RUN_ROOT="${RUN_ROOT:-runs/phi4/paper-2/canonical-scaling/L128}"
+REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+CONFIG="${CONFIG:-configs/phi4/canonical-scaling/L128_uniform.toml}"
+RUN_ROOT="${RUN_ROOT:-runs/phi4/canonical-scaling/L128}"
 SEEDS_CSV="${SEEDS:-0,1,2,3}"
 MODE="${MODE:-interactive}"
 WRAPPER="${WRAPPER:-$REPO_ROOT/scripts/phi4/run_rg_coarse_eta_gaussian.sh}"
@@ -74,9 +76,9 @@ launch_one() {
 
   echo "Launching seed ${seed} in ${run_dir}"
   srun \
+    --exact \
     --exclusive \
     --ntasks=1 \
-    --nodes=1 \
     --gpus-per-task=1 \
     --gpu-bind=single:1 \
     --cpus-per-task="${SLURM_CPUS_PER_TASK}" \

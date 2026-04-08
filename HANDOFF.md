@@ -15,6 +15,15 @@ Last updated: 2026-04-07
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Phi4 4-seed Perlmutter launcher fix:
+  - Updated:
+    - `scripts/phi4/rg_coarse_eta_gaussian_4seed_perlmutter.slurm`
+  - Fixes:
+    - the launcher now uses `srun --exact` for each backgrounded seed step so four one-GPU runs can coexist on the same one-node allocation
+    - default canonical-scaling paths now point at `configs/phi4/canonical-scaling/...` and `runs/phi4/canonical-scaling/...`
+    - `REPO_ROOT` now defaults from the script location rather than `$PWD`
+  - Symptom that motivated the fix:
+    - only `s0` actually ran while `s1`-`s3` sat in `step creation temporarily disabled, retrying (Requested nodes are busy)`
 - Phi4 multi-GPU planning note:
   - New note:
     - `docs/notes/phi4_multigpu_plan.md`
