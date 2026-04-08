@@ -1,0 +1,71 @@
+mode = "resume"
+
+[io]
+save = "ckpts/phi4/paper-2/canonical-scaling/L32/rg_coarse_eta_gauss_L32_uniform_s0.pkl"
+save_every = 1000
+
+[physics]
+L = 32
+lam = 2.4
+mass = -0.4
+
+[model]
+width = 64
+n_cycles = 2
+radius = 1
+eta_gaussian = "level"
+gaussian_radius = 1
+gaussian_width = 64
+terminal_prior = "learned"
+terminal_n_layers = 2
+terminal_width = 64
+output_init_scale = 1e-2
+parity = "sym"
+rg_type = "average"
+log_scale_clip = 5.0
+offdiag_clip = 2.0
+
+[train]
+seed = 0
+
+[[schedule.stage]]
+epoch_end = 12000
+batch = 128
+lr = 1e-5
+label = "cont_128"
+
+[[schedule.stage]]
+epoch_end = 13000
+batch = 256
+lr = 1e-5
+label = "cont_256"
+
+[[schedule.stage]]
+epoch_end = 14000
+batch = 512
+lr = 1e-5
+label = "cont_512"
+
+[[schedule.stage]]
+epoch_end = 15000
+batch = 1024
+lr = 1e-5
+label = "cont_1024"
+
+[[schedule.stage]]
+epoch_end = 17000
+batch = 1024
+lr = 3e-6
+label = "anneal_3e6"
+
+[[schedule.stage]]
+epoch_end = 19000
+batch = 1024
+lr = 1e-6
+label = "anneal_1e6"
+
+[validation]
+enabled = true
+each_stage = true
+batch = 128
+super = 4
