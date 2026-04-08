@@ -13,7 +13,7 @@ Wrapper options:
   --gpu ID|all               GPU to expose via CUDA_VISIBLE_DEVICES. Default: 0.
   --no-triton                Disable Triton GEMM kernels for this launch.
   --python EXE               Python executable to use. Default: python.
-  --no-activate              Do not load the NERSC python module or source ~/venvs/jax.
+  --no-activate              Do not load the NERSC python module or source ~/venv/jax.
   --print-only               Print the resolved command/environment and exit.
   -h, --help                 Show this help.
 
@@ -200,12 +200,17 @@ if [[ ${activate} -eq 1 ]]; then
     echo "Failed to load the NERSC python module" >&2
     exit 2
   fi
-  if [[ ! -f "${HOME}/venvs/jax/bin/activate" ]]; then
-    echo "Expected venv not found: ${HOME}/venvs/jax/bin/activate" >&2
+  activate_path=""
+  if [[ -f "${HOME}/venv/jax/bin/activate" ]]; then
+    activate_path="${HOME}/venv/jax/bin/activate"
+  elif [[ -f "${HOME}/venvs/jax/bin/activate" ]]; then
+    activate_path="${HOME}/venvs/jax/bin/activate"
+  else
+    echo "Expected venv not found: ${HOME}/venv/jax/bin/activate (or fallback ${HOME}/venvs/jax/bin/activate)" >&2
     exit 2
   fi
   # shellcheck disable=SC1091
-  source "${HOME}/venvs/jax/bin/activate"
+  source "${activate_path}"
 fi
 
 cd "${workdir}"

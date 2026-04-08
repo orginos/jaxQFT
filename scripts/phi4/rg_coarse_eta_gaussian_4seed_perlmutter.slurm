@@ -19,8 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # sbatch --export=ALL,CONFIG=...,RUN_ROOT=...,SEEDS=0,1,2,3 scripts/phi4/rg_coarse_eta_gaussian_4seed_perlmutter.slurm
 
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
-CONFIG="${CONFIG:-configs/phi4/canonical-scaling/L128_uniform.toml}"
-RUN_ROOT="${RUN_ROOT:-runs/phi4/canonical-scaling/L128}"
+CONFIG="${CONFIG:-configs/phi4/paper-2/canonical-scaling/L128_uniform.toml}"
+RUN_ROOT="${RUN_ROOT:-runs/phi4/paper-2/canonical-scaling/L128}"
 SEEDS_CSV="${SEEDS:-0,1,2,3}"
 MODE="${MODE:-interactive}"
 WRAPPER="${WRAPPER:-$REPO_ROOT/scripts/phi4/run_rg_coarse_eta_gaussian.sh}"
@@ -85,10 +85,38 @@ launch_one() {
     "${cmd[@]}" \
     > "${run_dir}/slurm/train.out" \
     2> "${run_dir}/slurm/train.err" &
+  local pid=$!
+  PIDS+=("${pid}")
+  PID_SEEDS+=("${seed}")
 }
+
+declare -a PIDS=()
+declare -a PID_SEEDS=()
 
 for seed in "${SEEDS[@]}"; do
   launch_one "${seed}"
 done
 
-wait
+fail_count=0
+: > "${RUN_ROOT}/slurm/success_seeds.txt"
+: > "${RUN_ROOT}/slurm/failed_seeds.txt"
+: > "${RUN_ROOT}/slurm/failed_seed_status.tsv"
+
+for idx in "${!PIDS[@]}"; do
+  pid="${PIDS[$idx]}"
+  seed="${PID_SEEDS[$idx]}"
+  if wait "${pid}"; then
+    echo "${seed}" >> "${RUN_ROOT}/slurm/success_seeds.txt"
+  else
+    status=$?
+    echo "${seed}" >> "${RUN_ROOT}/slurm/failed_seeds.txt"
+    printf "%s\t%s\n" "${seed}" "${status}" >> "${RUN_ROOT}/slurm/failed_seed_status.tsv"
+    echo "Seed ${seed} failed with exit status ${status}"
+    fail_count=$((fail_count + 1))
+  fi
+done
+
+if [[ ${fail_count} -gt 0 ]]; then
+  echo "${fail_count} seed(s) failed; see ${RUN_ROOT}/slurm/failed_seeds.txt"
+  exit 1
+fi

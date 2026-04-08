@@ -20,8 +20,13 @@ Last updated: 2026-04-07
     - `scripts/phi4/rg_coarse_eta_gaussian_4seed_perlmutter.slurm`
   - Fixes:
     - the launcher now uses `srun --exact` for each backgrounded seed step so four one-GPU runs can coexist on the same one-node allocation
-    - default canonical-scaling paths now point at `configs/phi4/canonical-scaling/...` and `runs/phi4/canonical-scaling/...`
+    - default canonical-scaling paths now point at `configs/phi4/paper-2/canonical-scaling/...` and `runs/phi4/paper-2/canonical-scaling/...`
     - `REPO_ROOT` now defaults from the script location rather than `$PWD`
+    - the launcher now records:
+      - `${RUN_ROOT}/slurm/success_seeds.txt`
+      - `${RUN_ROOT}/slurm/failed_seeds.txt`
+      - `${RUN_ROOT}/slurm/failed_seed_status.tsv`
+    - the launcher exits nonzero if any seed fails
   - Symptom that motivated the fix:
     - only `s0` actually ran while `s1`-`s3` sat in `step creation temporarily disabled, retrying (Requested nodes are busy)`
 - Phi4 multi-GPU planning note:
@@ -49,7 +54,8 @@ Last updated: 2026-04-07
     - `--mode debug` runs the same `L32` model family with a tiny 2-epoch debug card
     - defaults to NERSC-style environment setup:
       - applies the `python` module environment via Lmod shell output
-      - then sources `~/venvs/jax/bin/activate`
+      - then sources `~/venv/jax/bin/activate`
+      - falls back to `~/venvs/jax/bin/activate` for older setups
     - defaults to a single visible GPU via `CUDA_VISIBLE_DEVICES=0`
     - sets `MPLCONFIGDIR` and an XLA per-fusion autotune cache under `/tmp`
     - debug mode also disables Triton GEMM autotuning for a quieter first-pass debug run
@@ -60,6 +66,15 @@ Last updated: 2026-04-07
     - `scripts/phi4/run_rg_coarse_eta_gaussian.sh --mode debug`
     - `scripts/phi4/run_rg_coarse_eta_gaussian.sh --mode interactive --no-triton`
     - `scripts/phi4/run_rg_coarse_eta_gaussian.sh --mode interactive -- --save my_run.pkl`
+- Phi4 Gaussian coarse-eta trainer fail-fast handling:
+  - Updated:
+    - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
+  - New behavior:
+    - abort immediately on non-finite loss by default
+    - write `<checkpoint>.nonfinite.json` with epoch / stage / loss metadata
+  - CLI control:
+    - `--fail-on-nonfinite`
+    - `--no-fail-on-nonfinite`
 - Longer RG / universality paper scaffold:
   - Target journal style:
     - `Phys. Rev. D` (`revtex4-2`, `reprint`, not preprint/draft mode)
@@ -87,6 +102,12 @@ Last updated: 2026-04-07
       - `configs/phi4/paper-2/canonical-scaling/L128_uniform.toml`
     - config README:
       - `configs/phi4/paper-2/canonical-scaling/README.md`
+    - continuation cards for larger effective batch:
+      - `configs/phi4/paper-2/canonical-scaling-continuation/L16_uniform_continue.toml`
+      - `configs/phi4/paper-2/canonical-scaling-continuation/L32_uniform_continue.toml`
+      - `configs/phi4/paper-2/canonical-scaling-continuation/L64_uniform_continue.toml`
+      - `configs/phi4/paper-2/canonical-scaling-continuation/L128_uniform_continue.toml`
+      - `configs/phi4/paper-2/canonical-scaling-continuation/README.md`
     - committed checkpoint tree:
       - `ckpts/phi4/paper-2/README.md`
       - `ckpts/phi4/paper-2/canonical-scaling/L16/`
@@ -98,6 +119,13 @@ Last updated: 2026-04-07
     - hold the staged schedule fixed across volumes
     - measure scaling of the intensive quality metric `std(ΔS) / L`
     - postpone volume-dependent tuning until after the baseline is established
+  - Direct NERSC baseline status under:
+    - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-scaling`
+  - Observed seed status:
+    - `L16`: `s0-s3` finished cleanly
+    - `L32`: `s0-s3` finished cleanly
+    - `L64`: `s0-s3` finished cleanly
+    - `L128`: `s0`, `s1`, `s3` finished cleanly; `s2` reached the end with `final loss nan` and should be replaced with a new seed
 - Short-paper manuscript scaffold for the Wilsonian phi4 flow project:
   - Target journal style:
     - `Phys. Rev. D` (`revtex4-2`)

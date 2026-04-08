@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 import pickle
 import platform
@@ -371,6 +373,27 @@ def _make_step(cfg, theory, batch_size, lr):
     return step, opt
 
 
+def _write_nonfinite_marker(save_path: str, *, epoch: int, stage_label: str | None, loss_value: float):
+    marker = {
+        "error": "nonfinite_loss",
+        "epoch": int(epoch),
+        "stage": stage_label if stage_label is not None else "",
+        "loss": float(loss_value),
+    }
+    marker_path = f"{save_path}.nonfinite.json"
+    with open(marker_path, "w") as f:
+        json.dump(marker, f, indent=2)
+    print(f"wrote nonfinite marker {marker_path}")
+
+
+def _check_finite_loss(*, loss_value: float, epoch: int, stage_label: str | None, save_path: str):
+    if math.isfinite(float(loss_value)):
+        return
+    _write_nonfinite_marker(save_path, epoch=epoch, stage_label=stage_label, loss_value=float(loss_value))
+    stage_text = f" stage={stage_label}" if stage_label else ""
+    raise RuntimeError(f"Non-finite loss detected at epoch {epoch}{stage_text}: loss={loss_value}")
+
+
 def _schedule_stage_for_epoch(schedule, epoch):
     for stage in schedule:
         if epoch < stage["epoch_end"]:
@@ -444,6 +467,12 @@ def main():
     ap.add_argument("--batch", type=int, default=None)
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--fail-on-nonfinite",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="abort immediately when the training loss becomes NaN/Inf",
+    )
     ap.set_defaults(**config_defaults)
     args = ap.parse_args()
     default_save = "rg_coarse_eta_gaussian_flow_phi4_ckpt.pkl"
@@ -651,6 +680,13 @@ def main():
                 key, k = jax.random.split(key)
                 weights, opt_state, lv = step(weights, opt_state, k)
                 losses.append(float(lv))
+                if args.fail_on_nonfinite:
+                    _check_finite_loss(
+                        loss_value=float(lv),
+                        epoch=ep + 1,
+                        stage_label=stage["label"],
+                        save_path=args.save,
+                    )
                 pbar.set_postfix(loss=f"{float(lv):.6f}")
                 if args.save_every > 0 and (ep + 1) % args.save_every == 0:
                     save_checkpoint(args.save, cfg, weights, opt_state, key, losses, ep + 1, arch, train_cfg)
@@ -673,6 +709,13 @@ def main():
             key, k = jax.random.split(key)
             weights, opt_state, lv = step(weights, opt_state, k)
             losses.append(float(lv))
+            if args.fail_on_nonfinite:
+                _check_finite_loss(
+                    loss_value=float(lv),
+                    epoch=ep + 1,
+                    stage_label=None,
+                    save_path=args.save,
+                )
             pbar.set_postfix(loss=f"{float(lv):.6f}")
             if args.save_every > 0 and (ep + 1) % args.save_every == 0:
                 save_checkpoint(args.save, cfg, weights, opt_state, key, losses, ep + 1, arch, train_cfg)
