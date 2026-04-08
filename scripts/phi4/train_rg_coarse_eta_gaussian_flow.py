@@ -154,7 +154,7 @@ def _maybe_int_list(value):
     raise ValueError(f"Expected list-like value, got {type(value).__name__}")
 
 
-def _load_toml_defaults(path: str):
+def _load_toml_defaults(path: str, *, cli_resume: str = ""):
     if tomllib is None:
         raise RuntimeError("tomllib is not available in this Python")
     with open(path, "rb") as f:
@@ -171,7 +171,7 @@ def _load_toml_defaults(path: str):
         raise ValueError(f"Unsupported mode in {path}: {mode}")
     if mode == "fresh" and io_cfg.get("resume"):
         raise ValueError(f"{path}: fresh mode should not set io.resume")
-    if mode == "resume" and not io_cfg.get("resume"):
+    if mode == "resume" and not (io_cfg.get("resume") or cli_resume):
         raise ValueError(f"{path}: resume mode requires io.resume")
 
     defaults = {}
@@ -404,12 +404,14 @@ def _schedule_stage_for_epoch(schedule, epoch):
 def main():
     boot = argparse.ArgumentParser(add_help=False)
     boot.add_argument("--config", type=str, default="", help="TOML run configuration")
+    boot.add_argument("--resume", type=str, default="", help="resume checkpoint (.pkl)")
     boot_args, _ = boot.parse_known_args()
-    config_defaults = _load_toml_defaults(boot_args.config) if boot_args.config else {}
+    config_defaults = (
+        _load_toml_defaults(boot_args.config, cli_resume=boot_args.resume) if boot_args.config else {}
+    )
     raw_cfg = _load_toml_raw(boot_args.config) if boot_args.config else {}
 
     ap = argparse.ArgumentParser(parents=[boot])
-    ap.add_argument("--resume", type=str, default="", help="resume checkpoint (.pkl)")
     ap.add_argument("--save", type=str, default="rg_coarse_eta_gaussian_flow_phi4_ckpt.pkl")
     ap.add_argument("--save-every", type=int, default=0)
     ap.add_argument("--validate", action="store_true")

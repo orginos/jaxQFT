@@ -126,6 +126,38 @@ Last updated: 2026-04-07
     - `L32`: `s0-s3` finished cleanly
     - `L64`: `s0-s3` finished cleanly
     - `L128`: `s0`, `s1`, `s3` finished cleanly; `s2` reached the end with `final loss nan` and should be replaced with a new seed
+  - Continuation / replacement submissions on NERSC:
+    - Continuations are now isolated under:
+      - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-scaling-continuation`
+    - The continuation jobs resume from the original baseline checkpoints and write new localized `input.toml`, `job.sbatch`, logs, validation PDFs, and `checkpoint.pkl` under the continuation tree.
+    - `L128` continuation target:
+      - keep `batch = 64`
+      - extend low-LR annealing to epoch `15000`
+      - stages:
+        - `epoch_end = 13000`, `lr = 3e-6`
+        - `epoch_end = 15000`, `lr = 1e-6`
+    - First continuation submission failed immediately because the trainer bootstrapping logic required `io.resume` to be present inside a resume-mode TOML before it considered the CLI `--resume` supplied by Slurm.
+      - root cause:
+        - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
+        - `_load_toml_defaults(...)` was called during boot parsing and rejected `mode = "resume"` configs unless `io.resume` was already set in the TOML
+      - fix:
+        - the boot parser now accepts `--resume`
+        - `_load_toml_defaults(path, cli_resume=...)` now treats a CLI resume path as satisfying resume mode
+    - Failed first-wave job IDs:
+      - `L16`: `51208816`, `51208817`, `51208818`, `51208819`
+      - `L32`: `51208820`, `51208821`, `51208822`, `51208823`
+      - `L64`: `51208824`, `51208825`, `51208826`, `51208827`
+      - `L128`: `51208828`
+      - pending jobs `51208829`, `51208830`, `51208831` were canceled before resubmission
+    - Resubmitted continuation jobs after the trainer fix:
+      - `L16`: `s0-s3` -> `51210629`, `51210630`, `51210631`, `51210632`
+      - `L32`: `s0-s3` -> `51210633`, `51210634`, `51210636`, `51210637`
+      - `L64`: `s0-s3` -> `51210638`, `51210639`, `51210640`, `51210641`
+      - `L128`: `s0`, `s1`, `s3` -> `51210642`, `51210643`, `51210644`
+    - Replacement baseline seed for failed `L128/s2`:
+      - fresh run launched as `L128/s4`
+      - uses the original baseline `L128` card saved in `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-scaling/L128/s2/input.toml`
+      - resubmitted as job `51210645`
 - Short-paper manuscript scaffold for the Wilsonian phi4 flow project:
   - Target journal style:
     - `Phys. Rev. D` (`revtex4-2`)
