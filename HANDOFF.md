@@ -111,8 +111,11 @@ Last updated: 2026-04-07
   - Current status:
     - manuscript compiles successfully to `docs/papers/paper-1/manuscript.pdf`
 - HMC diagnostic and knockout analysis for the current Gaussian-prior coarse-eta branch:
+  - now also supports locality analysis of the learned action
   - New analysis entry point:
     - `scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py`
+  - New plotting entry point for paper-2 locality figures:
+    - `scripts/phi4/plot_rg_coarse_eta_locality.py`
   - Scope:
     - loads a trained Gaussian-prior coarse-eta checkpoint
     - generates target samples with the existing `phi^4` HMC implementation
@@ -144,6 +147,19 @@ Last updated: 2026-04-07
           - per-component normalization
           - latent prior NLL per component after the terminal inverse map
         - includes a consistency check that the sum of all reported terms matches the full model log-probability on the same HMC samples
+      - locality analysis:
+        - estimates locality of the learned action through the score-response kernel
+        - computes Hessian columns `H_{xy} = d^2 S_theta / dphi_x dphi_y` by applying JVPs to the score
+        - bins `|H_{xy}|` by periodic lattice distance
+        - supports distance metrics:
+          - `manhattan`
+          - `chebyshev`
+          - `euclidean2`
+        - supports sample sources:
+          - `model`
+          - `hmc`
+        - reports shell-averaged normalized response and an exponential-decay fit
+        - writes a log-scale locality plot PDF
   - Example command:
     - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --nwarm 100 --nmeas 32 --nskip 5 --batch-size 16 --chunk-size 128 --include-grouped --tests hmc,knockout`
     - conditional-decomposition command:
@@ -155,6 +171,65 @@ Last updated: 2026-04-07
       - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --nwarm 10 --nmeas 4 --nskip 2 --batch-size 8 --chunk-size 16 --tests hmc,knockout`
     - smoke result:
       - completed successfully
+    - locality smoke command:
+      - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analyze_rg_coarse_eta_gaussian_flow.py --resume rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl --tests locality --locality-sample-source model --locality-nsamples 1 --locality-batch-size 1 --locality-nsources 1 --locality-fit-rmax 6 --json-out /tmp/phi4_locality_smoke.json`
+    - locality smoke result:
+      - completed successfully
+      - example fit:
+        - `xi_local ≈ 1.148`
+        - shell-normalized mean response:
+          - `r=1`: `2.44e-01`
+          - `r=2`: `1.21e-02`
+          - `r=4`: `2.73e-03`
+  - Paper-2 locality figure set generated from the tuned per-level checkpoints:
+    - source JSONs:
+      - `runs/phi4/paper-2/locality/per-level-run-0/L16/locality_L16_model_manhattan.json`
+      - `runs/phi4/paper-2/locality/per-level-run-0/L32/locality_L32_model_manhattan.json`
+      - `runs/phi4/paper-2/locality/per-level-run-0/L64/locality_L64_model_manhattan.json`
+      - `runs/phi4/paper-2/locality/per-level-run-0/L128/locality_L128_model_manhattan.json`
+    - publication-style outputs:
+      - `docs/papers/paper-2/figures/phi4_rg_locality_decay_overlay.pdf`
+      - `docs/papers/paper-2/figures/phi4_rg_locality_length_summary.pdf`
+      - `docs/papers/paper-2/figures/phi4_rg_locality_table.tex`
+    - fitted locality lengths:
+      - `L=16`: `xi_local ≈ 1.499`
+      - `L=32`: `xi_local ≈ 1.978`
+      - `L=64`: `xi_local ≈ 2.416`
+      - `L=128`: `xi_local ≈ 3.222`
+  - New per-level second-moment correlation-length measurement entry point:
+    - `scripts/phi4/measure_rg_coarse_eta_gaussian_xi2.py`
+  - Scope:
+    - loads a Gaussian coarse-eta checkpoint
+    - generates independent model samples in chunks
+    - blocks the samples level by level using the fixed RG split
+    - measures `xi_2` on the scalar coarse field at each RG depth from the fine lattice down to the terminal `2x2` block
+    - reports:
+      - `chi_m`
+      - `C2p_x`, `C2p_y`, and averaged `C2p`
+      - `xi_2`, `xi_2_x`, `xi_2_y`
+      - `xi_2 / L`
+      - `distance_from_bottom`
+    - uses jackknife over sample bins for statistical errors
+    - writes JSON for later plotting
+  - Validation:
+    - syntax/compile validation command:
+      - `python3 -m py_compile scripts/phi4/measure_rg_coarse_eta_gaussian_xi2.py`
+  - Example command:
+    - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/measure_rg_coarse_eta_gaussian_xi2.py --resume configs/phi4/paper-2/per-level-run-0/rg_coarse_eta_gauss_fresh_example.pkl --nsamples 256 --batch-size 128 --jk-bin-size 32 --json-out runs/phi4/paper-2/xi2/per-level-run-0/L16/xi2_levels_L16.json`
+  - Preliminary outputs from the tuned per-level checkpoints:
+    - JSONs:
+      - `runs/phi4/paper-2/xi2/per-level-run-0/L16/xi2_levels_L16.json`
+      - `runs/phi4/paper-2/xi2/per-level-run-0/L32/xi2_levels_L32.json`
+      - `runs/phi4/paper-2/xi2/per-level-run-0/L64/xi2_levels_L64.json`
+      - `runs/phi4/paper-2/xi2/per-level-run-0/L128/xi2_levels_L128.json`
+    - central-value trend:
+      - `L=16`: `xi_2 ≈ 3.41 -> 1.79 -> 1.07 -> 0.74`
+      - `L=32`: `xi_2 ≈ 3.19 -> 1.63 -> 0.89 -> 0.57 -> 0.42`
+      - `L=64`: `xi_2 ≈ 5.40 -> 2.72 -> 1.41 -> 0.76 -> 0.47 -> 0.31`
+      - `L=128`: `xi_2 ≈ 4.71 -> 2.37 -> 1.21 -> 0.63 -> 0.35 -> 0.17 -> 0.15`
+    - interpretation:
+      - the blocked correlation length decreases by roughly a factor of two per RG step, as expected
+      - the `L=128` CPU smoke run is still statistically noisy and should be redone with a few hundred samples on GPU before using it in a paper figure
   - Canonical `16^2` result on the current Gaussian checkpoint:
     - checkpoint:
       - `rg_coarse_eta_gauss_L16_m-0.4_l2.4_w64_nc2_r1_eglevel_gr1_gw64_tglearned_parsym.pkl`

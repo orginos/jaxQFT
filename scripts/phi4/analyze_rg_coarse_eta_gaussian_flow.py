@@ -18,6 +18,11 @@ import numpy as np
 if platform.system() == "Darwin" and "JAX_PLATFORMS" not in os.environ and "JAX_PLATFORM_NAME" not in os.environ:
     os.environ["JAX_PLATFORMS"] = "cpu"
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 import jax
 import jax.numpy as jnp
 
@@ -45,7 +50,9 @@ from jaxqft.models.phi4_rg_coarse_eta_gaussian_flow import (
     _eta_gaussian_f,
     _terminal_gaussian_params,
     _triangular_linear_f4,
+    rg_coarse_eta_gaussian_flow_g,
     rg_coarse_eta_gaussian_flow_log_prob,
+    rg_coarse_eta_gaussian_flow_prior_sample,
 )
 
 
@@ -175,6 +182,196 @@ def run_hmc_samples(
         "traj_usec": float(meas_s * 1e6 / max(1, nmeas * nskip)),
     }
     return arr, info
+
+
+def run_model_samples(
+    *,
+    cfg: dict,
+    weights: dict,
+    n_samples: int,
+    batch_size: int,
+    seed: int,
+) -> tuple[np.ndarray, dict]:
+    key = jax.random.PRNGKey(seed)
+    out = []
+    remaining = int(n_samples)
+    tic = time.perf_counter()
+    while remaining > 0:
+        bsz = min(int(batch_size), remaining)
+        key, sub = jax.random.split(key)
+        z = rg_coarse_eta_gaussian_flow_prior_sample(sub, cfg, bsz)
+        x = rg_coarse_eta_gaussian_flow_g(cfg, z, weights)
+        out.append(np.asarray(x))
+        remaining -= bsz
+    elapsed = time.perf_counter() - tic
+    arr = np.concatenate(out, axis=0)
+    info = {
+        "source": "model",
+        "n_samples": int(arr.shape[0]),
+        "batch_size": int(batch_size),
+        "seed": int(seed),
+        "sample_sec": float(elapsed),
+    }
+    return arr, info
+
+
+def _periodic_shells(shape: tuple[int, int], source: tuple[int, int], metric: str) -> tuple[np.ndarray, np.ndarray]:
+    ny, nx = shape
+    sy, sx = source
+    yy, xx = np.indices((ny, nx))
+    dy = np.abs(yy - sy)
+    dx = np.abs(xx - sx)
+    dy = np.minimum(dy, ny - dy)
+    dx = np.minimum(dx, nx - dx)
+    if metric == "manhattan":
+        shells = dy + dx
+        radii = np.arange(int(np.max(shells)) + 1, dtype=np.float64)
+    elif metric == "chebyshev":
+        shells = np.maximum(dy, dx)
+        radii = np.arange(int(np.max(shells)) + 1, dtype=np.float64)
+    elif metric == "euclidean2":
+        shells = dy * dy + dx * dx
+        radii = np.sqrt(np.arange(int(np.max(shells)) + 1, dtype=np.float64))
+    else:
+        raise ValueError(f"Unsupported locality metric: {metric}")
+    return shells.reshape(-1).astype(np.int32), radii
+
+
+def _fit_exponential_decay(radii: np.ndarray, values: np.ndarray, counts: np.ndarray, rmin: float, rmax: float) -> dict:
+    mask = (counts > 0) & np.isfinite(values) & (values > 0.0) & (radii >= rmin)
+    if rmax > 0.0:
+        mask &= radii <= rmax
+    mask &= radii > 0.0
+    if int(np.count_nonzero(mask)) < 2:
+        return {
+            "ok": False,
+            "n_points": int(np.count_nonzero(mask)),
+            "fit_rmin": float(rmin),
+            "fit_rmax": float(rmax),
+        }
+    xx = radii[mask]
+    yy = np.log(values[mask])
+    slope, intercept = np.polyfit(xx, yy, 1)
+    return {
+        "ok": True,
+        "n_points": int(xx.size),
+        "fit_rmin": float(rmin),
+        "fit_rmax": float(rmax),
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "xi_local": float(-1.0 / slope) if slope < 0.0 else float("inf"),
+    }
+
+
+def run_locality_analysis(
+    *,
+    cfg: dict,
+    weights: dict,
+    shape: tuple[int, int],
+    samples: np.ndarray,
+    metric: str,
+    n_sources: int,
+    seed: int,
+    fit_rmin: float,
+    fit_rmax: float,
+    plot_path: str,
+) -> dict:
+    if samples.ndim != 3:
+        raise ValueError(f"Expected samples with shape (nsamples, H, W), got {samples.shape}")
+
+    ny, nx = shape
+    vol = ny * nx
+    rng = np.random.default_rng(seed)
+
+    def action_flat(flat: jax.Array) -> jax.Array:
+        xx = flat.reshape((1, ny, nx))
+        return -rg_coarse_eta_gaussian_flow_log_prob({"cfg": cfg, "weights": weights}, xx)[0]
+
+    score_flat = jax.grad(action_flat)
+
+    @jax.jit
+    def hvp_many(flat: jax.Array, vecs: jax.Array) -> jax.Array:
+        return jax.vmap(lambda v: jax.jvp(score_flat, (flat,), (v,))[1])(vecs)
+
+    shell_sum_abs = None
+    shell_sum_sq = None
+    shell_count = None
+    n_sources_total = 0
+
+    for sample in samples:
+        flat = jnp.asarray(sample.reshape(-1), dtype=jnp.float32)
+        source_inds = rng.choice(vol, size=min(int(n_sources), vol), replace=False)
+        vecs = np.zeros((len(source_inds), vol), dtype=np.float32)
+        for row, idx in enumerate(source_inds):
+            vecs[row, int(idx)] = 1.0
+        responses = np.asarray(hvp_many(flat, jnp.asarray(vecs, dtype=jnp.float32)))
+
+        for row, idx in enumerate(source_inds):
+            sy = int(idx) // nx
+            sx = int(idx) % nx
+            shells, radii = _periodic_shells(shape, (sy, sx), metric)
+            vals = np.abs(responses[row]).reshape(-1)
+            nshell = int(np.max(shells)) + 1
+            if shell_sum_abs is None:
+                shell_sum_abs = np.zeros((nshell,), dtype=np.float64)
+                shell_sum_sq = np.zeros((nshell,), dtype=np.float64)
+                shell_count = np.zeros((nshell,), dtype=np.int64)
+                radii_out = radii
+            shell_sum_abs += np.bincount(shells, weights=vals, minlength=nshell)
+            shell_sum_sq += np.bincount(shells, weights=vals * vals, minlength=nshell)
+            shell_count += np.bincount(shells, minlength=nshell)
+            n_sources_total += 1
+
+    assert shell_sum_abs is not None
+    assert shell_sum_sq is not None
+    assert shell_count is not None
+
+    mean_abs = shell_sum_abs / np.maximum(shell_count, 1)
+    rms = np.sqrt(shell_sum_sq / np.maximum(shell_count, 1))
+    onsite = float(mean_abs[0]) if mean_abs[0] > 0.0 else 1.0
+    mean_abs_norm = mean_abs / onsite
+    rms_norm = rms / max(float(rms[0]), 1e-30)
+    fit = _fit_exponential_decay(radii_out, mean_abs_norm, shell_count, fit_rmin, fit_rmax)
+
+    if plot_path:
+        valid = shell_count > 0
+        xx = radii_out[valid]
+        yy = mean_abs_norm[valid]
+        zz = rms_norm[valid]
+        plt.figure()
+        plt.plot(xx, yy, "o-", label="mean |H_xy| / onsite")
+        plt.plot(xx, zz, "s--", label="rms(H_xy) / onsite")
+        if fit.get("ok", False):
+            xfit = xx[xx >= fit["fit_rmin"]]
+            if fit["fit_rmax"] > 0.0:
+                xfit = xfit[xfit <= fit["fit_rmax"]]
+            if xfit.size:
+                yfit = np.exp(fit["intercept"] + fit["slope"] * xfit)
+                plt.plot(xfit, yfit, "-", label=f"exp fit, xi={fit['xi_local']:.3f}")
+        plt.yscale("log")
+        plt.xlabel("distance")
+        plt.ylabel("normalized response")
+        plt.title(f"Locality test ({metric})")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(plot_path)
+        plt.close()
+
+    return {
+        "shape": [int(ny), int(nx)],
+        "metric": metric,
+        "n_samples": int(samples.shape[0]),
+        "n_sources_per_sample": int(min(int(n_sources), vol)),
+        "n_sources_total": int(n_sources_total),
+        "radii": radii_out.tolist(),
+        "shell_count": shell_count.astype(int).tolist(),
+        "mean_abs_response": mean_abs.tolist(),
+        "rms_response": rms.tolist(),
+        "mean_abs_response_norm": mean_abs_norm.tolist(),
+        "rms_response_norm": rms_norm.tolist(),
+        "fit": fit,
+        "plot_path": plot_path,
+    }
 
 
 def _collect_level_trace(cfg: dict, weights: dict, x: jax.Array):
@@ -695,10 +892,40 @@ def _print_conditional_scores(cond: dict):
     )
 
 
+def _print_locality(loc: dict):
+    fit = loc["fit"]
+    print("\nLocality test:")
+    print(
+        f"  shape={tuple(loc['shape'])} metric={loc['metric']}"
+        f" samples={loc['n_samples']} sources/sample={loc['n_sources_per_sample']}"
+        f" total_sources={loc['n_sources_total']}"
+    )
+    print(
+        f"  onsite mean|H|={loc['mean_abs_response'][0]:.6e}"
+        f" onsite rms(H)={loc['rms_response'][0]:.6e}"
+    )
+    if fit.get("ok", False):
+        print(
+            f"  exponential fit: slope={fit['slope']:.6e}"
+            f" xi_local={fit['xi_local']:.6f}"
+            f" using {fit['n_points']} shells"
+        )
+    else:
+        print(f"  exponential fit: unavailable (n_points={fit.get('n_points', 0)})")
+    preview = min(8, len(loc["radii"]))
+    for idx in range(preview):
+        print(
+            f"    r={loc['radii'][idx]:>5.2f}"
+            f" mean|H|/onsite={loc['mean_abs_response_norm'][idx]:.6e}"
+            f" rms/onsite={loc['rms_response_norm'][idx]:.6e}"
+            f" count={loc['shell_count'][idx]}"
+        )
+
+
 def main():
     ap = argparse.ArgumentParser(description="Analyze the RG coarse-eta Gaussian flow on HMC target samples.")
     ap.add_argument("--resume", type=str, required=True, help="checkpoint to analyze")
-    ap.add_argument("--tests", type=str, default="hmc,knockout", help="comma list: hmc,knockout,conditional")
+    ap.add_argument("--tests", type=str, default="hmc,knockout", help="comma list: hmc,knockout,conditional,locality")
     ap.add_argument("--chunk-size", type=int, default=256)
     ap.add_argument("--nwarm", type=int, default=200)
     ap.add_argument("--nmeas", type=int, default=64)
@@ -710,6 +937,15 @@ def main():
     ap.add_argument("--mass", type=float, default=None)
     ap.add_argument("--shape", type=str, default="", help="override shape as H,W; default inferred from checkpoint")
     ap.add_argument("--include-grouped", action="store_true")
+    ap.add_argument("--locality-sample-source", type=str, default="model", choices=["model", "hmc"])
+    ap.add_argument("--locality-nsamples", type=int, default=4)
+    ap.add_argument("--locality-batch-size", type=int, default=4)
+    ap.add_argument("--locality-nsources", type=int, default=4)
+    ap.add_argument("--locality-metric", type=str, default="manhattan", choices=["manhattan", "chebyshev", "euclidean2"])
+    ap.add_argument("--locality-seed", type=int, default=0)
+    ap.add_argument("--locality-fit-rmin", type=float, default=1.0)
+    ap.add_argument("--locality-fit-rmax", type=float, default=0.0)
+    ap.add_argument("--locality-plot", type=str, default="")
     ap.add_argument("--json-out", type=str, default="")
     args = ap.parse_args()
 
@@ -742,27 +978,34 @@ def main():
         f" parity={arch.get('parity')}"
     )
 
-    samples, hmc_info = run_hmc_samples(
-        shape=shape,
-        lam=lam,
-        mass=mass,
-        nwarm=args.nwarm,
-        nmeas=args.nmeas,
-        nskip=args.nskip,
-        batch_size=args.batch_size,
-        nmd=args.nmd,
-        tau=args.tau,
-    )
-    _print_hmc_info(hmc_info)
+    need_hmc = bool({"hmc", "knockout", "conditional"} & tests) or ("locality" in tests and args.locality_sample_source == "hmc")
+    samples = None
+    hmc_info = None
+    out = {"checkpoint": args.resume}
 
-    out = {"checkpoint": args.resume, "hmc": hmc_info}
+    if need_hmc:
+        samples, hmc_info = run_hmc_samples(
+            shape=shape,
+            lam=lam,
+            mass=mass,
+            nwarm=args.nwarm,
+            nmeas=args.nmeas,
+            nskip=args.nskip,
+            batch_size=args.batch_size,
+            nmd=args.nmd,
+            tau=args.tau,
+        )
+        out["hmc"] = hmc_info
+        _print_hmc_info(hmc_info)
 
     if "hmc" in tests:
+        assert samples is not None
         diag = run_hmc_level_diagnostic(cfg, weights, samples, chunk_size=args.chunk_size)
         out["hmc_level_diagnostic"] = diag
         _print_level_diagnostic(diag)
 
     if "knockout" in tests:
+        assert samples is not None
         theory = Phi4(shape, lam, mass, batch_size=args.chunk_size)
         knock = run_knockout_analysis(
             cfg,
@@ -776,9 +1019,40 @@ def main():
         _print_knockout(knock)
 
     if "conditional" in tests:
+        assert samples is not None
         cond = run_conditional_score_analysis(cfg, weights, samples, chunk_size=args.chunk_size)
         out["conditional"] = cond
         _print_conditional_scores(cond)
+
+    if "locality" in tests:
+        if args.locality_sample_source == "hmc":
+            assert samples is not None
+            locality_samples = samples[: args.locality_nsamples]
+            locality_source_info = {"source": "hmc", "n_samples": int(locality_samples.shape[0])}
+        else:
+            locality_samples, locality_source_info = run_model_samples(
+                cfg=cfg,
+                weights=weights,
+                n_samples=args.locality_nsamples,
+                batch_size=args.locality_batch_size,
+                seed=args.locality_seed,
+            )
+        plot_path = args.locality_plot or f"phi4_rg_coarse_eta_gaussian_locality_{args.locality_sample_source}_{args.locality_metric}.pdf"
+        loc = run_locality_analysis(
+            cfg=cfg,
+            weights=weights,
+            shape=shape,
+            samples=locality_samples,
+            metric=args.locality_metric,
+            n_sources=args.locality_nsources,
+            seed=args.locality_seed,
+            fit_rmin=args.locality_fit_rmin,
+            fit_rmax=args.locality_fit_rmax,
+            plot_path=plot_path,
+        )
+        loc["sample_source_info"] = locality_source_info
+        out["locality"] = loc
+        _print_locality(loc)
 
     if args.json_out:
         with open(args.json_out, "w") as f:
