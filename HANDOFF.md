@@ -27,6 +27,7 @@ Last updated: 2026-04-07
       - signed magnetization `m`
       - energy density `E/V`
       - lowest-momentum structure factors `C2p_x`, `C2p_y`
+      - optional momentum scan `k = 1..k_max` in both lattice directions via `--k-max`
     - if `--json-out` is given and `--hist-out` is omitted, the script now auto-writes a sibling `.npz` history file
     - the summary path now computes:
       - Gamma-analysis primitive means/errors/IATs/ESS for:
@@ -36,6 +37,10 @@ Last updated: 2026-04-07
         - Binder ratio `B4 = <m^4> / <m^2>^2`
         - Binder cumulant `U4 = 1 - B4 / 3`
         - `xi2_x`, `xi2_y`, `xi2`, `xi2/L`
+        - generalized `xi2(k)` scan over the saved low momenta
+        - fitted low-momentum estimators:
+          - `xi2_fit_linear`
+          - `xi2_fit_quadratic`
     - the reusable blocked jackknife logic now lives under the phi4 analysis directory rather than `jaxqft.stats`
   - Smoke validation:
     - run command:

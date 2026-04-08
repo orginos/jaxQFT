@@ -51,6 +51,7 @@ def main():
     ap.add_argument("--tau",        type=float, default=1.0,      help="Trajectory length")
     ap.add_argument("--json-out",   type=str,   default=None,     help="Save results to JSON file")
     ap.add_argument("--hist-out",   type=str,   default=None,     help="Save raw observable histories to .npz")
+    ap.add_argument("--k-max",      type=int,   default=1,        help="Measure structure factors for k=1..k_max in each lattice direction")
     ap.add_argument("--iat-method", type=str,   default="gamma",  choices=["gamma", "ips", "sokal"],
                     help="Integrated autocorrelation-time estimator")
     ap.add_argument("--iat-c",      type=float, default=5.0,      help="Window parameter for gamma/sokal IAT")
@@ -61,6 +62,8 @@ def main():
     if len(lat) != 2:
         raise ValueError(f"phi^4 HMC script expects a 2D lattice, got shape={lat}")
     Vol = int(np.prod(lat))
+    k_max = max(1, min(int(args.k_max), lat[0] // 2, lat[1] // 2))
+    momenta_k = np.arange(1, k_max + 1, dtype=np.int64)
     hist_out = args.hist_out
     if hist_out is None and args.json_out:
         hist_out = str(Path(args.json_out).with_suffix(".npz"))
@@ -73,6 +76,7 @@ def main():
     print("JAX devices:", [str(d) for d in jax.devices()])
     print(f"Lattice: {lat}  lam={args.lam}  mass={args.mass}  batch={args.batch_size}")
     print(f"Integrator: minnorm2  nmd={args.nmd}  tau={args.tau}")
+    print(f"Momentum scan: k=1..{k_max}")
     print(f"Nwarm={args.nwarm}  Nmeas={args.nmeas}  Nskip={args.nskip}")
 
     sg    = Phi4(lat, args.lam, args.mass, batch_size=args.batch_size)
@@ -87,30 +91,34 @@ def main():
 
     obs_E        = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
     obs_m        = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
-    obs_C2p_x    = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
-    obs_C2p_y    = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
-    phase_x      = np.exp(2j * np.pi * np.arange(lat[0], dtype=np.float64) / float(lat[0])).reshape((1, lat[0], 1))
-    phase_y      = np.exp(2j * np.pi * np.arange(lat[1], dtype=np.float64) / float(lat[1])).reshape((1, 1, lat[1]))
+    obs_C2pk_x   = np.zeros((args.nmeas, args.batch_size, k_max), dtype=np.float64)
+    obs_C2pk_y   = np.zeros((args.nmeas, args.batch_size, k_max), dtype=np.float64)
+    phase_x      = np.exp(
+        2j * np.pi * np.outer(momenta_k.astype(np.float64), np.arange(lat[0], dtype=np.float64)) / float(lat[0])
+    ).reshape((k_max, lat[0], 1))
+    phase_y      = np.exp(
+        2j * np.pi * np.outer(momenta_k.astype(np.float64), np.arange(lat[1], dtype=np.float64)) / float(lat[1])
+    ).reshape((k_max, 1, lat[1]))
     print_every  = max(1, args.nmeas // 10)
 
     tic = time.perf_counter()
     for k in range(args.nmeas):
         ttE      = np.asarray(sg.action(phi) / Vol)
         av_sigma = np.asarray(phi.mean(axis=(1, 2)))
-        p1_x     = np.asarray((phi * phase_x).mean(axis=(1, 2)))
-        p1_y     = np.asarray((phi * phase_y).mean(axis=(1, 2)))
+        p1_x     = np.asarray((phi[:, None, :, :] * phase_x[None, :, :, :]).mean(axis=(2, 3)))
+        p1_y     = np.asarray((phi[:, None, :, :] * phase_y[None, :, :, :]).mean(axis=(2, 3)))
         C2p_x_k  = np.real(np.conj(p1_x) * p1_x) * Vol
         C2p_y_k  = np.real(np.conj(p1_y) * p1_y) * Vol
 
         obs_E[k]       = ttE
         obs_m[k]       = av_sigma
-        obs_C2p_x[k]   = C2p_x_k
-        obs_C2p_y[k]   = C2p_y_k
+        obs_C2pk_x[k]  = C2p_x_k
+        obs_C2pk_y[k]  = C2p_y_k
 
         if k % print_every == 0:
             print(f"  k={k:5d}  av_phi={float(av_sigma.mean()):+.4f}"
-                  f"  C2p_x={float(C2p_x_k.mean()):.2f}"
-                  f"  C2p_y={float(C2p_y_k.mean()):.2f}"
+                  f"  C2p_x(k=1)={float(C2p_x_k[:, 0].mean()):.2f}"
+                  f"  C2p_y(k=1)={float(C2p_y_k[:, 0].mean()):.2f}"
                   f"  E={float(ttE.mean()):.4f}")
 
         phi = chain.evolve(phi, args.nskip)
@@ -122,8 +130,9 @@ def main():
         shape=(int(lat[0]), int(lat[1])),
         magnetization=obs_m,
         energy_density=obs_E,
-        c2p_x=obs_C2p_x,
-        c2p_y=obs_C2p_y,
+        c2p_x=obs_C2pk_x,
+        c2p_y=obs_C2pk_y,
+        momenta_k=momenta_k,
         iat_method=str(args.iat_method),
         iat_c=float(args.iat_c),
         block_size=int(args.block_size),
@@ -152,6 +161,9 @@ def main():
     print(f"{'xi2_y':<10}  {derived['xi2_y']['mean']:>+13.6f} +/- {derived['xi2_y']['stderr']:.6f}")
     print(f"{'xi2':<10}  {derived['xi2']['mean']:>+13.6f} +/- {derived['xi2']['stderr']:.6f}")
     print(f"{'xi2/L':<10}  {derived['xi2_over_L']['mean']:>+13.6f} +/- {derived['xi2_over_L']['stderr']:.6f}")
+    if k_max > 1:
+        print(f"{'xi2_fit_l':<10}  {derived['xi2_fit_linear']['mean']:>+13.6f} +/- {derived['xi2_fit_linear']['stderr']:.6f}")
+        print(f"{'xi2_fit_q':<10}  {derived['xi2_fit_quadratic']['mean']:>+13.6f} +/- {derived['xi2_fit_quadratic']['stderr']:.6f}")
     print(f"Acceptance rate: {acc:.4f}")
 
     if hist_out:
@@ -166,11 +178,15 @@ def main():
             batch_size=np.asarray([args.batch_size], dtype=np.int64),
             nmd=np.asarray([args.nmd], dtype=np.int64),
             tau=np.asarray([args.tau], dtype=np.float64),
+            k_max=np.asarray([k_max], dtype=np.int64),
+            momenta_k=momenta_k,
             acceptance=np.asarray([acc], dtype=np.float64),
             magnetization=obs_m,
             energy_density=obs_E,
-            c2p_x=obs_C2p_x,
-            c2p_y=obs_C2p_y,
+            c2p_x=obs_C2pk_x[:, :, 0],
+            c2p_y=obs_C2pk_y[:, :, 0],
+            c2pk_x=obs_C2pk_x,
+            c2pk_y=obs_C2pk_y,
         )
         print(f"Histories saved to {hist_out}")
 

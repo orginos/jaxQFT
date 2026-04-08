@@ -35,10 +35,12 @@ from scripts.phi4.analysis.hmc_common import phi4_summary_from_histories
 def _load_histories(path: str) -> dict:
     with np.load(path, allow_pickle=False) as data:
         keys = set(data.files)
-        required = {"shape", "magnetization", "energy_density", "c2p_x", "c2p_y"}
+        required = {"shape", "magnetization", "energy_density"}
         missing = required - keys
         if missing:
             raise ValueError(f"missing required keys in {path}: {sorted(missing)}")
+        if not ({"c2p_x", "c2p_y"} <= keys or {"c2pk_x", "c2pk_y", "momenta_k"} <= keys):
+            raise ValueError(f"missing momentum structure-factor histories in {path}")
         return {key: np.asarray(data[key]) for key in data.files}
 
 
@@ -73,6 +75,18 @@ def _print_summary(summary: dict, acceptance: float | None = None) -> None:
     ):
         row = d[key]
         print(f"{label:<16}  {row['mean']:>+13.6f} +/- {row['stderr']:.6f}")
+    if d.get("xi2_fit_linear") is not None:
+        row = d["xi2_fit_linear"]
+        print(f"{'xi2_fit_lin':<16}  {row['mean']:>+13.6f} +/- {row['stderr']:.6f}")
+    if d.get("xi2_fit_quadratic") is not None:
+        row = d["xi2_fit_quadratic"]
+        print(f"{'xi2_fit_quad':<16}  {row['mean']:>+13.6f} +/- {row['stderr']:.6f}")
+    if d.get("xi2_momentum_scan"):
+        print("")
+        print("k-scan              xi2(mean +/- err)")
+        for row in d["xi2_momentum_scan"]:
+            xi = row["xi2"]
+            print(f"{int(row['k']):>3d}                 {xi['mean']:+.6f} +/- {xi['stderr']:.6f}")
     if acceptance is not None and np.isfinite(acceptance):
         print(f"acceptance        {acceptance:.6f}")
 
@@ -95,8 +109,9 @@ def main() -> None:
         shape=(int(shape[0]), int(shape[1])),
         magnetization=payload["magnetization"],
         energy_density=payload["energy_density"],
-        c2p_x=payload["c2p_x"],
-        c2p_y=payload["c2p_y"],
+        c2p_x=payload["c2pk_x"] if "c2pk_x" in payload else payload["c2p_x"],
+        c2p_y=payload["c2pk_y"] if "c2pk_y" in payload else payload["c2p_y"],
+        momenta_k=payload["momenta_k"] if "momenta_k" in payload else None,
         iat_method=str(args.iat_method),
         iat_c=float(args.iat_c),
         block_size=int(args.block_size),
