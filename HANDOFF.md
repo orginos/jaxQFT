@@ -204,6 +204,9 @@ Last updated: 2026-04-07
     - blocks the samples level by level using the fixed RG split
     - measures `xi_2` on the scalar coarse field at each RG depth from the fine lattice down to the terminal `2x2` block
     - reports:
+      - signed magnetization `m`
+      - absolute magnetization `|m|`
+      - `m^2`
       - `chi_m`
       - `C2p_x`, `C2p_y`, and averaged `C2p`
       - `xi_2`, `xi_2_x`, `xi_2_y`

@@ -144,11 +144,13 @@ def _jackknife_level(m: np.ndarray, c2p_x: np.ndarray, c2p_y: np.ndarray, L: int
         raise ValueError("Need at least 2 samples for statistics")
 
     m2 = m * m
+    abs_m = np.abs(m)
     c2p = 0.5 * (c2p_x + c2p_y)
     vol = int(L * L)
 
     m_mean = float(np.mean(m))
     m2_mean = float(np.mean(m2))
+    abs_m_mean = float(np.mean(abs_m))
     chi = float(vol * (m2_mean - m_mean * m_mean))
     c2p_x_mean = float(np.mean(c2p_x))
     c2p_y_mean = float(np.mean(c2p_y))
@@ -163,10 +165,13 @@ def _jackknife_level(m: np.ndarray, c2p_x: np.ndarray, c2p_y: np.ndarray, L: int
 
     m_sum = float(np.sum(m))
     m2_sum = float(np.sum(m2))
+    abs_m_sum = float(np.sum(abs_m))
     c2p_x_sum = float(np.sum(c2p_x))
     c2p_y_sum = float(np.sum(c2p_y))
 
     jk_m = []
+    jk_abs_m = []
+    jk_m2 = []
     jk_chi = []
     jk_c2p = []
     jk_c2p_x = []
@@ -180,11 +185,14 @@ def _jackknife_level(m: np.ndarray, c2p_x: np.ndarray, c2p_y: np.ndarray, L: int
             continue
         m_i = (m_sum - float(np.sum(m[idxs]))) / keep
         m2_i = (m2_sum - float(np.sum(m2[idxs]))) / keep
+        abs_m_i = (abs_m_sum - float(np.sum(abs_m[idxs]))) / keep
         c2p_x_i = (c2p_x_sum - float(np.sum(c2p_x[idxs]))) / keep
         c2p_y_i = (c2p_y_sum - float(np.sum(c2p_y[idxs]))) / keep
         chi_i = float(vol * (m2_i - m_i * m_i))
         c2p_i = 0.5 * (c2p_x_i + c2p_y_i)
         jk_m.append(m_i)
+        jk_abs_m.append(abs_m_i)
+        jk_m2.append(m2_i)
         jk_chi.append(chi_i)
         jk_c2p.append(c2p_i)
         jk_c2p_x.append(c2p_x_i)
@@ -198,6 +206,8 @@ def _jackknife_level(m: np.ndarray, c2p_x: np.ndarray, c2p_y: np.ndarray, L: int
         "n_jackknife_bins": int(len(jk_xi)),
         "bin_size": int(bin_size),
         "magnetization": {"mean": m_mean, "stderr": _jk_error(np.asarray(jk_m))},
+        "abs_magnetization": {"mean": abs_m_mean, "stderr": _jk_error(np.asarray(jk_abs_m))},
+        "magnetization2": {"mean": m2_mean, "stderr": _jk_error(np.asarray(jk_m2))},
         "chi_m": {"mean": chi, "stderr": _jk_error(np.asarray(jk_chi))},
         "C2p": {"mean": c2p_mean, "stderr": _jk_error(np.asarray(jk_c2p))},
         "C2p_x": {"mean": c2p_x_mean, "stderr": _jk_error(np.asarray(jk_c2p_x))},
@@ -286,17 +296,18 @@ def measure_levels(*, cfg: dict, weights: dict, nsamples: int, batch_size: int, 
 def _print_summary(result: dict):
     print("\nPer-level xi_2 summary:")
     print(
-        f"{'level':>5}  {'L':>5}  {'xi2':>10}  {'err':>10}  {'xi2/L':>10}  {'chi':>12}  {'C2p':>12}  {'dist_bottom':>11}"
+        f"{'level':>5}  {'L':>5}  {'m':>10}  {'|m|':>10}  {'chi':>12}  {'xi2':>10}  {'err':>10}  {'xi2/L':>10}  {'dist_bottom':>11}"
     )
     for row in result["levels"]:
+        m = row["magnetization"]["mean"]
+        abs_m = row["abs_magnetization"]["mean"]
         xi = row["xi2"]["mean"]
         xi_err = row["xi2"]["stderr"]
         xi_over_L = row["xi2_over_L"]["mean"]
         chi = row["chi_m"]["mean"]
-        c2p = row["C2p"]["mean"]
         print(
-            f"{row['level_from_fine']:5d}  {row['L']:5d}  {xi:10.5f}  {xi_err:10.5f}  "
-            f"{xi_over_L:10.5f}  {chi:12.5f}  {c2p:12.5f}  {row['distance_from_bottom']:11d}"
+            f"{row['level_from_fine']:5d}  {row['L']:5d}  {m:10.5f}  {abs_m:10.5f}  "
+            f"{chi:12.5f}  {xi:10.5f}  {xi_err:10.5f}  {xi_over_L:10.5f}  {row['distance_from_bottom']:11d}"
         )
 
 
