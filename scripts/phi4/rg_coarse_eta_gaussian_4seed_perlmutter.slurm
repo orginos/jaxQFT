@@ -1,12 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=phi4-rg4
 #SBATCH --account=hadron
+#SBATCH --qos=regular
 #SBATCH --constraint=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
-#SBATCH --time=08:00:00
+#SBATCH --time=01:00:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
