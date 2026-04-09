@@ -40,6 +40,9 @@ The current tracked tuning grid is:
 The current tracked `g2` scan points are:
 - `configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv`
 
+The tuned production settings are:
+- `configs/phi4/paper-2/hmc-g2-scan/production_tuned.tsv`
+
 ### Production scan
 One input family per volume and `g2` value:
 - `prod_L{L}_g2_{value}.*`
@@ -91,8 +94,20 @@ NERSC launch helpers now exist:
 - `scripts/phi4/run_hmc_phi4.sh`
 - `scripts/phi4/submit_hmc_phi4_nersc.sh`
 - `scripts/phi4/submit_hmc_phi4_tuning_campaign_nersc.sh`
+- `scripts/phi4/submit_hmc_phi4_production_campaign_nersc.sh`
 
 The intended campaign order is:
 1. tune `(batch_size, nmd)` at the canonical point `g2=-0.4`, `g4=2.4`
 2. choose settings with acceptance above `90%`
-3. only then launch the full `g2` production matrix
+3. launch the full `g2` production matrix with conservative walltimes
+
+Current tuned production choices:
+- `L=16`: `batch=128`, `nmd=4`
+- `L=32`: `batch=128`, `nmd=4`
+- `L=64`: `batch=64`, `nmd=6`
+- `L=128`: `batch=32`, `nmd=8`
+- `L=256`: `batch=16`, `nmd=12`
+
+Operational note:
+- the current HMC runner does not checkpoint or resume, so failed jobs restart from scratch
+- production walltimes should therefore be intentionally conservative

@@ -25,8 +25,11 @@ Last updated: 2026-04-07
   - New tracked input grids:
     - `configs/phi4/paper-2/hmc-g2-scan/tuning_grid.tsv`
     - `configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv`
+    - `configs/phi4/paper-2/hmc-g2-scan/production_tuned.tsv`
   - Updated campaign note:
     - `configs/phi4/paper-2/hmc-g2-scan/README.md`
+  - New NERSC production-campaign submitter:
+    - `scripts/phi4/submit_hmc_phi4_production_campaign_nersc.sh`
   - Scope:
     - the HMC wrapper mirrors the NERSC environment logic used by the flow launchers:
       - loads the NERSC `python` module
@@ -45,6 +48,22 @@ Last updated: 2026-04-07
       - `g2 = -0.4`
       - volumes `L = 16, 32, 64, 128, 256`
       - explicit `(batch_size, nmd)` grid search rather than warmup-time `nmd` adaptation
+    - the current tuned production choices are:
+      - `L=16`: `batch=128`, `nmd=4`
+      - `L=32`: `batch=128`, `nmd=4`
+      - `L=64`: `batch=64`, `nmd=6`
+      - `L=128`: `batch=32`, `nmd=8`
+      - `L=256`: `batch=16`, `nmd=12`
+    - the production launcher defaults are:
+      - `nwarm=2000`
+      - `nmeas=10000`
+      - `nskip=20`
+      - `tau=1.0`
+      - `k_max=8`
+      - conservative per-volume walltimes from `production_tuned.tsv`
+    - important:
+      - `scripts/phi4/hmc_phi4.py` does not checkpoint or resume yet
+      - failed HMC jobs currently restart from scratch
   - HMC timing / tuning metrics:
     - `scripts/phi4/hmc_phi4.py` now records:
       - `warmup_sec`
