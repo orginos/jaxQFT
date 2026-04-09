@@ -50,6 +50,11 @@ The current submitter targets:
 - `L = 16, 32, 64, 128`
 - seeds `0,1,2,3`
 
+If a seed fails with non-finite loss, the replacement policy is tracked in
+`replacement_seeds.tsv`. The logical campaign still has four seed slots per
+point/width/volume, but a failed slot can be reassigned to a fresh active seed
+such as `s0 -> s4`.
+
 ## NERSC Submitter
 
 Use:

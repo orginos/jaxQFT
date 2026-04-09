@@ -22,6 +22,7 @@ Last updated: 2026-04-09
     - read-only status aggregation for the current phi4 NERSC campaigns
     - reads tracked repo inputs:
       - `configs/phi4/paper-2/canonical-point-scan/points.tsv`
+      - `configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv`
       - `configs/phi4/paper-2/canonical-scaling/L*_uniform.toml`
       - `configs/phi4/paper-2/hmc-g2-scan/refined_g2_points.tsv`
       - `configs/phi4/paper-2/hmc-g2-scan/tuning_grid_L512.tsv`
@@ -61,6 +62,11 @@ Last updated: 2026-04-09
       - `pending` / `running` / `failed` / `missing_output` classification precedence
     - implementation note:
       - the script is written to run on Perlmutter's default `python3` (`3.6.15`), so it avoids `tomllib`, dataclasses, PEP-604 unions, and `subprocess.run(..., capture_output=...)`
+      - canonical point-scan replacements are tracked as logical-slot overrides in:
+        - `configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv`
+      - current canonical replacements:
+        - `canonical2/w64/L128/s0 -> s4`
+        - `canonical2/w64/L128/s2 -> s5`
 - Phi4 HMC NERSC campaign scaffolding:
   - New launch wrapper:
     - `scripts/phi4/run_hmc_phi4.sh`

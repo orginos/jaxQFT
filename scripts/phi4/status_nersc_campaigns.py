@@ -89,6 +89,8 @@ class ExpectedRun(object):
         source_files,
         expected_files=(),
         expected_epoch=None,
+        logical_run_key="",
+        logical_job_name="",
     ):
         self.campaign_id = campaign_id
         self.title = title
@@ -100,6 +102,8 @@ class ExpectedRun(object):
         self.source_files = source_files
         self.expected_files = expected_files
         self.expected_epoch = expected_epoch
+        self.logical_run_key = logical_run_key or run_key
+        self.logical_job_name = logical_job_name or job_name
 
 
 def normalize_state(state: str) -> str:
@@ -223,6 +227,26 @@ def load_point_labels(path):
     return labels
 
 
+def load_canonical_point_seed_overrides(path):
+    overrides = {}
+    if not path.exists():
+        return overrides
+    for fields in iter_fields(path):
+        if len(fields) < 5:
+            raise ValueError(
+                "Expected at least 5 columns in {}: label width volume logical_seed active_seed".format(
+                    path
+                )
+            )
+        label = fields[0]
+        width = int(fields[1])
+        volume = int(fields[2])
+        logical_seed = int(fields[3])
+        active_seed = int(fields[4])
+        overrides[(label, width, volume, logical_seed)] = active_seed
+    return overrides
+
+
 def parse_schedule_final_epoch(config_path):
     final_epoch = 0
     ramp_epochs = None
@@ -271,9 +295,13 @@ def tag_mass(mass: str) -> str:
 def build_expected_runs(repo_root, runs_root):
     expected = []
 
+    canonical_seed_override_path = (
+        repo_root / "configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv"
+    )
     point_labels = load_point_labels(
         repo_root / "configs/phi4/paper-2/canonical-point-scan/points.tsv"
     )
+    canonical_seed_overrides = load_canonical_point_seed_overrides(canonical_seed_override_path)
     widths = [64, 48]
     volumes = [16, 32, 64, 128]
     seeds = [0, 1, 2, 3]
@@ -286,29 +314,40 @@ def build_expected_runs(repo_root, runs_root):
     for label in point_labels:
         for width in widths:
             for volume in volumes:
-                for seed in seeds:
+                for logical_seed in seeds:
+                    active_seed = canonical_seed_overrides.get(
+                        (label, width, volume, logical_seed),
+                        logical_seed,
+                    )
                     run_dir = (
                         runs_root
                         / "canonical-point-scan"
                         / label
                         / f"w{width}"
                         / f"L{volume}"
-                        / f"s{seed}"
+                        / f"s{active_seed}"
                     )
+                    run_key = f"{label}/w{width}/L{volume}/s{active_seed}"
+                    logical_run_key = f"{label}/w{width}/L{volume}/s{logical_seed}"
+                    job_name = f"phi4-{label}-w{width}-L{volume}-s{active_seed}"
+                    logical_job_name = f"phi4-{label}-w{width}-L{volume}-s{logical_seed}"
                     expected.append(
                         ExpectedRun(
                             campaign_id="canonical_point_scan",
                             title="Canonical Point-Scan Flow Training",
                             mode="orchestrate",
-                            run_key=f"{label}/w{width}/L{volume}/s{seed}",
-                            job_name=f"phi4-{label}-w{width}-L{volume}-s{seed}",
+                            run_key=run_key,
+                            job_name=job_name,
                             run_dir=run_dir,
                             completion_kind="flow_checkpoint",
                             source_files=(
                                 "configs/phi4/paper-2/canonical-point-scan/points.tsv",
+                                "configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv",
                                 "scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_campaign_nersc.sh",
                             ),
                             expected_epoch=final_epoch_by_volume[volume],
+                            logical_run_key=logical_run_key,
+                            logical_job_name=logical_job_name,
                         )
                     )
 
@@ -608,6 +647,13 @@ def classify_run(
     latest_acct,
 ):
     complete, missing_artifacts, notes, epoch = inspect_artifacts(run)
+    if run.logical_run_key != run.run_key:
+        notes.append(
+            "replacement_seed={} active_seed={}".format(
+                run.logical_run_key.rsplit("/s", 1)[-1],
+                run.run_key.rsplit("/s", 1)[-1],
+            )
+        )
     live_records = live_by_name.get(run.job_name, [])
     live_states = sorted({record.state for record in live_records})
     live_job_ids = [record.job_id for record in live_records]
@@ -640,7 +686,9 @@ def classify_run(
         "title": run.title,
         "mode": run.mode,
         "run_key": run.run_key,
+        "logical_run_key": run.logical_run_key,
         "job_name": run.job_name,
+        "logical_job_name": run.logical_job_name,
         "run_dir": str(run.run_dir),
         "status": status,
         "missing_artifacts": missing_artifacts,
@@ -731,6 +779,11 @@ def render_text(report, max_examples):
             lines.append("  examples:")
             for example in examples:
                 lines.append(f"    - {example['status']}: {example['run_dir']}")
+                if example["logical_run_key"] != example["run_key"]:
+                    lines.append(
+                        "      replacement: "
+                        f"{example['logical_run_key']} -> {example['run_key']}"
+                    )
                 if example["missing_artifacts"]:
                     lines.append(
                         f"      missing: {', '.join(example['missing_artifacts'])}"
