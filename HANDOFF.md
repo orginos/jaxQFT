@@ -59,6 +59,8 @@ Last updated: 2026-04-09
       - flow checkpoint completion detection
       - HMC file-pair completion detection
       - `pending` / `running` / `failed` / `missing_output` classification precedence
+    - implementation note:
+      - the script is written to run on Perlmutter's default `python3` (`3.6.15`), so it avoids `tomllib`, dataclasses, PEP-604 unions, and `subprocess.run(..., capture_output=...)`
 - Phi4 HMC NERSC campaign scaffolding:
   - New launch wrapper:
     - `scripts/phi4/run_hmc_phi4.sh`

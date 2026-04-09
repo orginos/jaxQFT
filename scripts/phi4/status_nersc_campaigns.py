@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 
 import argparse
 import json
@@ -8,12 +7,10 @@ import pickle
 import re
 import subprocess
 import sys
-import tomllib
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 NUMERIC_RE = re.compile(r"[-+]?[0-9]+(?:\.[0-9]+)?")
@@ -55,31 +52,54 @@ FAILED_STATES = {
 DONE_STATES = {"COMPLETED"}
 
 
-@dataclass(frozen=True)
-class SlurmRecord:
-    job_id: str
-    job_name: str
-    state: str
-    source: str
-    exit_code: str = ""
-    elapsed: str = ""
-    reason: str = ""
-    start: str = ""
-    end: str = ""
+class SlurmRecord(object):
+    def __init__(
+        self,
+        job_id,
+        job_name,
+        state,
+        source,
+        exit_code="",
+        elapsed="",
+        reason="",
+        start="",
+        end="",
+    ):
+        self.job_id = job_id
+        self.job_name = job_name
+        self.state = state
+        self.source = source
+        self.exit_code = exit_code
+        self.elapsed = elapsed
+        self.reason = reason
+        self.start = start
+        self.end = end
 
 
-@dataclass(frozen=True)
-class ExpectedRun:
-    campaign_id: str
-    title: str
-    mode: str
-    run_key: str
-    job_name: str
-    run_dir: Path
-    completion_kind: str
-    source_files: tuple[str, ...]
-    expected_files: tuple[str, ...] = ()
-    expected_epoch: int | None = None
+class ExpectedRun(object):
+    def __init__(
+        self,
+        campaign_id,
+        title,
+        mode,
+        run_key,
+        job_name,
+        run_dir,
+        completion_kind,
+        source_files,
+        expected_files=(),
+        expected_epoch=None,
+    ):
+        self.campaign_id = campaign_id
+        self.title = title
+        self.mode = mode
+        self.run_key = run_key
+        self.job_name = job_name
+        self.run_dir = run_dir
+        self.completion_kind = completion_kind
+        self.source_files = source_files
+        self.expected_files = expected_files
+        self.expected_epoch = expected_epoch
 
 
 def normalize_state(state: str) -> str:
@@ -91,7 +111,7 @@ def normalize_state(state: str) -> str:
     return normalized
 
 
-def parse_timestamp(value: str) -> datetime:
+def parse_timestamp(value):
     if not value or value in {"Unknown", "None"}:
         return datetime.min.replace(tzinfo=timezone.utc)
     try:
@@ -100,7 +120,7 @@ def parse_timestamp(value: str) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Read-only inventory for the active phi4 NERSC campaigns. "
@@ -178,7 +198,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def iter_fields(path: Path) -> Iterable[list[str]]:
+def iter_fields(path):
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -186,8 +206,8 @@ def iter_fields(path: Path) -> Iterable[list[str]]:
         yield line.split()
 
 
-def load_numeric_column(path: Path) -> list[str]:
-    values: list[str] = []
+def load_numeric_column(path):
+    values = []
     for fields in iter_fields(path):
         token = fields[0]
         if NUMERIC_RE.fullmatch(token):
@@ -195,42 +215,52 @@ def load_numeric_column(path: Path) -> list[str]:
     return values
 
 
-def load_point_labels(path: Path) -> list[str]:
-    labels: list[str] = []
+def load_point_labels(path):
+    labels = []
     for fields in iter_fields(path):
         if fields:
             labels.append(fields[0])
     return labels
 
 
-def parse_schedule_final_epoch(config_path: Path) -> int:
-    cfg = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    schedule = cfg.get("schedule", {})
+def parse_schedule_final_epoch(config_path):
     final_epoch = 0
+    ramp_epochs = None
+    ramp_doubles = None
+    section = ""
+    explicit_stage_epoch_ends = []
 
-    explicit = schedule.get("stage", [])
-    if isinstance(explicit, dict):
-        explicit = [explicit]
-    if explicit:
-        return max(int(stage["epoch_end"]) for stage in explicit)
+    for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[[") and line.endswith("]]"):
+            section = line[2:-2].strip()
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if "=" not in line:
+            continue
+        key, value = [part.strip() for part in line.split("=", 1)]
+        if section == "schedule.ramp":
+            if key == "epochs_per_stage":
+                ramp_epochs = int(value)
+            elif key == "num_doubles":
+                ramp_doubles = int(value)
+        elif section == "schedule.anneal" and key == "epoch_ends":
+            explicit_stage_epoch_ends.extend(int(token) for token in re.findall(r"-?\d+", value))
+        elif section == "schedule.stage" and key == "epoch_end":
+            explicit_stage_epoch_ends.append(int(value))
+        elif section == "train" and key == "epochs":
+            final_epoch = max(final_epoch, int(value))
 
-    ramp = schedule.get("ramp")
-    if ramp:
-        initial = int(ramp["epochs_per_stage"])
-        num_doubles = int(ramp["num_doubles"])
-        final_epoch += initial * (num_doubles + 1)
-
-    anneal = schedule.get("anneal")
-    if anneal:
-        epoch_ends = [int(value) for value in anneal.get("epoch_ends", [])]
-        if epoch_ends:
-            final_epoch = max(final_epoch, max(epoch_ends))
-
-    if final_epoch <= 0 and "train" in cfg and "epochs" in cfg["train"]:
-        final_epoch = int(cfg["train"]["epochs"])
-
+    if explicit_stage_epoch_ends:
+        final_epoch = max(final_epoch, max(explicit_stage_epoch_ends))
+    if ramp_epochs is not None and ramp_doubles is not None:
+        final_epoch = max(final_epoch, ramp_epochs * (ramp_doubles + 1))
     if final_epoch <= 0:
-        raise ValueError(f"Could not determine final epoch from {config_path}")
+        raise ValueError("Could not determine final epoch from {}".format(config_path))
     return final_epoch
 
 
@@ -238,8 +268,8 @@ def tag_mass(mass: str) -> str:
     return mass.replace("-", "m").replace("+", "p").replace(".", "p")
 
 
-def build_expected_runs(repo_root: Path, runs_root: Path) -> list[ExpectedRun]:
-    expected: list[ExpectedRun] = []
+def build_expected_runs(repo_root, runs_root):
+    expected = []
 
     point_labels = load_point_labels(
         repo_root / "configs/phi4/paper-2/canonical-point-scan/points.tsv"
@@ -424,13 +454,14 @@ def current_username() -> str:
     return getpass.getuser()
 
 
-def run_command(command: list[str]) -> tuple[list[str], str | None]:
+def run_command(command):
     try:
         proc = subprocess.run(
             command,
             check=True,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
         )
     except FileNotFoundError:
         return [], f"Command not found: {command[0]}"
@@ -442,12 +473,12 @@ def run_command(command: list[str]) -> tuple[list[str], str | None]:
     return proc.stdout.splitlines(), None
 
 
-def query_squeue(user: str) -> tuple[dict[str, list[SlurmRecord]], list[str]]:
+def query_squeue(user):
     rows, warning = run_command(
         ["squeue", "-h", "-u", user, "-o", "%i|%j|%T|%M|%l|%R"]
     )
-    live_by_name: dict[str, list[SlurmRecord]] = defaultdict(list)
-    warnings: list[str] = []
+    live_by_name = defaultdict(list)
+    warnings = []
     if warning:
         warnings.append(warning)
         return live_by_name, warnings
@@ -474,7 +505,7 @@ def query_squeue(user: str) -> tuple[dict[str, list[SlurmRecord]], list[str]]:
     return live_by_name, warnings
 
 
-def query_sacct(user: str, days: int) -> tuple[dict[str, SlurmRecord], list[str]]:
+def query_sacct(user, days):
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
     rows, warning = run_command(
         [
@@ -489,8 +520,8 @@ def query_sacct(user: str, days: int) -> tuple[dict[str, SlurmRecord], list[str]
             "--format=JobIDRaw,JobName,State,ExitCode,Elapsed,Start,End",
         ]
     )
-    latest_by_name: dict[str, SlurmRecord] = {}
-    warnings: list[str] = []
+    latest_by_name = {}
+    warnings = []
     if warning:
         warnings.append(warning)
         return latest_by_name, warnings
@@ -532,7 +563,7 @@ def query_sacct(user: str, days: int) -> tuple[dict[str, SlurmRecord], list[str]
     return latest_by_name, warnings
 
 
-def checkpoint_epoch(path: Path) -> tuple[int | None, str | None]:
+def checkpoint_epoch(path):
     try:
         with open(path, "rb") as handle:
             payload = pickle.load(handle)
@@ -544,10 +575,10 @@ def checkpoint_epoch(path: Path) -> tuple[int | None, str | None]:
     return int(epoch), None
 
 
-def inspect_artifacts(run: ExpectedRun) -> tuple[bool, list[str], list[str], int | None]:
-    missing: list[str] = []
-    notes: list[str] = []
-    epoch: int | None = None
+def inspect_artifacts(run):
+    missing = []
+    notes = []
+    epoch = None
 
     if run.completion_kind == "flow_checkpoint":
         checkpoint = run.run_dir / "checkpoint.pkl"
@@ -572,10 +603,10 @@ def inspect_artifacts(run: ExpectedRun) -> tuple[bool, list[str], list[str], int
 
 
 def classify_run(
-    run: ExpectedRun,
-    live_by_name: dict[str, list[SlurmRecord]],
-    latest_acct: dict[str, SlurmRecord],
-) -> dict[str, object]:
+    run,
+    live_by_name,
+    latest_acct,
+):
     complete, missing_artifacts, notes, epoch = inspect_artifacts(run)
     live_records = live_by_name.get(run.job_name, [])
     live_states = sorted({record.state for record in live_records})
@@ -635,10 +666,10 @@ def classify_run(
 
 
 def summarize_campaign(
-    campaign_id: str,
-    entries: list[dict[str, object]],
-    max_examples: int,
-) -> dict[str, object]:
+    campaign_id,
+    entries,
+    max_examples,
+):
     counts = Counter(entry["status"] for entry in entries)
     missing_artifact_counts = Counter()
     for entry in entries:
@@ -666,8 +697,8 @@ def summarize_campaign(
     }
 
 
-def render_text(report: dict[str, object], max_examples: int) -> str:
-    lines: list[str] = []
+def render_text(report, max_examples):
+    lines = []
     lines.append(f"Repo root: {report['repo_root']}")
     lines.append(f"Runs root: {report['runs_root']}")
     lines.append(f"Slurm user: {report['slurm_user']}")
@@ -721,7 +752,7 @@ def render_text(report: dict[str, object], max_examples: int) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
+def main():
     args = parse_args()
     repo_root = args.repo_root.resolve()
     runs_root = (args.runs_root.resolve() if args.runs_root else (repo_root / "runs" / "phi4").resolve())
@@ -732,9 +763,9 @@ def main() -> int:
         allowed = set(args.campaign)
         expected_runs = [run for run in expected_runs if run.campaign_id in allowed]
 
-    warnings: list[str] = []
-    live_by_name: dict[str, list[SlurmRecord]] = {}
-    latest_acct: dict[str, SlurmRecord] = {}
+    warnings = []
+    live_by_name = {}
+    latest_acct = {}
     if not args.no_slurm and not args.no_squeue:
         live_by_name, queue_warnings = query_squeue(slurm_user)
         warnings.extend(queue_warnings)
@@ -742,7 +773,7 @@ def main() -> int:
         latest_acct, acct_warnings = query_sacct(slurm_user, args.sacct_days)
         warnings.extend(acct_warnings)
 
-    entries_by_campaign: dict[str, list[dict[str, object]]] = defaultdict(list)
+    entries_by_campaign = defaultdict(list)
     for run in expected_runs:
         entries_by_campaign[run.campaign_id].append(classify_run(run, live_by_name, latest_acct))
 
