@@ -77,7 +77,7 @@ Last updated: 2026-04-09
   - Scope:
     - the HMC wrapper mirrors the NERSC environment logic used by the flow launchers:
       - loads the NERSC `python` module
-      - activates `~/venv/jax` with fallback to `~/venvs/jax`
+      - activates `~/venvs/jax`
       - sets `JAX_PLATFORMS=cuda`
       - sets `MPLCONFIGDIR=/tmp/mpl-cache`
       - creates an XLA autotune cache under `/tmp/xla-autotune`
@@ -280,8 +280,7 @@ Last updated: 2026-04-09
     - `--mode debug` runs the same `L32` model family with a tiny 2-epoch debug card
     - defaults to NERSC-style environment setup:
       - applies the `python` module environment via Lmod shell output
-      - then sources `~/venv/jax/bin/activate`
-      - falls back to `~/venvs/jax/bin/activate` for older setups
+      - then sources `~/venvs/jax/bin/activate`
     - defaults to a single visible GPU via `CUDA_VISIBLE_DEVICES=0`
     - sets `MPLCONFIGDIR` and an XLA per-fusion autotune cache under `/tmp`
     - debug mode also disables Triton GEMM autotuning for a quieter first-pass debug run

@@ -196,8 +196,7 @@ For the phi4 campaign, prefer the wrapper:
 What it does:
 
 - loads the NERSC `python` module when needed
-- activates `~/venv/jax`
-- falls back to `~/venvs/jax` for older setups
+- activates `~/venvs/jax`
 - sets `JAX_PLATFORMS=cuda`
 - sets `MPLCONFIGDIR=/tmp/mpl-cache`
 - creates an XLA autotune cache under `/tmp/xla-autotune`
