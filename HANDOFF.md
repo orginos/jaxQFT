@@ -2658,6 +2658,67 @@ Last updated: 2026-04-07
 4. Connected subtraction uses per-chain phi_bar, not global mean.
 5. Cosh m_eff solver overflows for large T — use log-space bisection (fixed in `cosh_meff_solve`).
 
+## phi^4 HMC Campaign Updates
+
+### Current Production Status
+- The original HMC production scan under `runs/phi4/hmc-g2-scan/production` finished cleanly for all `65` jobs.
+- The main statistical weakness at large volume is expected from the run design:
+  - `L=16,32`: `batch_size = 128`, `nmeas = 10000`
+  - `L=128`: `batch_size = 32`, `nmeas = 10000`
+  - `L=256`: `batch_size = 16`, `nmeas = 10000`
+- So the raw sample counts scale like `batch_size * nmeas`, meaning:
+  - `L=128` has `4x` fewer raw samples than `L=16,32`
+  - `L=256` has `8x` fewer raw samples than `L=16,32`
+
+### HMC Driver Upgrades
+- `scripts/phi4/hmc_phi4.py` now supports:
+  - `--integrator {leapfrog,minnorm2,forcegrad,minnorm4pf4}`
+  - `--seed INT`
+- The HMC JSON now records:
+  - `integrator`
+  - `seed`
+- Smoke test used:
+  - `source /opt/python/jax/bin/activate`
+  - `MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/hmc_phi4.py --shape 4,4 --lam 2.4 --mass -0.4 --nwarm 2 --nmeas 2 --nskip 1 --batch-size 2 --nmd 2 --tau 0.5 --integrator forcegrad --seed 7 --json-out /tmp/hmc_phi4_forcegrad_smoke.json`
+
+### New Tracked Campaign Files
+- Refined critical masses:
+  - `configs/phi4/paper-2/hmc-g2-scan/refined_g2_points.tsv`
+- Dedicated `L=512` tuning grid:
+  - `configs/phi4/paper-2/hmc-g2-scan/tuning_grid_L512.tsv`
+
+### New HMC Submit Helpers
+- Refined mass scan:
+  - `scripts/phi4/submit_hmc_phi4_refined_mass_campaign_nersc.sh`
+- Extra-statistics replicas:
+  - `scripts/phi4/submit_hmc_phi4_extra_stats_campaign_nersc.sh`
+- Dedicated `L=512` tuning:
+  - `scripts/phi4/submit_hmc_phi4_l512_tuning_campaign_nersc.sh`
+
+### Updated Submitter Behavior
+- `scripts/phi4/submit_hmc_phi4_tuning_campaign_nersc.sh`
+  - now reads a tracked grid file
+  - supports optional per-row integrator and walltime
+- `scripts/phi4/submit_hmc_phi4_production_campaign_nersc.sh`
+  - now supports `--volumes`
+  - now supports `--replicas` and `--replica-start`
+  - now passes deterministic `--seed`
+  - supports optional integrator in the settings TSV as a fifth column
+
+### Intended Aggressive Submission Plan
+1. Refined masses on `L=16,32,64,128,256` using:
+   - `configs/phi4/paper-2/hmc-g2-scan/refined_g2_points.tsv`
+2. Tune `L=512` at near-critical mass with both:
+   - `minnorm2`
+   - `forcegrad`
+3. Add extra-statistics replicas:
+   - `L=128`: `3` extra replicas (`4x` total statistics including baseline)
+   - `L=256`: `7` extra replicas (`8x` total statistics including baseline)
+
+### Notes
+- HMC still does **not** checkpoint/resume; failures require rerun from scratch.
+- For future large-volume finite-size scaling, prefer combining independent replica runs offline rather than extending a single run.
+
 ## Priority Backlog
 1. Replace the phase-3 exact dense DD boundary correction with the paper-faithful polynomial/multiboson correction, keeping the current DD theory interface stable.
 2. Add nested integrator schedules over monomial timescales (Sexton-Weingarten style).

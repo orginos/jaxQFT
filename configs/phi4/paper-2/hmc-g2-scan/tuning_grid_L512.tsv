@@ -1,0 +1,19 @@
+# L  batch_size  nmd  integrator  walltime
+512  4   12  minnorm2  06:00:00
+512  8   12  minnorm2  06:00:00
+512  16  12  minnorm2  06:00:00
+512  4   16  minnorm2  06:00:00
+512  8   16  minnorm2  06:00:00
+512  16  16  minnorm2  06:00:00
+512  4   20  minnorm2  08:00:00
+512  8   20  minnorm2  08:00:00
+512  16  20  minnorm2  08:00:00
+512  4   6   forcegrad  06:00:00
+512  8   6   forcegrad  06:00:00
+512  16  6   forcegrad  06:00:00
+512  4   8   forcegrad  06:00:00
+512  8   8   forcegrad  06:00:00
+512  16  8   forcegrad  06:00:00
+512  4   10  forcegrad  08:00:00
+512  8   10  forcegrad  08:00:00
+512  16  10  forcegrad  08:00:00

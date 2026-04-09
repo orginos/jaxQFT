@@ -31,11 +31,24 @@ ROOT = _project_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from jaxqft.core.integrators import minnorm2
+from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
 from jaxqft.models.phi4 import Phi4
 from jaxqft.core.update import hmc
 from scripts.phi4.analysis.hmc_common import phi4_summary_from_histories
 import jax
+
+
+def _build_integrator(name: str, theory: Phi4, nmd: int, tau: float):
+    key = str(name).lower()
+    if key == "leapfrog":
+        return leapfrog(theory.force, theory.evolveQ, nmd, tau)
+    if key == "minnorm2":
+        return minnorm2(theory.force, theory.evolveQ, nmd, tau)
+    if key == "forcegrad":
+        return force_gradient(theory.force, theory.evolveQ, nmd, tau)
+    if key == "minnorm4pf4":
+        return minnorm4pf4(theory.force, theory.evolveQ, nmd, tau)
+    raise ValueError(f"Unknown integrator: {name}")
 
 
 def main():
@@ -49,6 +62,10 @@ def main():
     ap.add_argument("--batch-size", type=int,   default=16,       help="Batch size (independent chains)")
     ap.add_argument("--nmd",        type=int,   default=7,        help="MD steps per trajectory")
     ap.add_argument("--tau",        type=float, default=1.0,      help="Trajectory length")
+    ap.add_argument("--integrator", type=str,   default="minnorm2",
+                    choices=["leapfrog", "minnorm2", "forcegrad", "minnorm4pf4"],
+                    help="Molecular-dynamics integrator")
+    ap.add_argument("--seed",       type=int,   default=0,        help="PRNG seed for theory/update")
     ap.add_argument("--json-out",   type=str,   default=None,     help="Save results to JSON file")
     ap.add_argument("--hist-out",   type=str,   default=None,     help="Save raw observable histories to .npz")
     ap.add_argument("--k-max",      type=int,   default=1,        help="Measure structure factors for k=1..k_max in each lattice direction")
@@ -75,14 +92,15 @@ def main():
     print("JAX backend:", jax.default_backend())
     print("JAX devices:", [str(d) for d in jax.devices()])
     print(f"Lattice: {lat}  lam={args.lam}  mass={args.mass}  batch={args.batch_size}")
-    print(f"Integrator: minnorm2  nmd={args.nmd}  tau={args.tau}")
+    print(f"Integrator: {args.integrator}  nmd={args.nmd}  tau={args.tau}")
+    print(f"Seed: {args.seed}")
     print(f"Momentum scan: k=1..{k_max}")
     print(f"Nwarm={args.nwarm}  Nmeas={args.nmeas}  Nskip={args.nskip}")
 
-    sg    = Phi4(lat, args.lam, args.mass, batch_size=args.batch_size)
+    sg    = Phi4(lat, args.lam, args.mass, batch_size=args.batch_size, seed=args.seed)
     phi   = sg.hotStart()
-    mn2   = minnorm2(sg.force, sg.evolveQ, args.nmd, args.tau)
-    chain = hmc(T=sg, I=mn2, verbose=False)
+    integ = _build_integrator(args.integrator, sg, args.nmd, args.tau)
+    chain = hmc(T=sg, I=integ, verbose=False, seed=args.seed + 1)
 
     tic = time.perf_counter()
     phi = chain.evolve(phi, args.nwarm)
@@ -232,6 +250,8 @@ def main():
             "batch_size": int(args.batch_size),
             "nmd": int(args.nmd),
             "tau": float(args.tau),
+            "integrator": str(args.integrator),
+            "seed": int(args.seed),
             "acceptance": float(acc),
             "performance": {
                 "warmup_sec": float(warmup_sec),

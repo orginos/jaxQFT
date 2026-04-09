@@ -14,10 +14,13 @@ Optional:
   --run-root PATH           Production run root. Default:
                             /global/cfs/cdirs/hadron/jaxQFT/runs/phi4/hmc-g2-scan/production
   --lam FLOAT               Fixed g4=lambda. Default: 2.4
+  --volumes LIST            Comma-separated volumes. Default: 16,32,64,128,256
   --g2-file PATH            Tracked g2 scan file. Default:
                             configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv
   --settings-file PATH      Tracked tuned production settings. Default:
                             configs/phi4/paper-2/hmc-g2-scan/production_tuned.tsv
+  --replicas INT            Number of independent replicas per point. Default: 1
+  --replica-start INT       Starting replica index. Default: 0
   --nwarm INT               Default: 2000
   --nmeas INT               Default: 10000
   --nskip INT               Default: 20
@@ -36,8 +39,11 @@ EOF
 repo_root="/global/cfs/cdirs/hadron/jaxQFT"
 run_root="/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/hmc-g2-scan/production"
 lam="2.4"
+volumes_csv="16,32,64,128,256"
 g2_file="configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv"
 settings_file="configs/phi4/paper-2/hmc-g2-scan/production_tuned.tsv"
+replicas="1"
+replica_start="0"
 nwarm="2000"
 nmeas="10000"
 nskip="20"
@@ -52,8 +58,11 @@ while [[ $# -gt 0 ]]; do
     --repo-root) repo_root="${2:-}"; shift 2 ;;
     --run-root) run_root="${2:-}"; shift 2 ;;
     --lam) lam="${2:-}"; shift 2 ;;
+    --volumes) volumes_csv="${2:-}"; shift 2 ;;
     --g2-file) g2_file="${2:-}"; shift 2 ;;
     --settings-file) settings_file="${2:-}"; shift 2 ;;
+    --replicas) replicas="${2:-}"; shift 2 ;;
+    --replica-start) replica_start="${2:-}"; shift 2 ;;
     --nwarm) nwarm="${2:-}"; shift 2 ;;
     --nmeas) nmeas="${2:-}"; shift 2 ;;
     --nskip) nskip="${2:-}"; shift 2 ;;
@@ -100,21 +109,28 @@ tag_mass() {
 declare -A batch_by_L=()
 declare -A nmd_by_L=()
 declare -A time_by_L=()
+declare -A integrator_by_L=()
 
-while read -r L batch nmd walltime; do
+while read -r L batch nmd walltime integrator _; do
   [[ -z "${L}" || "${L}" == \#* ]] && continue
+  if [[ "${L}" == "L" || "${L}" == "volume" ]]; then
+    continue
+  fi
   batch_by_L["${L}"]="${batch}"
   nmd_by_L["${L}"]="${nmd}"
   time_by_L["${L}"]="${walltime}"
+  integrator_by_L["${L}"]="${integrator:-minnorm2}"
 done < "${settings_file}"
 
+IFS=',' read -r -a volumes <<< "${volumes_csv}"
 submitted=0
+mass_index=0
 while read -r mass; do
   [[ -z "${mass}" || "${mass}" == \#* ]] && continue
   if [[ ! "${mass}" =~ ^[-+]?[0-9]+([.][0-9]+)?$ ]]; then
     continue
   fi
-  for L in 16 32 64 128 256; do
+  for L in "${volumes[@]}"; do
     if [[ -z "${batch_by_L[${L}]:-}" || -z "${nmd_by_L[${L}]:-}" || -z "${time_by_L[${L}]:-}" ]]; then
       echo "Missing tuned settings for L=${L}" >&2
       exit 2
@@ -122,37 +138,49 @@ while read -r mass; do
     batch="${batch_by_L[${L}]}"
     nmd="${nmd_by_L[${L}]}"
     time_limit="${time_by_L[${L}]}"
+    integrator="${integrator_by_L[${L}]:-minnorm2}"
     mass_tag="$(tag_mass "${mass}")"
-    run_dir="${run_root}/L${L}/g2_${mass}"
-    job_name="phi4-g2-L${L}-${mass_tag}"
-    cmd=(
-      "${submit}"
-      --run-dir "${run_dir}"
-      --job-name "${job_name}"
-      --time "${time_limit}"
-      --account "${account}"
-      --qos "${qos}"
-      --
-      --shape "${L},${L}"
-      --lam "${lam}"
-      --mass "${mass}"
-      --nwarm "${nwarm}"
-      --nmeas "${nmeas}"
-      --nskip "${nskip}"
-      --batch-size "${batch}"
-      --nmd "${nmd}"
-      --tau "${tau}"
-      --k-max "${k_max}"
-    )
-    if [[ ${print_only} -eq 1 ]]; then
-      printf '%q ' "${cmd[@]}"
-      printf '\n'
-    else
-      out="$("${cmd[@]}")"
-      printf '%s\n' "${out}"
-      submitted=$((submitted + 1))
-    fi
+    for ((rep=replica_start; rep<replica_start+replicas; rep++)); do
+      seed=$(( L * 100000 + mass_index * 100 + rep ))
+      if [[ ${replicas} -gt 1 || ${replica_start} -ne 0 ]]; then
+        run_dir="${run_root}/L${L}/g2_${mass}/rep${rep}"
+        job_name="phi4-g2-L${L}-${mass_tag}-rep${rep}"
+      else
+        run_dir="${run_root}/L${L}/g2_${mass}"
+        job_name="phi4-g2-L${L}-${mass_tag}"
+      fi
+      cmd=(
+        "${submit}"
+        --run-dir "${run_dir}"
+        --job-name "${job_name}"
+        --time "${time_limit}"
+        --account "${account}"
+        --qos "${qos}"
+        --
+        --shape "${L},${L}"
+        --lam "${lam}"
+        --mass "${mass}"
+        --nwarm "${nwarm}"
+        --nmeas "${nmeas}"
+        --nskip "${nskip}"
+        --batch-size "${batch}"
+        --nmd "${nmd}"
+        --tau "${tau}"
+        --integrator "${integrator}"
+        --seed "${seed}"
+        --k-max "${k_max}"
+      )
+      if [[ ${print_only} -eq 1 ]]; then
+        printf '%q ' "${cmd[@]}"
+        printf '\n'
+      else
+        out="$("${cmd[@]}")"
+        printf '%s\n' "${out}"
+        submitted=$((submitted + 1))
+      fi
+    done
   done
+  mass_index=$((mass_index + 1))
 done < "${g2_file}"
 
 if [[ ${print_only} -eq 0 ]]; then
