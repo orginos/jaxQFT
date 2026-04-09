@@ -66,6 +66,7 @@ Last updated: 2026-04-09
         - `configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv`
       - current canonical replacements:
         - `canonical2/w48/L128/s1 -> s4`
+        - `canonical2/w48/L128/s2 -> s5`
         - `canonical2/w64/L128/s0 -> s4`
         - `canonical2/w64/L128/s2 -> s5`
 - Phi4 HMC NERSC campaign scaffolding:

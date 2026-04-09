@@ -1,4 +1,5 @@
 # label	width	volume	logical_seed	active_seed	reason
 canonical2	48	128	1	4	nonfinite_loss_replacement
+canonical2	48	128	2	5	nonfinite_loss_replacement
 canonical2	64	128	0	4	nonfinite_loss_replacement
 canonical2	64	128	2	5	nonfinite_loss_replacement
