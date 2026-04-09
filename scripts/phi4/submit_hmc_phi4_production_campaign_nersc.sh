@@ -111,6 +111,9 @@ done < "${settings_file}"
 submitted=0
 while read -r mass; do
   [[ -z "${mass}" || "${mass}" == \#* ]] && continue
+  if [[ ! "${mass}" =~ ^[-+]?[0-9]+([.][0-9]+)?$ ]]; then
+    continue
+  fi
   for L in 16 32 64 128 256; do
     if [[ -z "${batch_by_L[${L}]:-}" || -z "${nmd_by_L[${L}]:-}" || -z "${time_by_L[${L}]:-}" ]]; then
       echo "Missing tuned settings for L=${L}" >&2
