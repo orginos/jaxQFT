@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-07
+Last updated: 2026-04-09
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -15,6 +15,50 @@ Last updated: 2026-04-07
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Phi4 NERSC read-only campaign status tool:
+  - New inventory/report entry point:
+    - `scripts/phi4/status_nersc_campaigns.py`
+  - Scope:
+    - read-only status aggregation for the current phi4 NERSC campaigns
+    - reads tracked repo inputs:
+      - `configs/phi4/paper-2/canonical-point-scan/points.tsv`
+      - `configs/phi4/paper-2/canonical-scaling/L*_uniform.toml`
+      - `configs/phi4/paper-2/hmc-g2-scan/refined_g2_points.tsv`
+      - `configs/phi4/paper-2/hmc-g2-scan/tuning_grid_L512.tsv`
+      - `configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv`
+    - inspects the current runtime trees under `runs/phi4/...`
+    - queries `squeue` and `sacct` when available
+    - classifies each expected run as one of:
+      - `pending`
+      - `running`
+      - `done`
+      - `failed`
+      - `missing_output`
+    - reports missing artifacts and a small sample of incomplete runs per campaign
+    - covers:
+      - canonical point-scan flow training
+      - canonical multimetric level analysis
+      - tuned per-level multimetric level analysis
+      - HMC refined near-critical scan
+      - HMC `L=512` tuning
+      - HMC extra-statistics replicas
+    - intentionally does not:
+      - resubmit jobs
+      - cancel jobs
+      - rewrite configs
+      - infer scientific next steps
+  - Primary usage on Perlmutter:
+    - `python3 /global/cfs/cdirs/hadron/jaxQFT/scripts/phi4/status_nersc_campaigns.py`
+    - JSON output:
+      - `python3 /global/cfs/cdirs/hadron/jaxQFT/scripts/phi4/status_nersc_campaigns.py --json`
+    - narrow to one campaign:
+      - `python3 /global/cfs/cdirs/hadron/jaxQFT/scripts/phi4/status_nersc_campaigns.py --campaign hmc_refined`
+  - Local validation:
+    - `python3 -m py_compile scripts/phi4/status_nersc_campaigns.py`
+    - exercised on local fixture trees with mocked `squeue`/`sacct` output to verify:
+      - flow checkpoint completion detection
+      - HMC file-pair completion detection
+      - `pending` / `running` / `failed` / `missing_output` classification precedence
 - Phi4 HMC NERSC campaign scaffolding:
   - New launch wrapper:
     - `scripts/phi4/run_hmc_phi4.sh`
