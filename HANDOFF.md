@@ -129,6 +129,34 @@ Last updated: 2026-04-07
     - `scripts/phi4/analysis/plot_locality_debug_compare.py`
   - New NERSC submitter for the tuned per-level checkpoint set:
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_level_analysis_perlevel_campaign_nersc.sh`
+- Phi4 canonical-point training extension:
+  - New tracked point-scan note:
+    - `configs/phi4/paper-2/canonical-point-scan/README.md`
+  - New tracked point list:
+    - `configs/phi4/paper-2/canonical-point-scan/points.tsv`
+  - New NERSC training submitter:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_campaign_nersc.sh`
+  - Scope:
+    - scans three additional `g2` points at fixed `g4 = 2.4`:
+      - `canonical2`: `g2 = -0.5`
+      - `canonical3`: `g2 = -0.585`
+      - `canonical4`: `g2 = -0.70`
+    - compares two uniform transport widths:
+      - `w64` = original canonical width
+      - `w48` = cheaper width-only model
+    - keeps the rest of the canonical baseline fixed:
+      - same `n_cycles = 2`
+      - same `radius = 1`
+      - same `eta_gaussian = level`
+      - same staged schedule from `configs/phi4/paper-2/canonical-scaling/L*_uniform.toml`
+    - targets:
+      - `L = 16, 32, 64, 128`
+      - seeds `0,1,2,3`
+    - runtime layout:
+      - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan/<point>/w<width>/L<L>/s<seed>/`
+    - implementation detail:
+      - the campaign uses the tracked `L*_uniform.toml` cards as the base configs
+      - `mass` and `width` are overridden on the CLI so the copied `input.toml` in each run dir is the localized record of the exact job
 - Phi4 HMC observable-analysis path for the paper-2 scalar campaign:
   - New shared analysis helpers:
     - `scripts/phi4/analysis/hmc_common.py`
