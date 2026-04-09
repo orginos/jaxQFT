@@ -447,6 +447,75 @@ def _fit_exponential_decay(radii: np.ndarray, values: np.ndarray, counts: np.nda
     }
 
 
+def _default_locality_primary_rmax(shape: tuple[int, int], radii: np.ndarray) -> float:
+    return float(min(float(min(shape)) / 4.0, float(np.max(radii))))
+
+
+def _dyadic_locality_windows(radii: np.ndarray, shape: tuple[int, int]) -> list[tuple[float, float]]:
+    max_r = float(np.max(radii))
+    hard_max = min(float(min(shape)) / 2.0, max_r)
+    windows = []
+    r0 = 1.0
+    while r0 < hard_max:
+        r1 = min(2.0 * r0, hard_max)
+        if r1 > r0:
+            windows.append((float(r0), float(r1)))
+        if r1 >= hard_max:
+            break
+        r0 = r1
+    return windows
+
+
+def _locality_weight_summaries(
+    *,
+    shell_sum_abs: np.ndarray,
+    shell_count: np.ndarray,
+    onsite: float,
+    n_sources_total: int,
+) -> dict:
+    per_source_abs = shell_sum_abs / max(int(n_sources_total), 1)
+    per_source_abs_norm = per_source_abs / max(float(onsite), 1e-30)
+    tail_abs_norm = np.cumsum(per_source_abs_norm[::-1])[::-1]
+    offsite_total = float(np.sum(per_source_abs_norm[1:])) if per_source_abs_norm.size > 1 else 0.0
+    if offsite_total > 0.0:
+        tail_fraction = tail_abs_norm / offsite_total
+    else:
+        tail_fraction = np.full_like(tail_abs_norm, np.nan)
+    return {
+        "shell_integrated_abs_response_norm": per_source_abs_norm.tolist(),
+        "tail_integrated_abs_response_norm": tail_abs_norm.tolist(),
+        "tail_fraction_of_offsite_weight": tail_fraction.tolist(),
+        "offsite_total_abs_response_norm": offsite_total,
+        "nearest_neighbor_abs_response_norm": float(per_source_abs_norm[1]) if per_source_abs_norm.size > 1 else float("nan"),
+        "distance2_abs_response_norm": float(per_source_abs_norm[2]) if per_source_abs_norm.size > 2 else float("nan"),
+    }
+
+
+def _locality_fit_bundle(
+    *,
+    shape: tuple[int, int],
+    radii: np.ndarray,
+    values: np.ndarray,
+    counts: np.ndarray,
+    fit_rmin: float,
+    fit_rmax: float,
+) -> dict:
+    max_r = float(np.max(radii))
+    user_rmax = float(fit_rmax) if fit_rmax > 0.0 else max_r
+    primary_rmax = _default_locality_primary_rmax(shape, radii)
+    fits = {
+        "user": _fit_exponential_decay(radii, values, counts, fit_rmin, user_rmax),
+        "lquarter": _fit_exponential_decay(radii, values, counts, fit_rmin, primary_rmax),
+        "full": _fit_exponential_decay(radii, values, counts, fit_rmin, max_r),
+    }
+    dyadic = []
+    for r0, r1 in _dyadic_locality_windows(radii, shape):
+        fit = _fit_exponential_decay(radii, values, counts, r0, r1)
+        fit["label"] = f"[{r0:g},{r1:g}]"
+        dyadic.append(fit)
+    return {"fit": fits["user"], "fit_lquarter": fits["lquarter"], "fit_full": fits["full"], "dyadic_fits": dyadic}
+
+
 def _level_log_prob_from(cfg: dict, weights: dict, x: jax.Array, level: int) -> jax.Array:
     if level >= cfg["depth"] - 1:
         flat = x.reshape((x.shape[0], 4))
@@ -529,7 +598,20 @@ def _run_level_locality_analysis(
     onsite = float(mean_abs[0]) if mean_abs[0] > 0.0 else 1.0
     mean_abs_norm = mean_abs / onsite
     rms_norm = rms / max(float(rms[0]), 1e-30)
-    fit = _fit_exponential_decay(radii_out, mean_abs_norm, shell_count, fit_rmin, fit_rmax)
+    fit_bundle = _locality_fit_bundle(
+        shape=shape,
+        radii=radii_out,
+        values=mean_abs_norm,
+        counts=shell_count,
+        fit_rmin=fit_rmin,
+        fit_rmax=fit_rmax,
+    )
+    weight_summary = _locality_weight_summaries(
+        shell_sum_abs=shell_sum_abs,
+        shell_count=shell_count,
+        onsite=onsite,
+        n_sources_total=n_sources_total,
+    )
     return {
         "level_from_fine": int(level),
         "shape": [int(ny), int(nx)],
@@ -543,7 +625,8 @@ def _run_level_locality_analysis(
         "rms_response": rms.tolist(),
         "mean_abs_response_norm": mean_abs_norm.tolist(),
         "rms_response_norm": rms_norm.tolist(),
-        "fit": fit,
+        **fit_bundle,
+        **weight_summary,
     }
 
 
@@ -562,7 +645,7 @@ def measure_flow_levels(
     locality: bool,
     locality_nsamples: int,
     locality_nsources: int,
-    locality_metric: str,
+    locality_metrics: list[str],
     locality_fit_rmin: float,
     locality_fit_rmax: float,
 ) -> dict:
@@ -625,7 +708,7 @@ def measure_flow_levels(
     rw_reportable = bool(rw_stats["ess_fraction"] >= float(reweight_ess_min))
 
     levels_out = []
-    locality_out = []
+    locality_by_metric = {metric: [] for metric in locality_metrics} if locality else {}
     nlevels = len(level_shapes)
     for level in range(nlevels):
         m = np.concatenate(level_m[level], axis=0)
@@ -658,20 +741,21 @@ def measure_flow_levels(
         if locality_fields is not None:
             fields_level = np.concatenate(locality_fields[level], axis=0) if locality_fields[level] else np.empty((0, L, L))
             if fields_level.shape[0] > 0:
-                locality_out.append(
-                    _run_level_locality_analysis(
-                        cfg=cfg,
-                        weights=weights,
-                        level=level,
-                        shape=level_shapes[level],
-                        samples=fields_level,
-                        metric=locality_metric,
-                        n_sources=locality_nsources,
-                        seed=seed,
-                        fit_rmin=locality_fit_rmin,
-                        fit_rmax=locality_fit_rmax,
+                for metric in locality_metrics:
+                    locality_by_metric[metric].append(
+                        _run_level_locality_analysis(
+                            cfg=cfg,
+                            weights=weights,
+                            level=level,
+                            shape=level_shapes[level],
+                            samples=fields_level,
+                            metric=metric,
+                            n_sources=locality_nsources,
+                            seed=seed,
+                            fit_rmin=locality_fit_rmin,
+                            fit_rmax=locality_fit_rmax,
+                        )
                     )
-                )
 
     for level in range(1, nlevels):
         prev = levels_out[level - 1]["unweighted"]["xi2"]["mean"]
@@ -704,11 +788,21 @@ def measure_flow_levels(
         "levels": levels_out,
     }
     if locality:
+        primary_metric = str(locality_metrics[0])
         out["locality"] = {
             "n_samples_per_level": int(locality_nsamples),
             "n_sources": int(locality_nsources),
-            "metric": locality_metric,
-            "levels": locality_out,
+            "metric": primary_metric,
+            "levels": locality_by_metric[primary_metric],
+            "metrics": {
+                metric: {
+                    "n_samples_per_level": int(locality_nsamples),
+                    "n_sources": int(locality_nsources),
+                    "metric": metric,
+                    "levels": locality_by_metric[metric],
+                }
+                for metric in locality_metrics
+            },
         }
     return out
 
@@ -726,6 +820,21 @@ def _format_est(obs: dict | None, key: str) -> str:
     if np.isfinite(err):
         return f"{mean:.6f} +/- {err:.6f}"
     return f"{mean:.6f}"
+
+
+def _parse_metric_list(spec: str) -> list[str]:
+    metrics = []
+    for part in str(spec).split(","):
+        metric = part.strip()
+        if not metric:
+            continue
+        if metric not in {"manhattan", "chebyshev", "euclidean2"}:
+            raise ValueError(f"unsupported locality metric {metric}")
+        if metric not in metrics:
+            metrics.append(metric)
+    if not metrics:
+        raise ValueError("no locality metrics specified")
+    return metrics
 
 
 def _print_summary(result: dict):
@@ -761,13 +870,23 @@ def _print_summary(result: dict):
 
     locality = result.get("locality")
     if locality:
-        print("\nLocality by level:")
-        print(f"{'lvl':>3}  {'L':>5}  {'xi_local':>12}  {'xi_local/L':>12}")
-        for row in locality["levels"]:
-            fit = row["fit"]
-            xi_local = fit.get("xi_local", float("nan")) if fit.get("ok", False) else float("nan")
-            xi_over_L = float(xi_local / float(row["shape"][0])) if np.isfinite(xi_local) else float("nan")
-            print(f"{row['level_from_fine']:3d}  {row['shape'][0]:5d}  {xi_local:12.6f}  {xi_over_L:12.6f}")
+        metrics = locality.get("metrics") or {locality["metric"]: locality}
+        for metric, payload in metrics.items():
+            print(f"\nLocality by level ({metric}):")
+            print(
+                f"{'lvl':>3}  {'L':>5}  {'xi_L/4':>12}  {'xi_full':>12}  {'w(r>=2)':>12}  {'w(r>=L/4)':>12}"
+            )
+            for row in payload["levels"]:
+                fit_q = row.get("fit_lquarter", {})
+                fit_full = row.get("fit_full", {})
+                xi_q = fit_q.get("xi_local", float("nan")) if fit_q.get("ok", False) else float("nan")
+                xi_full = fit_full.get("xi_local", float("nan")) if fit_full.get("ok", False) else float("nan")
+                tail = np.asarray(row.get("tail_integrated_abs_response_norm", []), dtype=np.float64)
+                L = int(row["shape"][0])
+                tail_r2 = float(tail[2]) if tail.size > 2 else float("nan")
+                cutoff = min(int(np.floor(L / 4)), int(tail.size - 1)) if tail.size > 0 else 0
+                tail_lq = float(tail[cutoff]) if cutoff > 0 else float("nan")
+                print(f"{row['level_from_fine']:3d}  {L:5d}  {xi_q:12.6f}  {xi_full:12.6f}  {tail_r2:12.6e}  {tail_lq:12.6e}")
 
 
 def main():
@@ -782,7 +901,12 @@ def main():
     ap.add_argument("--locality", action="store_true", help="also measure locality of the learned effective action at each level")
     ap.add_argument("--locality-nsamples", type=int, default=8, help="number of full fields per level for locality analysis")
     ap.add_argument("--locality-nsources", type=int, default=4, help="number of Hessian probe sources per field for locality")
-    ap.add_argument("--locality-metric", type=str, default="manhattan", choices=["manhattan", "chebyshev", "euclidean2"])
+    ap.add_argument(
+        "--locality-metric",
+        type=str,
+        default="manhattan",
+        help="comma-separated locality metrics from {manhattan,chebyshev,euclidean2}",
+    )
     ap.add_argument("--locality-fit-rmin", type=float, default=1.0)
     ap.add_argument("--locality-fit-rmax", type=float, default=0.0)
     ap.add_argument("--json-out", type=str, default="", help="optional JSON output path")
@@ -795,6 +919,7 @@ def main():
     arch = ckpt["arch"]
     cfg = _build_model_from_arch(arch)
     weights = ckpt["weights"]
+    locality_metrics = _parse_metric_list(args.locality_metric) if bool(args.locality) else []
 
     result = measure_flow_levels(
         cfg=cfg,
@@ -810,7 +935,7 @@ def main():
         locality=bool(args.locality),
         locality_nsamples=int(args.locality_nsamples),
         locality_nsources=int(args.locality_nsources),
-        locality_metric=str(args.locality_metric),
+        locality_metrics=locality_metrics,
         locality_fit_rmin=float(args.locality_fit_rmin),
         locality_fit_rmax=float(args.locality_fit_rmax),
     )

@@ -98,6 +98,22 @@ Last updated: 2026-04-07
       - reweighted blocked observables at every level using the fine-level importance weights
       - automatic `reportable` flag controlled by `--reweight-ess-min`
     - optionally measures locality of the learned effective action at every RG depth through the shell-averaged Hessian-response kernel
+    - locality output now supports richer summaries:
+      - comma-separated `--locality-metric`, e.g. `manhattan,euclidean2`
+      - per-metric output under `result["locality"]["metrics"][metric]`
+      - legacy primary metric still mirrored at `result["locality"]["levels"]`
+      - multiple fit summaries per level:
+        - `fit` = user-requested window
+        - `fit_lquarter` = default short/primary fit using `r <= L/4`
+        - `fit_full` = full-range fit
+        - `dyadic_fits` = piecewise dyadic windows `[1,2], [2,4], ...`
+      - shell/tail weight diagnostics:
+        - `shell_integrated_abs_response_norm`
+        - `tail_integrated_abs_response_norm`
+        - `tail_fraction_of_offsite_weight`
+      - interpretation:
+        - long-range tails can flatten a naive single-exponential full-range fit even when short-distance locality is good
+        - use `fit_lquarter` plus the tail-weight diagnostics as the primary locality summary
   - Local smoke validation:
     - observable-only smoke:
       - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analysis/analyze_rg_coarse_eta_gaussian_levels.py --resume rg_coarse_eta_gauss_L16_perlevel_test.pkl --nsamples 16 --batch-size 8 --jk-bin-size 4 --k-max 2 --json-out /tmp/rg_levels_smoke.json`
@@ -106,6 +122,13 @@ Last updated: 2026-04-07
     - result:
       - both commands completed successfully
       - the script produced level-by-level unweighted and reweighted summaries plus locality lengths by RG depth
+      - multimetric smoke also completed:
+        - `source /opt/python/jax/bin/activate && MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/analysis/analyze_rg_coarse_eta_gaussian_levels.py --resume runs/phi4/paper-2/per-level-run-0/rg_coarse_eta_gauss_fresh_example.pkl --nsamples 4 --batch-size 2 --jk-bin-size 2 --k-max 1 --locality --locality-nsamples 1 --locality-nsources 1 --locality-metric manhattan,euclidean2 --locality-fit-rmax 4 --json-out /tmp/rg_levels_multimetric_smoke.json`
+  - New locality plot helpers:
+    - `scripts/phi4/analysis/plot_rg_coarse_eta_locality_multiscale.py`
+    - `scripts/phi4/analysis/plot_locality_debug_compare.py`
+  - New NERSC submitter for the tuned per-level checkpoint set:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_level_analysis_perlevel_campaign_nersc.sh`
 - Phi4 HMC observable-analysis path for the paper-2 scalar campaign:
   - New shared analysis helpers:
     - `scripts/phi4/analysis/hmc_common.py`
