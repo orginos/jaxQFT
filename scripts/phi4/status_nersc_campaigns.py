@@ -119,7 +119,10 @@ def parse_timestamp(value):
     if not value or value in {"Unknown", "None"}:
         return datetime.min.replace(tzinfo=timezone.utc)
     try:
-        return datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
     except ValueError:
         return datetime.min.replace(tzinfo=timezone.utc)
 
