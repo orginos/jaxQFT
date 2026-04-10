@@ -106,6 +106,23 @@ class ExpectedRun(object):
         self.logical_job_name = logical_job_name or job_name
 
 
+class _MissingPickleGlobal(object):
+    def __init__(self, *args, **kwargs):
+        self._pickle_stub_args = args
+        self._pickle_stub_kwargs = kwargs
+
+    def __setstate__(self, state):
+        self._pickle_stub_state = state
+
+
+class _TolerantCheckpointUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        try:
+            return pickle.Unpickler.find_class(self, module, name)
+        except Exception:
+            return _MissingPickleGlobal
+
+
 def normalize_state(state: str) -> str:
     normalized = state.strip().upper()
     if not normalized:
@@ -608,7 +625,7 @@ def query_sacct(user, days):
 def checkpoint_epoch(path):
     try:
         with open(path, "rb") as handle:
-            payload = pickle.load(handle)
+            payload = _TolerantCheckpointUnpickler(handle).load()
     except Exception as exc:  # pragma: no cover - exercised in integration only
         return None, type(exc).__name__
     epoch = payload.get("epoch")

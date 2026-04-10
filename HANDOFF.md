@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-09
+Last updated: 2026-04-10
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -15,6 +15,21 @@ Last updated: 2026-04-09
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Paper-2 draft update:
+  - `docs/papers/paper-2/manuscript.tex`
+  - Added the current critical-scaling interpretation of the intensive mismatch
+    metric:
+    - emphasize that the physically relevant volume comparison should be made at
+      approximately fixed `xi/L`
+    - record the conjecture that if the mismatch density overlaps mainly with
+      the energy-like operator, then near criticality
+      `std(Delta S)/L ~ sqrt(log xi)` in the 2d Ising class
+    - record the analogous argument for training-gradient fluctuations:
+      per-configuration gradient components are extensive, their variance is
+      controlled by an integrated correlator, and this provides a physical
+      explanation for the need for larger batches near criticality
+    - note explicitly in the manuscript that these scaling statements should be
+      checked numerically against the HMC determination of `xi`
 - Phi4 NERSC read-only campaign status tool:
   - New inventory/report entry point:
     - `scripts/phi4/status_nersc_campaigns.py`
@@ -62,6 +77,7 @@ Last updated: 2026-04-09
       - `pending` / `running` / `failed` / `missing_output` classification precedence
     - implementation note:
       - the script is written to run on Perlmutter's default `python3` (`3.6.15`), so it avoids `tomllib`, dataclasses, PEP-604 unions, and `subprocess.run(..., capture_output=...)`
+      - checkpoint epoch inspection now uses a tolerant unpickler so flow checkpoints can still be classified even when the active Python environment cannot import every module referenced inside the full pickle payload
       - canonical point-scan replacements are tracked as logical-slot overrides in:
         - `configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv`
       - current canonical replacements:
