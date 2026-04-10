@@ -15,12 +15,26 @@ Last updated: 2026-04-10
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Paper-2 experiment-plan literature note:
+  - `docs/papers/paper-2/experiment_plan.md`
+  - `docs/papers/paper-2/related_work_refs.bib`
+  - Added:
+    - a new experiment block on training criticality and the scaling of
+      `std(Delta S)/L`
+    - a related-work section summarizing the closest prior papers on:
+      critical-region flow sampling, critical Schwinger-model flows,
+      learned trivializing flows, NF gradient estimators at criticality,
+      neural-MCMC autocorrelation analysis, and generic large-batch scaling
+    - a dedicated BibTeX file for those references
 - Paper-2 draft update:
   - `docs/papers/paper-2/manuscript.tex`
   - Added the current critical-scaling interpretation of the intensive mismatch
     metric:
     - emphasize that the physically relevant volume comparison should be made at
       approximately fixed `xi/L`
+    - expand the heuristic `std(Delta S)` discussion into an explicit variance
+      derivation from a local mismatch density, including the connection to the
+      integrated correlator and the energy-like critical enhancement
     - record the conjecture that if the mismatch density overlaps mainly with
       the energy-like operator, then near criticality
       `std(Delta S)/L ~ sqrt(log xi)` in the 2d Ising class
@@ -28,6 +42,9 @@ Last updated: 2026-04-10
       per-configuration gradient components are extensive, their variance is
       controlled by an integrated correlator, and this provides a physical
       explanation for the need for larger batches near criticality
+    - state explicitly that keeping `std(Delta S)=O(1)` for exact reweighting
+      is parametrically stronger than keeping fixed intensive mismatch, with the
+      2d Ising estimate `delta l_rms(L) ~ 1/(L sqrt(log L))` at fixed `xi/L`
     - note explicitly in the manuscript that these scaling statements should be
       checked numerically against the HMC determination of `xi`
 - Phi4 NERSC read-only campaign status tool:
@@ -294,6 +311,34 @@ Last updated: 2026-04-10
     - the launcher exits nonzero if any seed fails
   - Symptom that motivated the fix:
     - only `s0` actually ran while `s1`-`s3` sat in `step creation temporarily disabled, retrying (Requested nodes are busy)`
+- Phi4 generic 4N-task regular-qos bundler:
+  - New launcher:
+    - `scripts/phi4/rg_coarse_eta_gaussian_4task_perlmutter.slurm`
+  - New submit helper:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_4task_bundle_nersc.sh`
+  - Scope:
+    - submit a nonzero multiple of 4 independent RG coarse-eta Gaussian flow tasks on Perlmutter GPU nodes
+    - pack tasks at 4 tasks per node and compute `nodes = task_count / 4` in the submit helper
+    - bind one Slurm task to one GPU with separate `run_dir` and per-task `train.out`/`train.err`
+    - keep point-specific overrides in the bundle manifest rather than trying to recover them from `input.toml`
+  - Manifest contract:
+    - TSV with a nonzero multiple of 4 non-comment rows
+    - first four columns:
+      - `task_name`
+      - `config`
+      - `run_dir`
+      - `seed`
+    - any later tab-separated columns are passed verbatim as trainer CLI tokens after `--save checkpoint.pkl`
+  - Bundle artifacts:
+    - `${BUNDLE_ROOT}/tasks.tsv`
+    - `${BUNDLE_ROOT}/job.sbatch`
+    - `${BUNDLE_ROOT}/slurm/job.log`
+    - `${BUNDLE_ROOT}/slurm/success_tasks.txt`
+    - `${BUNDLE_ROOT}/slurm/failed_tasks.txt`
+    - `${BUNDLE_ROOT}/slurm/failed_task_status.tsv`
+  - Intended use:
+    - reduce queue latency by packing same-type flow jobs into `qos=regular` node allocations at 4 tasks per node
+    - suitable for future canonical-point or other flow-training batches where the job mix is known ahead of submission
 - Phi4 multi-GPU planning note:
   - New note:
     - `docs/notes/phi4_multigpu_plan.md`

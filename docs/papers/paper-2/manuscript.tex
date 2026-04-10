@@ -149,12 +149,26 @@ difficult. If $\Delta S$ is approximately a sum of local terms,
 \begin{equation}
 \Delta S(\phi) \approx \sum_x \delta s_x(\phi),
 \end{equation}
+with translation-invariant connected correlator
+\begin{equation}
+C_{\delta s}(r)=\langle \delta s_x \delta s_{x+r}\rangle_c,
+\end{equation}
 then
 \begin{equation}
-\mathrm{Var}(\Delta S)\propto V,
-\qquad
+\mathrm{Var}(\Delta S)
+=
+\sum_{x,y}\langle \delta s_x \delta s_y\rangle_c
+=
+V\sum_r C_{\delta s}(r)
+\equiv
+V\,\chi_{\delta s}.
+\end{equation}
+When the integrated correlator $\chi_{\delta s}$ is finite, one has
+\begin{equation}
 \std(\Delta S)\propto \sqrt{V}.
 \end{equation}
+In two dimensions this means $\std(\Delta S)\propto L$, so
+$\std(\Delta S)/L$ is intensive even though $\Delta S$ itself is extensive.
 In this regime, exact reweighting eventually becomes costly for purely
 extensive reasons, while the learned action may still be close to the target in
 the space of local theories.
@@ -423,14 +437,15 @@ renormalized trajectory as the target theory.
 \subsection{Scalability at Fixed Intensive Error}
 
 The raw quantity $\std(\Delta S)$ is extensive enough that it should not be used
-alone to compare different volumes. The present working hypothesis is that the
-right intensive measure of quality is
+alone to compare different volumes. In general dimension $d$, the natural
+intensive bulk measure is
 \begin{equation}
-\frac{\std(\Delta S)}{L}
+\frac{\std(\Delta S)}{\sqrt{V}},
+\qquad V=L^d.
 \end{equation}
-in two dimensions, or equivalently $\std(\Delta S)/\sqrt{V}$. Existing
-numerical evidence already suggests that this quantity is much more stable under
-volume scaling than $\std(\Delta S)$ itself.
+In two dimensions this reduces to $\std(\Delta S)/L$. Existing numerical
+evidence already suggests that this quantity is much more stable under volume
+scaling than $\std(\Delta S)$ itself.
 
 For physically relevant scaling tests, however, the comparison should
 ultimately be organized at approximately fixed $\xi/L$, not at fixed bare
@@ -453,20 +468,118 @@ one has
 V\sum_r C_{\delta \ell}(r).
 \end{equation}
 Away from criticality, the integrated correlator $\sum_r C_{\delta \ell}(r)$ is
-finite, so $\std(\Delta S)\propto L$ in two dimensions and
-$\std(\Delta S)/L$ is genuinely intensive. Near criticality, however, the
+finite, so $\std(\Delta S)\propto \sqrt{V}$ and
+$\std(\Delta S)/\sqrt{V}$ is genuinely intensive. Near criticality, however, the
 integrated correlator can acquire a critical enhancement. For a $Z_2$-symmetric
 ansatz, the dominant overlap of $\delta \ell$ should lie in the even sector and
-is plausibly energy-like. In that case one expects the critical enhancement of
-$\std(\Delta S)/L$ to be controlled by the same susceptibility that governs the
-specific heat. For the two-dimensional Ising universality class, where
-$\alpha=0$ and $\nu=1$, this suggests a logarithmic growth,
+is plausibly energy-like. More generally, if the leading overlap is with a
+scaling operator of RG eigenvalue $y_\star$, then
+\begin{equation}
+\sum_r C_{\delta \ell}(r)\sim \xi^{2y_\star-d},
+\end{equation}
+up to logarithms in the marginal case $2y_\star=d$. For the energy-like
+operator, $y_\star=y_t=1/\nu$, so
+\begin{equation}
+\sum_r C_{\delta \ell}(r)\sim \xi^{\alpha/\nu},
+\end{equation}
+using the hyperscaling relation $\alpha = 2-d\nu$. Therefore
+\begin{equation}
+\std(\Delta S)\sim L^{d/2}\,\xi^{\alpha/(2\nu)},
+\end{equation}
+or, for a general leading operator,
+\begin{equation}
+\frac{\std(\Delta S)}{\sqrt{V}}
+\sim
+\xi^{y_\star-d/2}.
+\end{equation}
+For an energy-like overlap this becomes
+\begin{equation}
+\frac{\std(\Delta S)}{\sqrt{V}}
+\sim
+\xi^{\alpha/(2\nu)},
+\end{equation}
+again with logarithmic corrections when $\alpha=0$. At fixed $\xi/L$, the same
+statement can be rewritten as
+\begin{equation}
+\std(\Delta S)\sim L^{y_\star},
+\qquad
+\frac{\std(\Delta S)}{\sqrt{V}}\sim L^{y_\star-d/2},
+\end{equation}
+and for the energy-like case,
+\begin{equation}
+\std(\Delta S)\sim L^{1/\nu},
+\qquad
+\frac{\std(\Delta S)}{\sqrt{V}}\sim L^{\alpha/(2\nu)},
+\end{equation}
+again up to logarithms in the marginal case.
+
+For the two-dimensional Ising universality class, where $\alpha=0$ and
+$\nu=1$, this gives
 \begin{equation}
 \frac{\std(\Delta S)}{L}\sim \sqrt{\log \xi},
 \end{equation}
 or, at criticality in finite volume, $\std(\Delta S)/L \sim \sqrt{\log L}$ when
 $\xi/L$ is held fixed. This scaling scenario should be checked directly against
 the HMC determination of $\xi$.
+
+This derivation also makes clear why exact-reweighting scalability is a much
+stronger requirement than fixed intensive mismatch. To keep
+\begin{equation}
+\std(\Delta S)=O(1)
+\end{equation}
+at fixed $\xi/L$, the amplitude of the local mismatch density must itself
+decrease with volume so as to cancel the growth of the integrated correlator.
+If the root-mean-square local mismatch amplitude is denoted
+$\epsilon(L)\sim \delta \ell_{\mathrm{rms}}(L)$, then the condition
+\begin{equation}
+\epsilon(L)^2 \, V \, \xi^{2y_\star-d}=O(1)
+\end{equation}
+implies
+\begin{equation}
+\epsilon(L)\sim \bigl(V\,\xi^{2y_\star-d}\bigr)^{-1/2}.
+\end{equation}
+At fixed $\xi/L$ this reduces to
+\begin{equation}
+\epsilon(L)\sim L^{-y_\star},
+\end{equation}
+again up to marginal logarithms. For the energy-like case one obtains
+\begin{equation}
+\epsilon(L)\sim L^{-1/\nu},
+\end{equation}
+with logarithmic corrections when $\alpha=0$. In the two-dimensional Ising case
+this becomes suppression at least of order
+\begin{equation}
+\delta \ell_{\mathrm{rms}}(L)\sim \frac{1}{L\sqrt{\log L}},
+\end{equation}
+up to nonuniversal constants and possible subleading corrections. Maintaining
+fixed long-distance physics and maintaining exact reweighting are therefore
+parametrically different goals.
+
+Under the same Gaussian/lognormal approximation used throughout the flow
+literature, one has for $N$ independent flow samples
+\begin{equation}
+\frac{\ESS}{N}\approx e^{-\mathrm{Var}(\Delta S)}.
+\end{equation}
+Therefore the effective-sample fraction scales as
+\begin{equation}
+\log \frac{\ESS}{N}\sim -\,V\,\xi^{2y_\star-d},
+\end{equation}
+or, at fixed $\xi/L$,
+\begin{equation}
+\log \frac{\ESS}{N}\sim -\,L^{2y_\star}.
+\end{equation}
+For the energy-like case this becomes
+\begin{equation}
+\log \frac{\ESS}{N}\sim -\,L^{2/\nu},
+\end{equation}
+again up to logarithmic corrections in marginal cases. In particular, for the
+two-dimensional Ising class one expects
+\begin{equation}
+\log \frac{\ESS}{N}\sim -\,L^2 \log L.
+\end{equation}
+This makes precise the sense in which exact reweighting can become
+parametrically worse than polynomially slowed MCMC dynamics even while the
+learned action remains close to the target in an intensive and physical sense.
 
 An analogous argument applies to the fluctuations of the training gradient.
 Each parameter derivative of the per-configuration loss is itself extensive:
