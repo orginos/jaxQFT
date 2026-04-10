@@ -82,3 +82,14 @@ Each run directory contains:
 - `checkpoint.pkl`
 - `slurm/train.out`
 - `slurm/train.err`
+
+Important:
+
+- the point-specific `mass` and `width` overrides are carried by the generated
+  `job.sbatch` command line
+- `input.toml` is the copied base card, not by itself a complete record of the
+  runtime overrides used by the canonical submitter
+- for the failed `canonical3/w64/L128` rescue, use
+  `L128_uniform_batch64_then_anneal.toml`, which replaces the `16 -> 32 -> 64`
+  ramp with `3000` epochs directly at batch `64`, followed by the original
+  anneal stages

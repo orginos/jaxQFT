@@ -1,5 +1,9 @@
-# label	width	volume	logical_seed	active_seed	reason
+# label	width	volume	logical_seed	active_seed	reason	notes
 canonical2	48	128	1	4	nonfinite_loss_replacement
 canonical2	48	128	2	5	nonfinite_loss_replacement
 canonical2	64	128	0	4	nonfinite_loss_replacement
 canonical2	64	128	2	5	nonfinite_loss_replacement
+canonical3	64	128	0	4	nonfinite_loss_replacement	L128_uniform_batch64_then_anneal
+canonical3	64	128	1	5	nonfinite_loss_replacement	L128_uniform_batch64_then_anneal
+canonical3	64	128	2	6	nonfinite_loss_replacement	L128_uniform_batch64_then_anneal
+canonical3	64	128	3	7	nonfinite_loss_replacement	L128_uniform_batch64_then_anneal

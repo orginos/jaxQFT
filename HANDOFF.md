@@ -69,6 +69,19 @@ Last updated: 2026-04-09
         - `canonical2/w48/L128/s2 -> s5`
         - `canonical2/w64/L128/s0 -> s4`
         - `canonical2/w64/L128/s2 -> s5`
+        - `canonical3/w64/L128/s0 -> s4`
+        - `canonical3/w64/L128/s1 -> s5`
+        - `canonical3/w64/L128/s2 -> s6`
+        - `canonical3/w64/L128/s3 -> s7`
+      - `canonical3/w64/L128` rescue schedule:
+        - tracked config:
+          - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_then_anneal.toml`
+        - schedule:
+          - `3000` epochs at batch `64`, lr `3e-4`
+          - then original anneal stages at epoch ends `5000`, `7000`, `11000`
+      - canonical point-scan resubmission caveat:
+        - the generated `job.sbatch` carries point-specific `--mass` / `--width` overrides
+        - raw `input.toml` alone is not enough to reconstruct a canonical-point run
 - Phi4 HMC NERSC campaign scaffolding:
   - New launch wrapper:
     - `scripts/phi4/run_hmc_phi4.sh`
