@@ -95,6 +95,28 @@ sbatch scripts/phi4/rg_coarse_eta_gaussian_4seed_perlmutter.slurm
 
 after editing the variables at the top of the Slurm script.
 
+For arbitrary regular-qos bundles of `4N` independent flow tasks on `N` nodes,
+use:
+
+```bash
+scripts/phi4/submit_rg_coarse_eta_gaussian_4task_bundle_nersc.sh \
+  --tasks /global/cfs/cdirs/hadron/jaxQFT/runs/phi4/bundles/my_bundle/tasks_in.tsv \
+  --bundle-root /global/cfs/cdirs/hadron/jaxQFT/runs/phi4/bundles/my_bundle \
+  --time 08:00:00
+```
+
+The manifest is tab-separated with a nonzero multiple of 4 non-comment rows.
+The submit helper computes `nodes = task_count / 4`. The first four columns are:
+
+- `task_name`
+- `config`
+- `run_dir`
+- `seed`
+
+Any additional tab-separated columns are passed verbatim to the trainer after
+`--save checkpoint.pkl`. This is where point-specific overrides such as
+`--lam`, `--mass`, and `--width` belong.
+
 ## High-batch continuations
 
 Continuation cards that keep the architecture fixed and only extend the
