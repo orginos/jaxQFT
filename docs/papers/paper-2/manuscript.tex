@@ -432,6 +432,59 @@ in two dimensions, or equivalently $\std(\Delta S)/\sqrt{V}$. Existing
 numerical evidence already suggests that this quantity is much more stable under
 volume scaling than $\std(\Delta S)$ itself.
 
+For physically relevant scaling tests, however, the comparison should
+ultimately be organized at approximately fixed $\xi/L$, not at fixed bare
+couplings. The reason is that in a finite-size scaling regime the natural
+continuum-oriented notion of ``same physics'' is to keep the ratio of the
+correlation length to the box size approximately constant while the volume is
+varied. The observed $L$-scaling of $\std(\Delta S)/L$ should therefore be
+interpreted in that setting.
+
+This point also suggests a possible connection to standard critical
+phenomenology. Writing the mismatch as a sum of local terms,
+\begin{equation}
+\Delta S(\phi)=\sum_x \delta \ell_x(\phi),
+\end{equation}
+one has
+\begin{equation}
+\mathrm{Var}(\Delta S)=\sum_{x,y}
+\langle \delta \ell_x \delta \ell_y\rangle_c
+=
+V\sum_r C_{\delta \ell}(r).
+\end{equation}
+Away from criticality, the integrated correlator $\sum_r C_{\delta \ell}(r)$ is
+finite, so $\std(\Delta S)\propto L$ in two dimensions and
+$\std(\Delta S)/L$ is genuinely intensive. Near criticality, however, the
+integrated correlator can acquire a critical enhancement. For a $Z_2$-symmetric
+ansatz, the dominant overlap of $\delta \ell$ should lie in the even sector and
+is plausibly energy-like. In that case one expects the critical enhancement of
+$\std(\Delta S)/L$ to be controlled by the same susceptibility that governs the
+specific heat. For the two-dimensional Ising universality class, where
+$\alpha=0$ and $\nu=1$, this suggests a logarithmic growth,
+\begin{equation}
+\frac{\std(\Delta S)}{L}\sim \sqrt{\log \xi},
+\end{equation}
+or, at criticality in finite volume, $\std(\Delta S)/L \sim \sqrt{\log L}$ when
+$\xi/L$ is held fixed. This scaling scenario should be checked directly against
+the HMC determination of $\xi$.
+
+An analogous argument applies to the fluctuations of the training gradient.
+Each parameter derivative of the per-configuration loss is itself extensive:
+\begin{equation}
+g_a(\phi)=\partial_{\theta_a}\mathcal L(\phi;\theta)=\sum_x O_a(x).
+\end{equation}
+Therefore
+\begin{equation}
+\mathrm{Var}(g_a)=V\sum_r C_a(r),
+\end{equation}
+with $C_a(r)=\langle O_a(0)O_a(r)\rangle_c$. Away from criticality,
+$\std(g_a)\sim \sqrt{V}$ while the fluctuation of the batch-averaged gradient
+density scales like $(BV)^{-1/2}$ for batch size $B$. Near criticality the same
+integrated-correlator enhancement appears. This suggests that any increase of
+the batch size required for stable optimization near the critical line should be
+interpreted as a physical effect tied to long-distance fluctuations of the
+target theory, not only as an optimizer artifact.
+
 This observation points to a sharper algorithmic question: what is the training
 cost required to reach a fixed value of $\std(\Delta S)/L$ as the volume grows?
 If the answer is polynomial in $V$, then one has strong evidence that the
