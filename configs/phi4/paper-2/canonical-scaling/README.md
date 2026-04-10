@@ -32,12 +32,24 @@ Baseline schedule:
 
 This schedule is intentionally the same for `L = 16, 32, 64, 128`.
 
+Additional fixed-across-volume architecture variant:
+
+- `uniform_c3`
+- same as the baseline uniform model, except `n_cycles = 3`
+- intended label in scan manifests: `w64c3`
+- scientific purpose: isolate the effect of extra per-scale nonlinear depth
+  without changing width, radius, Gaussian subnet, or schedule
+
 ## Config files
 
 - `L16_uniform.toml`
 - `L32_uniform.toml`
 - `L64_uniform.toml`
 - `L128_uniform.toml`
+- `L16_uniform_c3.toml`
+- `L32_uniform_c3.toml`
+- `L64_uniform_c3.toml`
+- `L128_uniform_c3.toml`
 
 ## Checkpoint layout
 
@@ -57,6 +69,19 @@ Example:
 scripts/phi4/run_rg_coarse_eta_gaussian.sh \
   --config configs/phi4/paper-2/canonical-scaling/L128_uniform.toml \
   --workdir runs/phi4/paper-2/canonical-scaling/L128/s7 \
+  --gpu all \
+  -- \
+  --seed 7 \
+  --save checkpoint.pkl
+```
+
+For the deeper fixed-volume variant, use the corresponding `*_uniform_c3.toml`
+card. Example:
+
+```bash
+scripts/phi4/run_rg_coarse_eta_gaussian.sh \
+  --config configs/phi4/paper-2/canonical-scaling/L128_uniform_c3.toml \
+  --workdir runs/phi4/paper-2/canonical-scaling/L128_c3/s7 \
   --gpu all \
   -- \
   --seed 7 \

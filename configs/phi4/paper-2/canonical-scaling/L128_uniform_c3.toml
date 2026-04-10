@@ -1,0 +1,46 @@
+mode = "fresh"
+
+[io]
+save = "ckpts/phi4/paper-2/canonical-scaling/L128/rg_coarse_eta_gauss_L128_uniform_c3_s0.pkl"
+save_every = 1000
+
+[physics]
+L = 128
+lam = 2.4
+mass = -0.4
+
+[model]
+width = 64
+n_cycles = 3
+radius = 1
+eta_gaussian = "level"
+gaussian_radius = 1
+gaussian_width = 64
+terminal_prior = "learned"
+terminal_n_layers = 2
+terminal_width = 64
+output_init_scale = 1e-2
+parity = "sym"
+rg_type = "average"
+log_scale_clip = 5.0
+offdiag_clip = 2.0
+
+[train]
+seed = 0
+
+[schedule.ramp]
+initial_batch = 16
+epochs_per_stage = 1000
+num_doubles = 2
+lr = 3e-4
+
+[schedule.anneal]
+epoch_ends = [5000, 7000, 11000]
+lrs = [1e-4, 3e-5, 1e-5]
+batch = 64
+
+[validation]
+enabled = true
+each_stage = true
+batch = 16
+super = 4

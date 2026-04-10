@@ -1,0 +1,5 @@
+# label	mass	note
+canonical	-0.4	original_canonical
+canonical2	-0.5	closer_to_criticality
+canonical3	-0.585	near_critical
+canonical4	-0.70	broken_phase

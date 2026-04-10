@@ -247,6 +247,15 @@ def load_point_labels(path):
     return labels
 
 
+def normalize_canonical_arch_tag(value):
+    token = str(value).strip()
+    if not token:
+        raise ValueError("Empty canonical-point architecture tag")
+    if token.startswith("w"):
+        return token
+    return "w{}".format(token)
+
+
 def load_canonical_point_seed_overrides(path):
     overrides = {}
     if not path.exists():
@@ -254,16 +263,16 @@ def load_canonical_point_seed_overrides(path):
     for fields in iter_fields(path):
         if len(fields) < 5:
             raise ValueError(
-                "Expected at least 5 columns in {}: label width volume logical_seed active_seed".format(
+                "Expected at least 5 columns in {}: label arch volume logical_seed active_seed".format(
                     path
                 )
             )
         label = fields[0]
-        width = int(fields[1])
+        arch_tag = normalize_canonical_arch_tag(fields[1])
         volume = int(fields[2])
         logical_seed = int(fields[3])
         active_seed = int(fields[4])
-        overrides[(label, width, volume, logical_seed)] = active_seed
+        overrides[(label, arch_tag, volume, logical_seed)] = active_seed
     return overrides
 
 
@@ -318,39 +327,88 @@ def build_expected_runs(repo_root, runs_root):
     canonical_seed_override_path = (
         repo_root / "configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv"
     )
-    point_labels = load_point_labels(
-        repo_root / "configs/phi4/paper-2/canonical-point-scan/points.tsv"
-    )
+    default_points_path = repo_root / "configs/phi4/paper-2/canonical-point-scan/points.tsv"
+    w64c3_points_path = repo_root / "configs/phi4/paper-2/canonical-point-scan/w64c3_points.tsv"
     canonical_seed_overrides = load_canonical_point_seed_overrides(canonical_seed_override_path)
-    widths = [64, 48]
     volumes = [16, 32, 64, 128]
     seeds = [0, 1, 2, 3]
-    final_epoch_by_volume = {
-        volume: parse_schedule_final_epoch(
-            repo_root / f"configs/phi4/paper-2/canonical-scaling/L{volume}_uniform.toml"
+    schedule_epoch_cache = {}
+
+    def final_epoch_for_config(config_path):
+        key = str(config_path)
+        if key not in schedule_epoch_cache:
+            schedule_epoch_cache[key] = parse_schedule_final_epoch(config_path)
+        return schedule_epoch_cache[key]
+
+    canonical_specs = [
+        {
+            "arch_tag": "w64",
+            "point_labels": load_point_labels(default_points_path),
+            "config_for": lambda _label, volume: repo_root
+            / "configs/phi4/paper-2/canonical-scaling/L{}_uniform.toml".format(volume),
+            "source_files": (
+                "configs/phi4/paper-2/canonical-point-scan/points.tsv",
+                "configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv",
+                "scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_campaign_nersc.sh",
+            ),
+        },
+        {
+            "arch_tag": "w48",
+            "point_labels": load_point_labels(default_points_path),
+            "config_for": lambda _label, volume: repo_root
+            / "configs/phi4/paper-2/canonical-scaling/L{}_uniform.toml".format(volume),
+            "source_files": (
+                "configs/phi4/paper-2/canonical-point-scan/points.tsv",
+                "configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv",
+                "scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_campaign_nersc.sh",
+            ),
+        },
+    ]
+    if w64c3_points_path.exists():
+        canonical_specs.append(
+            {
+                "arch_tag": "w64c3",
+                "point_labels": load_point_labels(w64c3_points_path),
+                "config_for": lambda label, volume: (
+                    repo_root
+                    / "configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch64_then_anneal.toml"
+                    if label == "canonical3" and volume == 128
+                    else repo_root
+                    / "configs/phi4/paper-2/canonical-scaling/L{}_uniform_c3.toml".format(volume)
+                ),
+                "source_files": (
+                    "configs/phi4/paper-2/canonical-point-scan/w64c3_points.tsv",
+                    "configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv",
+                    "scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_bundles_nersc.sh",
+                ),
+            }
         )
-        for volume in volumes
-    }
-    for label in point_labels:
-        for width in widths:
+
+    for spec in canonical_specs:
+        arch_tag = spec["arch_tag"]
+        for label in spec["point_labels"]:
             for volume in volumes:
+                config_path = spec["config_for"](label, volume)
+                expected_epoch = final_epoch_for_config(config_path)
                 for logical_seed in seeds:
                     active_seed = canonical_seed_overrides.get(
-                        (label, width, volume, logical_seed),
+                        (label, arch_tag, volume, logical_seed),
                         logical_seed,
                     )
                     run_dir = (
                         runs_root
                         / "canonical-point-scan"
                         / label
-                        / f"w{width}"
-                        / f"L{volume}"
-                        / f"s{active_seed}"
+                        / arch_tag
+                        / "L{}".format(volume)
+                        / "s{}".format(active_seed)
                     )
-                    run_key = f"{label}/w{width}/L{volume}/s{active_seed}"
-                    logical_run_key = f"{label}/w{width}/L{volume}/s{logical_seed}"
-                    job_name = f"phi4-{label}-w{width}-L{volume}-s{active_seed}"
-                    logical_job_name = f"phi4-{label}-w{width}-L{volume}-s{logical_seed}"
+                    run_key = "{}/{}/L{}/s{}".format(label, arch_tag, volume, active_seed)
+                    logical_run_key = "{}/{}/L{}/s{}".format(label, arch_tag, volume, logical_seed)
+                    job_name = "phi4-{}-{}-L{}-s{}".format(label, arch_tag, volume, active_seed)
+                    logical_job_name = "phi4-{}-{}-L{}-s{}".format(
+                        label, arch_tag, volume, logical_seed
+                    )
                     expected.append(
                         ExpectedRun(
                             campaign_id="canonical_point_scan",
@@ -360,12 +418,8 @@ def build_expected_runs(repo_root, runs_root):
                             job_name=job_name,
                             run_dir=run_dir,
                             completion_kind="flow_checkpoint",
-                            source_files=(
-                                "configs/phi4/paper-2/canonical-point-scan/points.tsv",
-                                "configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv",
-                                "scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_campaign_nersc.sh",
-                            ),
-                            expected_epoch=final_epoch_by_volume[volume],
+                            source_files=spec["source_files"],
+                            expected_epoch=expected_epoch,
                             logical_run_key=logical_run_key,
                             logical_job_name=logical_job_name,
                         )

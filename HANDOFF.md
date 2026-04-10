@@ -26,6 +26,41 @@ Last updated: 2026-04-10
       learned trivializing flows, NF gradient estimators at criticality,
       neural-MCMC autocorrelation analysis, and generic large-batch scaling
     - a dedicated BibTeX file for those references
+- Canonical fixed-architecture depth variant:
+  - New repo-tracked base cards for a deeper uniform architecture:
+    - `configs/phi4/paper-2/canonical-scaling/L16_uniform_c3.toml`
+    - `configs/phi4/paper-2/canonical-scaling/L32_uniform_c3.toml`
+    - `configs/phi4/paper-2/canonical-scaling/L64_uniform_c3.toml`
+    - `configs/phi4/paper-2/canonical-scaling/L128_uniform_c3.toml`
+  - Definition:
+    - same as the canonical `w64` baseline, but `n_cycles = 3`
+    - intended architecture label in point-scan manifests: `w64c3`
+  - Scientific purpose:
+    - isolate the effect of additional per-scale nonlinear depth without
+      changing width, radius, Gaussian subnet, or schedule
+- Canonical point-scan bundled `w64c3` launch scaffolding:
+  - New tracked point list:
+    - `configs/phi4/paper-2/canonical-point-scan/w64c3_points.tsv`
+  - New rescue card:
+    - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch64_then_anneal.toml`
+  - New bundled submitter:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_bundles_nersc.sh`
+  - Scope:
+    - treat `w64c3` as a canonical-point architecture family under:
+      - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan/<point>/w64c3/L<L>/s<seed>/`
+    - bundled submission uses one regular-qos Slurm job per common volume `L`
+    - each bundle contains all point/seed combinations for that `L`
+    - with points:
+      - `canonical`
+      - `canonical2`
+      - `canonical3`
+      - `canonical4`
+    - and seeds `0,1,2,3`, this is `16` tasks = `4` nodes per volume bundle
+  - Schedule policy:
+    - use the normal `*_uniform_c3.toml` cards everywhere except:
+      - `canonical3/L128`
+    - `canonical3/L128` uses the batch-64-from-start rescue card mirroring the
+      earlier `w64` recovery logic
 - Paper-2 draft update:
   - `docs/papers/paper-2/manuscript.tex`
   - Added the current critical-scaling interpretation of the intensive mismatch
@@ -54,8 +89,10 @@ Last updated: 2026-04-10
     - read-only status aggregation for the current phi4 NERSC campaigns
     - reads tracked repo inputs:
       - `configs/phi4/paper-2/canonical-point-scan/points.tsv`
+      - `configs/phi4/paper-2/canonical-point-scan/w64c3_points.tsv`
       - `configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv`
       - `configs/phi4/paper-2/canonical-scaling/L*_uniform.toml`
+      - `configs/phi4/paper-2/canonical-scaling/L*_uniform_c3.toml`
       - `configs/phi4/paper-2/hmc-g2-scan/refined_g2_points.tsv`
       - `configs/phi4/paper-2/hmc-g2-scan/tuning_grid_L512.tsv`
       - `configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv`
@@ -253,7 +290,7 @@ Last updated: 2026-04-10
       - `L = 16, 32, 64, 128`
       - seeds `0,1,2,3`
     - runtime layout:
-      - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan/<point>/w<width>/L<L>/s<seed>/`
+      - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan/<point>/<arch>/L<L>/s<seed>/`
     - implementation detail:
       - the campaign uses the tracked `L*_uniform.toml` cards as the base configs
       - `mass` and `width` are overridden on the CLI so the copied `input.toml` in each run dir is the localized record of the exact job

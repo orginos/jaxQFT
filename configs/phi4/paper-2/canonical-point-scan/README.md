@@ -21,6 +21,32 @@ Only two knobs are changed in this scan:
 - `physics.mass` (`g2`)
 - `model.width`
 
+An additional fixed-across-volume architecture variant is now available in the
+repo cards:
+
+- `w64c3`: `width = 64`, `n_cycles = 3`, `radius = 1`
+
+This variant is not part of the original width-only submitter. It should be
+treated as a separate architecture family using the dedicated base cards:
+
+- `configs/phi4/paper-2/canonical-scaling/L16_uniform_c3.toml`
+- `configs/phi4/paper-2/canonical-scaling/L32_uniform_c3.toml`
+- `configs/phi4/paper-2/canonical-scaling/L64_uniform_c3.toml`
+- `configs/phi4/paper-2/canonical-scaling/L128_uniform_c3.toml`
+- `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch64_then_anneal.toml`
+
+For the bundled `w64c3` campaign, use the dedicated point list:
+
+- `configs/phi4/paper-2/canonical-point-scan/w64c3_points.tsv`
+
+This list includes the original canonical point in addition to the shifted
+near-critical and broken-phase points:
+
+- `canonical`: `g2 = -0.4`
+- `canonical2`: `g2 = -0.5`
+- `canonical3`: `g2 = -0.585`
+- `canonical4`: `g2 = -0.70`
+
 ## Physics Points
 
 See `points.tsv` for the tracked point list. The current campaign uses:
@@ -39,6 +65,7 @@ Interpretation:
 
 - `w64`: original canonical transport width
 - `w48`: cheaper width-only variant
+- `w64c3`: same width as `w64`, but with one extra transport cycle per level
 
 The Gaussian/terminal subnet widths remain at `64` so this scan isolates the
 effect of changing the main transport-map capacity.
@@ -63,6 +90,15 @@ Use:
 scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_campaign_nersc.sh
 ```
 
+For the bundled `w64c3` family, use:
+
+```bash
+scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_bundles_nersc.sh
+```
+
+This submitter groups tasks by common volume and emits one regular-qos bundle
+per `L`, with one task per point/seed combination.
+
 All runtime products go under:
 
 ```text
@@ -72,8 +108,14 @@ All runtime products go under:
 with layout
 
 ```text
-<point>/w<width>/L<L>/s<seed>/
+<point>/<arch>/L<L>/s<seed>/
 ```
+
+where `<arch>` is one of:
+
+- `w64`
+- `w48`
+- `w64c3`
 
 Each run directory contains:
 
@@ -93,3 +135,5 @@ Important:
   `L128_uniform_batch64_then_anneal.toml`, which replaces the `16 -> 32 -> 64`
   ramp with `3000` epochs directly at batch `64`, followed by the original
   anneal stages
+- for the analogous bundled `w64c3` launch, `canonical3/L128` uses
+  `L128_uniform_c3_batch64_then_anneal.toml`
