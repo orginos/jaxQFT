@@ -826,6 +826,9 @@ def classify_run(
         notes.append("bundle_jobs={}".format(",".join(bundle_job_names)))
     if bundle_task_names:
         notes.append("bundle_task_names={}".format(",".join(bundle_task_names)))
+    if bundle_job_names and live_states:
+        acct_record = None
+        acct_state = ""
 
     if complete:
         status = "done"
