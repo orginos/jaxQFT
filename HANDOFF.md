@@ -2913,6 +2913,10 @@ Last updated: 2026-04-10
   - `L=512` tuning `b16 nmd10`, `1000` measurements: elapsed `00:00:56`
   - `L=256` production baseline, `10000` measurements: elapsed `00:01:56`
   - the new bundled `L=512` submitter therefore defaults to `02:00:00`, which is conservative
+- `scripts/phi4/status_nersc_campaigns.py` now understands replacement bundle manifests:
+  - it scans bundle `tasks.tsv` plus bundle `job.sbatch`
+  - maps bundle jobs back onto the underlying run directories
+  - reports rebundled pending/running tasks as `pending`/`running` instead of treating the canceled original shared jobs as terminal failures
 
 ## Priority Backlog
 1. Replace the phase-3 exact dense DD boundary correction with the paper-faithful polynomial/multiboson correction, keeping the current DD theory interface stable.

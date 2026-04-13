@@ -106,6 +106,14 @@ class ExpectedRun(object):
         self.logical_job_name = logical_job_name or job_name
 
 
+class BundleTaskRecord(object):
+    def __init__(self, bundle_root, bundle_job_name, task_name, run_dir):
+        self.bundle_root = bundle_root
+        self.bundle_job_name = bundle_job_name
+        self.task_name = task_name
+        self.run_dir = run_dir
+
+
 class _MissingPickleGlobal(object):
     def __init__(self, *args, **kwargs):
         self._pickle_stub_args = args
@@ -142,6 +150,21 @@ def parse_timestamp(value):
         return parsed
     except ValueError:
         return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def slurm_record_sort_key(record):
+    return (
+        parse_timestamp(record.end),
+        parse_timestamp(record.start),
+        int(record.job_id) if record.job_id.isdigit() else -1,
+    )
+
+
+def choose_latest_record(records):
+    filtered = [record for record in records if record is not None]
+    if not filtered:
+        return None
+    return max(filtered, key=slurm_record_sort_key)
 
 
 def parse_args():
@@ -661,19 +684,58 @@ def query_sacct(user, days):
         if current is None:
             latest_by_name[record.job_name] = record
             continue
-        current_key = (
-            parse_timestamp(current.end),
-            parse_timestamp(current.start),
-            int(current.job_id) if current.job_id.isdigit() else -1,
-        )
-        record_key = (
-            parse_timestamp(record.end),
-            parse_timestamp(record.start),
-            int(record.job_id) if record.job_id.isdigit() else -1,
-        )
+        current_key = slurm_record_sort_key(current)
+        record_key = slurm_record_sort_key(record)
         if record_key >= current_key:
             latest_by_name[record.job_name] = record
     return latest_by_name, warnings
+
+
+def parse_bundle_job_name(sbatch_path):
+    if not sbatch_path.exists():
+        return ""
+    for raw_line in sbatch_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("#SBATCH --job-name="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def parse_bundle_run_dir(fields):
+    if len(fields) < 2:
+        return None
+    if len(fields) >= 3 and fields[1].endswith(".toml"):
+        return fields[2]
+    return fields[1]
+
+
+def load_bundle_task_index(runs_root):
+    bundle_tasks_by_run_dir = defaultdict(list)
+    for tasks_file in runs_root.rglob("tasks.tsv"):
+        if not any(part.startswith("_bundles") for part in tasks_file.parts):
+            continue
+        bundle_root = tasks_file.parent
+        bundle_job_name = parse_bundle_job_name(bundle_root / "job.sbatch")
+        if not bundle_job_name:
+            continue
+        for raw_line in tasks_file.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            run_dir = parse_bundle_run_dir(fields)
+            if not run_dir:
+                continue
+            task_name = fields[0]
+            bundle_tasks_by_run_dir[run_dir].append(
+                BundleTaskRecord(
+                    bundle_root=str(bundle_root),
+                    bundle_job_name=bundle_job_name,
+                    task_name=task_name,
+                    run_dir=run_dir,
+                )
+            )
+    return bundle_tasks_by_run_dir
 
 
 def checkpoint_epoch(path):
@@ -719,6 +781,7 @@ def classify_run(
     run,
     live_by_name,
     latest_acct,
+    bundle_tasks_by_run_dir,
 ):
     complete, missing_artifacts, notes, epoch = inspect_artifacts(run)
     if run.logical_run_key != run.run_key:
@@ -728,11 +791,36 @@ def classify_run(
                 run.run_key.rsplit("/s", 1)[-1],
             )
         )
-    live_records = live_by_name.get(run.job_name, [])
+    bundle_tasks = bundle_tasks_by_run_dir.get(str(run.run_dir), [])
+    bundle_job_names = sorted({task.bundle_job_name for task in bundle_tasks})
+    bundle_task_names = sorted({task.task_name for task in bundle_tasks})
+    bundle_live_records = []
+    bundle_acct_records = []
+    for bundle_job_name in bundle_job_names:
+        bundle_live_records.extend(live_by_name.get(bundle_job_name, []))
+        acct_record = latest_acct.get(bundle_job_name)
+        if acct_record is not None:
+            bundle_acct_records.append(acct_record)
+
+    live_records = list(live_by_name.get(run.job_name, []))
+    live_records.extend(bundle_live_records)
+    dedup_live = {}
+    for record in live_records:
+        dedup_live[(record.job_id, record.job_name, record.state, record.source)] = record
+    live_records = sorted(dedup_live.values(), key=lambda record: (record.job_name, record.job_id))
     live_states = sorted({record.state for record in live_records})
     live_job_ids = [record.job_id for record in live_records]
-    acct_record = latest_acct.get(run.job_name)
+    original_acct_record = latest_acct.get(run.job_name)
+    if bundle_job_names and bundle_live_records and not bundle_acct_records:
+        acct_record = None
+    else:
+        acct_record = choose_latest_record([original_acct_record] + bundle_acct_records)
     acct_state = acct_record.state if acct_record else ""
+
+    if bundle_job_names:
+        notes.append("bundle_jobs={}".format(",".join(bundle_job_names)))
+    if bundle_task_names:
+        notes.append("bundle_task_names={}".format(",".join(bundle_task_names)))
 
     if complete:
         status = "done"
@@ -770,6 +858,8 @@ def classify_run(
         "expected_epoch": run.expected_epoch,
         "live_job_ids": live_job_ids,
         "live_states": live_states,
+        "bundle_job_names": bundle_job_names,
+        "bundle_task_names": bundle_task_names,
         "latest_sacct": (
             {
                 "job_id": acct_record.job_id,
@@ -858,6 +948,11 @@ def render_text(report, max_examples):
                         "      replacement: "
                         f"{example['logical_run_key']} -> {example['run_key']}"
                     )
+                if example.get("bundle_job_names"):
+                    lines.append(
+                        "      bundle_jobs: "
+                        f"{', '.join(example['bundle_job_names'])}"
+                    )
                 if example["missing_artifacts"]:
                     lines.append(
                         f"      missing: {', '.join(example['missing_artifacts'])}"
@@ -899,10 +994,13 @@ def main():
     if not args.no_slurm and not args.no_sacct:
         latest_acct, acct_warnings = query_sacct(slurm_user, args.sacct_days)
         warnings.extend(acct_warnings)
+    bundle_tasks_by_run_dir = load_bundle_task_index(runs_root)
 
     entries_by_campaign = defaultdict(list)
     for run in expected_runs:
-        entries_by_campaign[run.campaign_id].append(classify_run(run, live_by_name, latest_acct))
+        entries_by_campaign[run.campaign_id].append(
+            classify_run(run, live_by_name, latest_acct, bundle_tasks_by_run_dir)
+        )
 
     campaign_ids_in_order = [
         "canonical_point_scan",
