@@ -811,10 +811,15 @@ def classify_run(
     live_states = sorted({record.state for record in live_records})
     live_job_ids = [record.job_id for record in live_records]
     original_acct_record = latest_acct.get(run.job_name)
-    if bundle_job_names and bundle_live_records and not bundle_acct_records:
-        acct_record = None
+    if bundle_job_names:
+        if bundle_live_records:
+            acct_record = choose_latest_record(bundle_acct_records)
+        elif bundle_acct_records:
+            acct_record = choose_latest_record(bundle_acct_records)
+        else:
+            acct_record = original_acct_record
     else:
-        acct_record = choose_latest_record([original_acct_record] + bundle_acct_records)
+        acct_record = original_acct_record
     acct_state = acct_record.state if acct_record else ""
 
     if bundle_job_names:
