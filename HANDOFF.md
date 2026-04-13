@@ -2858,6 +2858,11 @@ Last updated: 2026-04-10
   - `scripts/phi4/submit_hmc_phi4_extra_stats_campaign_nersc.sh`
 - Dedicated `L=512` tuning:
   - `scripts/phi4/submit_hmc_phi4_l512_tuning_campaign_nersc.sh`
+- Generic regular-qos HMC bundler:
+  - `scripts/phi4/hmc_phi4_bundle_perlmutter.slurm`
+  - `scripts/phi4/submit_hmc_phi4_bundle_nersc.sh`
+- Dedicated bundled `L=512` production submitter:
+  - `scripts/phi4/submit_hmc_phi4_l512_bundled_campaign_nersc.sh`
 
 ### Updated Submitter Behavior
 - `scripts/phi4/submit_hmc_phi4_tuning_campaign_nersc.sh`
@@ -2882,6 +2887,32 @@ Last updated: 2026-04-10
 ### Notes
 - HMC still does **not** checkpoint/resume; failures require rerun from scratch.
 - For future large-volume finite-size scaling, prefer combining independent replica runs offline rather than extending a single run.
+- `L=256` refined near-critical scan uses:
+  - `configs/phi4/paper-2/hmc-g2-scan/refined_g2_points.tsv`
+  - masses `-0.592, -0.595, -0.597, -0.598, -0.599, -0.600, -0.602`
+  - one stream per mass at `batch=16`, `nmd=12`, `nmeas=10000`
+  - raw sample count per mass: `16 * 10000 = 160000`
+- `L=256` broad extra-stat scan uses:
+  - `configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv`
+  - 13 masses from `-0.4` through `-0.80`
+  - one baseline stream plus `7` extra replicas per mass
+  - total raw sample count per mass: `8 * 16 * 10000 = 1280000`
+- `L=512` tuning currently favors:
+  - `integrator=forcegrad`
+  - `batch_size=16`
+  - `nmd=10`
+  - acceptance `0.9876875` at the tuned near-critical point
+- `L=512` production plan now mirrors the full `L=256` broad scan:
+  - `configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv`
+  - `13` masses
+  - `8` total streams per mass
+  - `104` total HMC tasks
+  - default bundling: `16` tasks per regular-qos submission (`4` nodes per full bundle)
+  - this yields `6` full `4`-node bundles plus `1` final `2`-node bundle
+- Walltime calibration from completed Perlmutter jobs:
+  - `L=512` tuning `b16 nmd10`, `1000` measurements: elapsed `00:00:56`
+  - `L=256` production baseline, `10000` measurements: elapsed `00:01:56`
+  - the new bundled `L=512` submitter therefore defaults to `02:00:00`, which is conservative
 
 ## Priority Backlog
 1. Replace the phase-3 exact dense DD boundary correction with the paper-faithful polynomial/multiboson correction, keeping the current DD theory interface stable.

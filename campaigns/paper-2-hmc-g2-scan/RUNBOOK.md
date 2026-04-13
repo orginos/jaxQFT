@@ -103,6 +103,21 @@ Use the slowest relevant observable as the decision criterion:
 - large runtime data stays under the NERSC `runs/` and `data/` roots
 - only curated summaries, small JSONs, and publication figures are copied back into the repo when needed
 
+## Regular-Queue Bundling
+- For large-volume HMC jobs on Perlmutter, prefer regular-qos node bundles over a large backlog of shared-qos single-GPU jobs.
+- Use:
+  - `scripts/phi4/submit_hmc_phi4_bundle_nersc.sh`
+  - `scripts/phi4/hmc_phi4_bundle_perlmutter.slurm`
+- Each bundle launches one independent HMC stream per GPU.
+- Tasks are packed at up to `4` per node; the final node may be partially filled if the task count is not a multiple of `4`.
+- Dedicated `L=512` bundled production helper:
+  - `scripts/phi4/submit_hmc_phi4_l512_bundled_campaign_nersc.sh`
+- Default `L=512` bundled production policy:
+  - broad `13`-point `g2` scan from `configs/phi4/paper-2/hmc-g2-scan/g2_points.tsv`
+  - `8` total streams per mass to match the `L=256` broad-scan statistics
+  - tuned settings `integrator=forcegrad`, `batch_size=16`, `nmd=10`
+  - default bundle size `16` tasks (`4` nodes) to avoid the queue latency of a single `26`-node job
+
 ## Immediate Next Physics Step
 Implement and test locally:
 1. HMC histories with `m`, `|m|`, `m^2`, `m^4`, `chi_m`, `C2p_x`, `C2p_y`
