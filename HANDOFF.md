@@ -53,6 +53,11 @@ Last updated: 2026-04-14
     - `canonical/w64/L128/control_s0`
     - `canonical3/w64/L128/repair_s0`
     - `canonical4/w64/L64/repair_s0`
+  - Control-point note:
+    - `canonical/w64/L128/control_s0` uses the tracked base card
+      `configs/phi4/paper-2/canonical-scaling/L128_uniform.toml` with
+      explicit `--lam 2.4 --mass -0.4 --width 64`, because there is no
+      existing production run directory for `canonical/w64/L128/s0`
   - Runtime root:
     - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-debug`
   - Default bundle policy:
