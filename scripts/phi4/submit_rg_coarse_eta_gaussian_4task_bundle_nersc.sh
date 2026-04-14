@@ -6,20 +6,19 @@ usage() {
 Usage:
   scripts/phi4/submit_rg_coarse_eta_gaussian_4task_bundle_nersc.sh [options]
 
-Submit a nonzero multiple of 4 RG coarse-eta Gaussian flow tasks as one
+Submit a positive number of RG coarse-eta Gaussian flow tasks as one
 regular-qos Perlmutter bundle, with one independent task per GPU.
 
 Required:
-  --tasks PATH           TSV manifest with a nonzero multiple of 4
-                         non-comment task rows.
+  --tasks PATH           TSV manifest with one or more non-comment task rows.
   --bundle-root PATH     Bundle directory. The script writes:
                          - tasks.tsv (normalized absolute manifest)
                          - job.sbatch
                          - slurm/*.out,*.err,job.log
 
 Behavior:
-  - tasks are packed at 4 tasks per node
-  - node count is computed automatically as task_count / 4
+  - tasks are packed at up to 4 tasks per node
+  - node count is computed automatically as ceil(task_count / 4)
 
 Manifest format:
   Tab-separated fields. The first four columns are required:
@@ -199,12 +198,12 @@ while IFS=$'\t' read -r -a fields || [[ ${#fields[@]} -gt 0 ]]; do
   task_count=$((task_count + 1))
 done < "${tasks_file}"
 
-if [[ ${task_count} -eq 0 || $(( task_count % 4 )) -ne 0 ]]; then
-  echo "This submit helper expects a nonzero multiple of 4 non-comment tasks. Got ${task_count}." >&2
+if [[ ${task_count} -eq 0 ]]; then
+  echo "This submit helper expects one or more non-comment tasks. Got ${task_count}." >&2
   exit 2
 fi
 
-node_count=$(( task_count / 4 ))
+node_count=$(( (task_count + 3) / 4 ))
 
 {
   echo "#!/bin/bash"

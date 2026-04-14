@@ -128,12 +128,12 @@ while IFS=$'\t' read -r -a fields || [[ ${#fields[@]} -gt 0 ]]; do
 done < "${TASKS_FILE}"
 
 task_count="${#TASK_NAMES[@]}"
-if [[ "${task_count}" -eq 0 || $(( task_count % 4 )) -ne 0 ]]; then
-  echo "This launcher expects a nonzero multiple of 4 non-comment tasks. Got ${task_count}." >&2
+if [[ "${task_count}" -eq 0 ]]; then
+  echo "This launcher expects one or more non-comment tasks. Got ${task_count}." >&2
   exit 2
 fi
 
-node_count=$(( task_count / 4 ))
+node_count=$(( (task_count + 3) / 4 ))
 
 echo "  task_count=${task_count}"
 echo "  node_count=${node_count}"
@@ -161,7 +161,9 @@ launch_one() {
 
   mkdir -p "${run_dir}/slurm"
   config_copy="${run_dir}/input.toml"
-  cp "${config}" "${config_copy}"
+  if [[ "${config}" != "${config_copy}" ]]; then
+    cp "${config}" "${config_copy}"
+  fi
   task_record="${run_dir}/bundle_task.tsv"
   {
     printf "%s\t%s\t%s\t%s" "${task_name}" "${config}" "${run_dir}" "${seed}"

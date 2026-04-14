@@ -137,3 +137,26 @@ Important:
   anneal stages
 - for the analogous bundled `w64c3` launch, `canonical3/L128` uses
   `L128_uniform_c3_batch64_then_anneal.toml`
+
+## Conservative Repair Wave
+
+The unresolved April 14, 2026 repair wave is tracked in:
+
+- `configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv`
+- `configs/phi4/paper-2/canonical-point-scan/repair-wave-20260414/`
+- `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_conservative_repairs_nersc.sh`
+
+The conservative rescue schedule is:
+
+- `3000` epochs at batch `64`, lr `1e-4`
+- anneal to epoch ends `5000`, `7000`, `11000`
+- anneal lrs `5e-5`, `2e-5`, `1e-5`
+
+Tracked rescue cards:
+
+- `L32_uniform_batch64_lr1e4_then_anneal.toml`
+- `L64_uniform_batch64_lr1e4_then_anneal.toml`
+- `L128_uniform_batch64_lr1e4_then_anneal.toml`
+- `L32_uniform_c3_batch64_lr1e4_then_anneal.toml`
+- `L64_uniform_c3_batch64_lr1e4_then_anneal.toml`
+- `L128_uniform_c3_batch64_lr1e4_then_anneal.toml`

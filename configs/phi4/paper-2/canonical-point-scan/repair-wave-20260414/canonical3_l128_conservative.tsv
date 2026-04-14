@@ -1,0 +1,13 @@
+# task_name	config	run_dir	seed	...
+phi4-canonical3-w48-L128-s4	configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w48/L128/s4	4	--lam	2.4	--mass	-0.585	--width	48
+phi4-canonical3-w48-L128-s5	configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w48/L128/s5	5	--lam	2.4	--mass	-0.585	--width	48
+phi4-canonical3-w48-L128-s6	configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w48/L128/s6	6	--lam	2.4	--mass	-0.585	--width	48
+phi4-canonical3-w48-L128-s7	configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w48/L128/s7	7	--lam	2.4	--mass	-0.585	--width	48
+phi4-canonical3-w64-L128-s8	configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w64/L128/s8	8	--lam	2.4	--mass	-0.585	--width	64
+phi4-canonical3-w64-L128-s9	configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w64/L128/s9	9	--lam	2.4	--mass	-0.585	--width	64
+phi4-canonical3-w64-L128-s10	configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w64/L128/s10	10	--lam	2.4	--mass	-0.585	--width	64
+phi4-canonical3-w64-L128-s11	configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w64/L128/s11	11	--lam	2.4	--mass	-0.585	--width	64
+phi4-canonical3-w64c3-L128-s4	configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w64c3/L128/s4	4	--lam	2.4	--mass	-0.585	--width	64	--n-cycles	3
+phi4-canonical3-w64c3-L128-s5	configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w64c3/L128/s5	5	--lam	2.4	--mass	-0.585	--width	64	--n-cycles	3
+phi4-canonical3-w64c3-L128-s6	configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w64c3/L128/s6	6	--lam	2.4	--mass	-0.585	--width	64	--n-cycles	3
+phi4-canonical3-w64c3-L128-s7	configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch64_lr1e4_then_anneal.toml	runs/phi4/canonical-point-scan/canonical3/w64c3/L128/s7	7	--lam	2.4	--mass	-0.585	--width	64	--n-cycles	3

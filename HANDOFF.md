@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-10
+Last updated: 2026-04-14
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -15,6 +15,52 @@ Last updated: 2026-04-10
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Canonical point-scan conservative repair wave:
+  - Root cause review on Perlmutter:
+    - unresolved canonical logical runs are dominated by
+      `checkpoint.pkl.nonfinite.json` markers, not Slurm timeouts
+    - the only orchestration-only failure in the canonical flow family was the
+      regular rebundle launcher copying `input.toml` onto itself before task
+      start
+  - Bundler fix:
+    - `scripts/phi4/rg_coarse_eta_gaussian_4task_perlmutter.slurm`
+    - the launcher now skips `cp` when the config is already the localized
+      `run_dir/input.toml`
+  - Bundle-helper generalization:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_4task_bundle_nersc.sh`
+    - `scripts/phi4/rg_coarse_eta_gaussian_4task_perlmutter.slurm`
+    - the regular-qos flow bundler now accepts any positive task count and
+      computes nodes as `ceil(task_count / 4)`, so small repair tails can still
+      run as a partially filled regular-node bundle
+  - New conservative rescue cards:
+    - `configs/phi4/paper-2/canonical-point-scan/L32_uniform_batch64_lr1e4_then_anneal.toml`
+    - `configs/phi4/paper-2/canonical-point-scan/L64_uniform_batch64_lr1e4_then_anneal.toml`
+    - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_batch64_lr1e4_then_anneal.toml`
+    - `configs/phi4/paper-2/canonical-point-scan/L32_uniform_c3_batch64_lr1e4_then_anneal.toml`
+    - `configs/phi4/paper-2/canonical-point-scan/L64_uniform_c3_batch64_lr1e4_then_anneal.toml`
+    - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch64_lr1e4_then_anneal.toml`
+  - Conservative schedule:
+    - `3000` epochs at batch `64`, `lr = 1e-4`
+    - anneal at epoch ends `5000`, `7000`, `11000`
+    - anneal lrs `5e-5`, `2e-5`, `1e-5`
+  - Current repair-wave source of truth:
+    - replacement map:
+      - `configs/phi4/paper-2/canonical-point-scan/replacement_seeds.tsv`
+    - tracked bundle manifests:
+      - `configs/phi4/paper-2/canonical-point-scan/repair-wave-20260414/canonical2_l128_tail.tsv`
+      - `configs/phi4/paper-2/canonical-point-scan/repair-wave-20260414/canonical3_l128_conservative.tsv`
+      - `configs/phi4/paper-2/canonical-point-scan/repair-wave-20260414/canonical4_l32_conservative.tsv`
+      - `configs/phi4/paper-2/canonical-point-scan/repair-wave-20260414/canonical4plus_canonical3_l64_conservative.tsv`
+      - `configs/phi4/paper-2/canonical-point-scan/repair-wave-20260414/canonical4_l128_conservative.tsv`
+    - submit helper:
+      - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_conservative_repairs_nersc.sh`
+  - Repair-wave policy:
+    - every still-unresolved logical run is moved to a fresh active seed
+    - the conservative repair wave covers:
+      - `canonical2` remaining `L128` tail
+      - all unresolved `canonical3/L128`
+      - isolated `canonical3` `L64` failures
+      - unresolved `canonical4` at `L = 32, 64, 128`
 - Paper-2 experiment-plan literature note:
   - `docs/papers/paper-2/experiment_plan.md`
   - `docs/papers/paper-2/related_work_refs.bib`
