@@ -173,6 +173,28 @@ def _write_debug_marker(
     print(f"wrote debug nonfinite marker {marker_path}")
 
 
+def _write_debug_summary(
+    path: str,
+    *,
+    status: str,
+    epoch: int,
+    stage_label: str | None,
+    loss_value: float,
+    diag,
+):
+    marker = {
+        "status": status,
+        "epoch": int(epoch),
+        "stage": stage_label if stage_label is not None else "",
+        "loss": _json_ready(loss_value),
+        "diagnostics": _json_ready(diag),
+    }
+    marker_path = f"{path}.debug.summary.json"
+    with open(marker_path, "w") as f:
+        json.dump(marker, f, indent=2)
+    print(f"wrote debug summary {marker_path}")
+
+
 def _print_diag(epoch: int, stage_label: str | None, loss_value: float, diag) -> None:
     stage_text = stage_label if stage_label else "-"
     dq = diag["log_q"]
@@ -380,12 +402,16 @@ def main():
                 active_batch = int(batch_size)
                 active_lr = float(lr)
                 stage_label = schedule[-1]["label"] if schedule else "debug_cap"
+                if stage_label.endswith("_cap"):
+                    cap_label = stage_label
+                else:
+                    cap_label = f"{stage_label}_cap"
                 schedule.append(
                     {
                         "epoch_end": int(target_epochs),
                         "batch": active_batch,
                         "lr": active_lr,
-                        "label": f"{stage_label}_cap",
+                        "label": cap_label,
                     }
                 )
         train_cfg["epochs"] = int(target_epochs)
@@ -524,6 +550,19 @@ def main():
     prod.save_checkpoint(args.save, cfg, weights, opt_state, key, losses, int(target_epochs), arch, train_cfg)
     print(f"saved {args.save}")
     print(f"final loss {losses[-1] if losses else 'n/a'}")
+    if losses:
+        key, k_diag = jax.random.split(key)
+        final_loss, final_diag = _diag_loss_fn(cfg, weights, k_diag, int(train_cfg["batch"]), theory)
+        final_loss_value = float(np.asarray(final_loss))
+        final_stage = schedule[-1]["label"] if schedule else None
+        _write_debug_summary(
+            args.save,
+            status="completed",
+            epoch=int(target_epochs),
+            stage_label=final_stage,
+            loss_value=final_loss_value,
+            diag=final_diag,
+        )
 
 
 if __name__ == "__main__":

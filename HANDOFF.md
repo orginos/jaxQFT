@@ -68,8 +68,25 @@ Last updated: 2026-04-14
     - `debug_checkpoint.pkl`
     - `debug_checkpoint.pkl.lastfinite.pkl`
     - `debug_checkpoint.pkl.debug.nonfinite.json`
+    - `debug_checkpoint.pkl.debug.summary.json`
     - `slurm/train.out`
     - `slurm/train.err`
+  - First-wave caveat:
+    - several reused production `input.toml` files still carry the base
+      `mass = -0.4`; the original wave manifest did not force `--mass` on every
+      such task, so those controls are not trustworthy as physics comparisons
+    - only the tasks that explicitly overrode `--mass`, `--lam`, and `--width`
+      should be interpreted physically
+  - Corrected second-wave manifest:
+    - `configs/phi4/paper-2/canonical-point-scan/debug-wave-20260414-corrected/tasks.tsv`
+  - Corrected second-wave policy:
+    - every task explicitly passes `--lam`, `--mass`, and `--width`
+    - compare:
+      - stable large-volume control
+      - mild large-volume hard point
+      - near-critical original vs repair vs repair+clip
+      - broken-phase original vs repair vs repair+clip
+    - use fresh `_v2` debug run directories to avoid clobbering first-wave output
 - Canonical point-scan conservative repair wave:
   - Root cause review on Perlmutter:
     - unresolved canonical logical runs are dominated by
