@@ -35,6 +35,36 @@ Last updated: 2026-04-14
     - `source /opt/python/jax/bin/activate`
     - `MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py --config configs/phi4/paper-2/canonical-scaling/L16_uniform.toml --max-epochs 2 --diag-every 1 --save /tmp/phi4_rg_debug_smoke.pkl`
     - succeeded and printed per-epoch diagnostics
+- Bundled canonical debug wave launcher:
+  - Debug-only wrapper:
+    - `scripts/phi4/run_rg_coarse_eta_gaussian_debug.sh`
+    - mirrors the production wrapper environment setup, but dispatches:
+      - `scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py`
+    - production trainer remains untouched
+  - Tracked first-wave manifest:
+    - `configs/phi4/paper-2/canonical-point-scan/debug-wave-20260414/tasks.tsv`
+  - Reproducible NERSC submitter:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_debug_wave_nersc.sh`
+  - Wave contents:
+    - `canonical3/w64/L128/orig_s0`
+    - `canonical4/w64/L64/orig_s0`
+    - `canonical4/w64/L32/orig_s0`
+    - `canonical2/w64/L128/orig_s0`
+    - `canonical/w64/L128/control_s0`
+    - `canonical3/w64/L128/repair_s0`
+    - `canonical4/w64/L64/repair_s0`
+  - Runtime root:
+    - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-debug`
+  - Default bundle policy:
+    - one `7`-task regular-qos bundle
+    - `2` nodes via the generic flow bundler
+    - walltime `02:00:00`
+  - Expected per-task artifacts:
+    - `debug_checkpoint.pkl`
+    - `debug_checkpoint.pkl.lastfinite.pkl`
+    - `debug_checkpoint.pkl.debug.nonfinite.json`
+    - `slurm/train.out`
+    - `slurm/train.err`
 - Canonical point-scan conservative repair wave:
   - Root cause review on Perlmutter:
     - unresolved canonical logical runs are dominated by
