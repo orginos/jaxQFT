@@ -15,6 +15,26 @@ Last updated: 2026-04-14
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Separate debug trainer for nonfinite canonical flow failures:
+  - New script:
+    - `scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py`
+  - Purpose:
+    - keep the production trainer unchanged
+    - diagnose `-inf` / `nan` loss failures on hard canonical point-scan runs
+    - dump component diagnostics for:
+      - `log q`
+      - action
+      - latent norms
+      - Jacobian summary
+      - reconstruction error
+      - gradient norm
+  - Quality-of-life flags:
+    - `--max-epochs` to cap a scheduled run early without editing the input card
+    - `--save-last-finite` to keep a checkpoint for the last stable iterate
+  - Local smoke test:
+    - `source /opt/python/jax/bin/activate`
+    - `MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py --config configs/phi4/paper-2/canonical-scaling/L16_uniform.toml --max-epochs 2 --diag-every 1 --save /tmp/phi4_rg_debug_smoke.pkl`
+    - succeeded and printed per-epoch diagnostics
 - Canonical point-scan conservative repair wave:
   - Root cause review on Perlmutter:
     - unresolved canonical logical runs are dominated by
