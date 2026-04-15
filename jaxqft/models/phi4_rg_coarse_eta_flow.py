@@ -23,7 +23,7 @@ from typing import Dict, Sequence, Tuple
 import jax
 import jax.numpy as jnp
 
-from .phi4_mg import init_realnvp, realnvp_f, realnvp_g
+from .phi4_mg import init_realnvp, realnvp_f, realnvp_g, realnvp_g_with_ldj
 from .phi4_rg_cond_flow import (
     _coarse_condition,
     _init_mlp,
@@ -119,6 +119,14 @@ def _triangular_affine_g(eta: Array, log_diag: Array, lower: Array, shift: Array
     return jnp.stack([x1, x2, x3], axis=-1)
 
 
+def _triangular_affine_g_with_ldj(
+    eta: Array, log_diag: Array, lower: Array, shift: Array
+) -> Tuple[Array, Array]:
+    x = _triangular_affine_g(eta, log_diag, lower, shift)
+    ldj_site = log_diag[..., 0] + log_diag[..., 1] + log_diag[..., 2]
+    return x, ldj_site
+
+
 def _triangular_affine_f(eta: Array, log_diag: Array, lower: Array, shift: Array) -> Tuple[Array, Array]:
     e1 = jnp.exp(-log_diag[..., 0])
     e2 = jnp.exp(-log_diag[..., 1])
@@ -155,6 +163,20 @@ def _color_sweep_g(cfg: Dict, cycle_weights: Dict, eta: Array, coarse: Array, le
     return eta_masked + target_mask * eta_new
 
 
+def _color_sweep_g_with_ldj(
+    cfg: Dict, cycle_weights: Dict, eta: Array, coarse: Array, level: int, color: str
+) -> Tuple[Array, Array]:
+    red_mask, black_mask = _site_masks(cfg, level)
+    target_mask = red_mask if color == "red" else black_mask
+    eta_masked = eta * (1.0 - target_mask)
+    context = _eta_context(eta_masked, coarse, cfg["rg_mode"])
+    log_diag, lower, shift = _conditional_params(cfg, cycle_weights[color], context, level)
+    eta_new, ldj_site = _triangular_affine_g_with_ldj(eta, log_diag, lower, shift)
+    eta_out = eta_masked + target_mask * eta_new
+    ldj = jnp.sum(ldj_site * target_mask[..., 0], axis=(1, 2))
+    return eta_out, ldj
+
+
 def _color_sweep_f(
     cfg: Dict, cycle_weights: Dict, eta: Array, coarse: Array, level: int, color: str
 ) -> Tuple[Array, Array]:
@@ -177,6 +199,16 @@ def _eta_flow_g(cfg: Dict, weights: Dict, eta: Array, coarse: Array, level: int)
     return x
 
 
+def _eta_flow_g_with_ldj(cfg: Dict, weights: Dict, eta: Array, coarse: Array, level: int) -> Tuple[Array, Array]:
+    x = eta
+    ldj = jnp.zeros((eta.shape[0],), dtype=eta.dtype)
+    for cycle_weights in weights["levels"][level]:
+        x, ld_red = _color_sweep_g_with_ldj(cfg, cycle_weights, x, coarse, level, "red")
+        x, ld_black = _color_sweep_g_with_ldj(cfg, cycle_weights, x, coarse, level, "black")
+        ldj = ldj + ld_red + ld_black
+    return x, ldj
+
+
 def _eta_flow_f(cfg: Dict, weights: Dict, eta: Array, coarse: Array, level: int) -> Tuple[Array, Array]:
     z = eta
     ldj = jnp.zeros((eta.shape[0],), dtype=eta.dtype)
@@ -192,6 +224,12 @@ def _terminal_flow_g(cfg: Dict, weights: Dict, z: Array) -> Array:
     flat = z.reshape((z.shape[0], 4))
     out = realnvp_g(cfg["terminal_flow_cfg"], weights["terminal_flow"], flat)
     return out.reshape(z.shape)
+
+
+def _terminal_flow_g_with_ldj(cfg: Dict, weights: Dict, z: Array) -> Tuple[Array, Array]:
+    flat = z.reshape((z.shape[0], 4))
+    out, ldj = realnvp_g_with_ldj(cfg["terminal_flow_cfg"], weights["terminal_flow"], flat)
+    return out.reshape(z.shape), ldj
 
 
 def _terminal_flow_f(cfg: Dict, weights: Dict, x: Array) -> Tuple[Array, Array]:

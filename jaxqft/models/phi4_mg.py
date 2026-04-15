@@ -111,6 +111,23 @@ def realnvp_g(cfg: Dict, weights: Dict, z: Array) -> Array:
     return x
 
 
+def realnvp_g_with_ldj(cfg: Dict, weights: Dict, z: Array) -> Tuple[Array, Array]:
+    x = z
+    ldj = jnp.zeros((z.shape[0],), dtype=z.dtype)
+    n_blocks = cfg["masks"].shape[0]
+    for i in range(n_blocks):
+        m = cfg["masks"][i]
+        mi = cfg["masks_inv"][i]
+        xA = x * m
+        s, t = st_apply(weights["st"], cfg["mode_id"], i, xA)
+        s = jnp.tanh(s) * cfg["log_scale_clip"]
+        s = s * mi
+        t = t * mi
+        x = xA + mi * (x * jnp.exp(s) + t)
+        ldj = ldj + jnp.sum(mi * s, axis=1)
+    return x, ldj
+
+
 def realnvp_f(cfg: Dict, weights: Dict, x: Array) -> Tuple[Array, Array]:
     z = x
     ldj = jnp.zeros((x.shape[0],), dtype=x.dtype)

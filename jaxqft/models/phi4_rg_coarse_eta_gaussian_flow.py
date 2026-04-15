@@ -24,10 +24,11 @@ from typing import Dict, Sequence, Tuple
 import jax
 import jax.numpy as jnp
 
-from .phi4_mg import init_realnvp, realnvp_f, realnvp_g
+from .phi4_mg import init_realnvp, realnvp_f, realnvp_g, realnvp_g_with_ldj
 from .phi4_rg_coarse_eta_flow import (
     _eta_flow_f,
     _eta_flow_g,
+    _eta_flow_g_with_ldj,
     _init_local_patch_mlp,
     _local_patch_mlp_apply,
     _make_checkerboard_mask,
@@ -62,6 +63,13 @@ def _triangular_linear_g3(z: Array, log_diag: Array, lower: Array) -> Array:
     return _triangular_affine_g(z, log_diag, lower, shift)
 
 
+def _triangular_linear_g3_with_ldj(z: Array, log_diag: Array, lower: Array) -> Tuple[Array, Array]:
+    shift = jnp.zeros_like(log_diag)
+    x = _triangular_affine_g(z, log_diag, lower, shift)
+    ldj_site = log_diag[..., 0] + log_diag[..., 1] + log_diag[..., 2]
+    return x, ldj_site
+
+
 def _triangular_linear_f3(x: Array, log_diag: Array, lower: Array) -> Tuple[Array, Array]:
     shift = jnp.zeros_like(log_diag)
     return _triangular_affine_f(x, log_diag, lower, shift)
@@ -89,6 +97,14 @@ def _triangular_linear_g4(z: Array, log_diag: Array, lower: Array) -> Array:
     x3 = l31 * z1 + l32 * z2 + d3 * z3
     x4 = l41 * z1 + l42 * z2 + l43 * z3 + d4 * z4
     return jnp.stack([x1, x2, x3, x4], axis=-1)
+
+
+def _triangular_linear_g4_with_ldj(z: Array, log_diag: Array, lower: Array) -> Tuple[Array, Array]:
+    x = _triangular_linear_g4(z, log_diag, lower)
+    ldj = jnp.sum(log_diag, axis=-1)
+    if getattr(ldj, "ndim", 0) == 0:
+        ldj = jnp.full((z.shape[0],), ldj, dtype=z.dtype)
+    return x, ldj
 
 
 def _triangular_linear_f4(x: Array, log_diag: Array, lower: Array) -> Tuple[Array, Array]:
@@ -168,6 +184,13 @@ def _eta_gaussian_g(cfg: Dict, weights: Dict, z: Array, coarse: Array, level: in
     return _triangular_linear_g3(z, log_diag, lower)
 
 
+def _eta_gaussian_g_with_ldj(cfg: Dict, weights: Dict, z: Array, coarse: Array, level: int) -> Tuple[Array, Array]:
+    log_diag, lower = _eta_gaussian_params(cfg, weights, coarse, level)
+    x, ldj_site = _triangular_linear_g3_with_ldj(z, log_diag, lower)
+    ldj = jnp.sum(ldj_site, axis=(1, 2))
+    return x, ldj
+
+
 def _eta_gaussian_f(cfg: Dict, weights: Dict, x: Array, coarse: Array, level: int) -> Tuple[Array, Array]:
     log_diag, lower = _eta_gaussian_params(cfg, weights, coarse, level)
     z, ldj_site = _triangular_linear_f3(x, log_diag, lower)
@@ -194,6 +217,13 @@ def _terminal_gaussian_g(cfg: Dict, weights: Dict, z: Array) -> Array:
     return out.reshape(z.shape)
 
 
+def _terminal_gaussian_g_with_ldj(cfg: Dict, weights: Dict, z: Array) -> Tuple[Array, Array]:
+    flat = z.reshape((z.shape[0], 4))
+    log_diag, lower = _terminal_gaussian_params(cfg, weights)
+    out, ldj = _triangular_linear_g4_with_ldj(flat, log_diag, lower)
+    return out.reshape(z.shape), ldj
+
+
 def _terminal_gaussian_f(cfg: Dict, weights: Dict, x: Array) -> Tuple[Array, Array]:
     flat = x.reshape((x.shape[0], 4))
     log_diag, lower = _terminal_gaussian_params(cfg, weights)
@@ -206,6 +236,13 @@ def _terminal_flow_g(cfg: Dict, weights: Dict, z: Array) -> Array:
     flat = _triangular_linear_g4(flat, *_terminal_gaussian_params(cfg, weights))
     out = realnvp_g(cfg["terminal_flow_cfg"], weights["terminal_flow"], flat)
     return out.reshape(z.shape)
+
+
+def _terminal_flow_g_with_ldj(cfg: Dict, weights: Dict, z: Array) -> Tuple[Array, Array]:
+    flat = z.reshape((z.shape[0], 4))
+    z_mid, ldj_gauss = _triangular_linear_g4_with_ldj(flat, *_terminal_gaussian_params(cfg, weights))
+    out, ldj_flow = realnvp_g_with_ldj(cfg["terminal_flow_cfg"], weights["terminal_flow"], z_mid)
+    return out.reshape(z.shape), ldj_gauss + ldj_flow
 
 
 def _terminal_flow_f(cfg: Dict, weights: Dict, x: Array) -> Tuple[Array, Array]:
@@ -521,6 +558,16 @@ def _rg_coarse_eta_gaussian_g_level(cfg: Dict, weights: Dict, z: Array, level: i
     return _merge_rg(x_coarse, x_fine, cfg["rg_mode"])
 
 
+def _rg_coarse_eta_gaussian_g_level_with_ldj(cfg: Dict, weights: Dict, z: Array, level: int) -> Tuple[Array, Array]:
+    if level >= cfg["depth"] - 1:
+        return _terminal_flow_g_with_ldj(cfg, weights, z)
+    z_coarse, z_fine = _split_rg(z, cfg["rg_mode"])
+    x_coarse, ldj_coarse = _rg_coarse_eta_gaussian_g_level_with_ldj(cfg, weights, z_coarse, level + 1)
+    z_fine, ldj_gauss = _eta_gaussian_g_with_ldj(cfg, weights, z_fine, x_coarse, level)
+    x_fine, ldj_fine = _eta_flow_g_with_ldj(cfg, weights, z_fine, x_coarse, level)
+    return _merge_rg(x_coarse, x_fine, cfg["rg_mode"]), ldj_coarse + ldj_gauss + ldj_fine
+
+
 def _rg_coarse_eta_gaussian_f_level(cfg: Dict, weights: Dict, x: Array, level: int) -> Tuple[Array, Array]:
     if level >= cfg["depth"] - 1:
         return _terminal_flow_f(cfg, weights, x)
@@ -533,6 +580,10 @@ def _rg_coarse_eta_gaussian_f_level(cfg: Dict, weights: Dict, x: Array, level: i
 
 def rg_coarse_eta_gaussian_flow_g_from(cfg: Dict, weights: Dict, z: Array) -> Array:
     return _rg_coarse_eta_gaussian_g_level(cfg, weights, z, 0)
+
+
+def rg_coarse_eta_gaussian_flow_g_with_ldj_from(cfg: Dict, weights: Dict, z: Array) -> Tuple[Array, Array]:
+    return _rg_coarse_eta_gaussian_g_level_with_ldj(cfg, weights, z, 0)
 
 
 def rg_coarse_eta_gaussian_flow_f_from(cfg: Dict, weights: Dict, x: Array) -> Tuple[Array, Array]:
@@ -552,6 +603,11 @@ def rg_coarse_eta_gaussian_flow_log_prob_from(cfg: Dict, weights: Dict, x: Array
     return rg_coarse_eta_gaussian_flow_prior_log_prob(z) + ldj
 
 
+def rg_coarse_eta_gaussian_flow_sample_log_prob_from(cfg: Dict, weights: Dict, z: Array) -> Tuple[Array, Array]:
+    x, ldj_forward = rg_coarse_eta_gaussian_flow_g_with_ldj_from(cfg, weights, z)
+    return x, rg_coarse_eta_gaussian_flow_prior_log_prob(z) - ldj_forward
+
+
 def _split_model(model_or_cfg: Dict, maybe_weights: Dict | None = None):
     if maybe_weights is not None:
         return model_or_cfg, maybe_weights
@@ -565,6 +621,13 @@ def _split_model(model_or_cfg: Dict, maybe_weights: Dict | None = None):
 def rg_coarse_eta_gaussian_flow_g(model_or_cfg: Dict, z: Array, weights: Dict | None = None) -> Array:
     cfg, w = _split_model(model_or_cfg, weights)
     return rg_coarse_eta_gaussian_flow_g_from(cfg, w, z)
+
+
+def rg_coarse_eta_gaussian_flow_g_with_ldj(
+    model_or_cfg: Dict, z: Array, weights: Dict | None = None
+) -> Tuple[Array, Array]:
+    cfg, w = _split_model(model_or_cfg, weights)
+    return rg_coarse_eta_gaussian_flow_g_with_ldj_from(cfg, w, z)
 
 
 def rg_coarse_eta_gaussian_flow_f(model_or_cfg: Dict, x: Array, weights: Dict | None = None) -> Tuple[Array, Array]:
@@ -586,3 +649,10 @@ def rg_coarse_eta_gaussian_flow_prior_sample(
 def rg_coarse_eta_gaussian_flow_log_prob(model_or_cfg: Dict, x: Array, weights: Dict | None = None) -> Array:
     cfg, w = _split_model(model_or_cfg, weights)
     return rg_coarse_eta_gaussian_flow_log_prob_from(cfg, w, x)
+
+
+def rg_coarse_eta_gaussian_flow_sample_log_prob(
+    model_or_cfg: Dict, z: Array, weights: Dict | None = None
+) -> Tuple[Array, Array]:
+    cfg, w = _split_model(model_or_cfg, weights)
+    return rg_coarse_eta_gaussian_flow_sample_log_prob_from(cfg, w, z)

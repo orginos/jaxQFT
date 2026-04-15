@@ -58,7 +58,7 @@ from jaxqft.models.phi4 import Phi4
 from jaxqft.models.phi4_rg_coarse_eta_gaussian_flow import (
     init_rg_coarse_eta_gaussian_flow,
     rg_coarse_eta_gaussian_flow_f,
-    rg_coarse_eta_gaussian_flow_g,
+    rg_coarse_eta_gaussian_flow_g_with_ldj,
     rg_coarse_eta_gaussian_flow_prior_log_prob,
     rg_coarse_eta_gaussian_flow_prior_sample,
 )
@@ -87,43 +87,64 @@ def _safe_summary(arr):
     }
 
 
-def _diag_loss_fn(cfg, weights, key, batch_size, theory):
+def _diag_batch(cfg, weights, key, batch_size, theory, *, loss_path: str = "forward", do_inverse_check: bool = True):
     z_prior = rg_coarse_eta_gaussian_flow_prior_sample(key, cfg, batch_size)
-    x = rg_coarse_eta_gaussian_flow_g(cfg, z_prior, weights)
-    z_inv, ldj = rg_coarse_eta_gaussian_flow_f(cfg, x, weights)
-    prior_lp = rg_coarse_eta_gaussian_flow_prior_log_prob(z_inv)
+    x, ldj_forward = rg_coarse_eta_gaussian_flow_g_with_ldj(cfg, z_prior, weights)
+    prior_lp_forward = rg_coarse_eta_gaussian_flow_prior_log_prob(z_prior)
+    log_q_forward = prior_lp_forward - ldj_forward
     action = theory.action(x)
-    log_q = prior_lp + ldj
-    loss_vec = log_q + action
-    recon = z_inv - z_prior
+    loss_vec_forward = log_q_forward + action
     diag = {
         "z_prior": _safe_summary(z_prior),
-        "z_inv": _safe_summary(z_inv),
         "x": _safe_summary(x),
-        "ldj": _safe_summary(ldj),
-        "prior_log_prob": _safe_summary(prior_lp),
-        "log_q": _safe_summary(log_q),
+        "ldj_forward": _safe_summary(ldj_forward),
+        "prior_log_prob_forward": _safe_summary(prior_lp_forward),
+        "log_q_forward": _safe_summary(log_q_forward),
         "action": _safe_summary(action),
-        "loss_vec": _safe_summary(loss_vec),
-        "z_recon_abs_max": jnp.max(jnp.abs(recon)),
-        "z_recon_rms": jnp.sqrt(jnp.mean(recon * recon)),
+        "loss_vec_forward": _safe_summary(loss_vec_forward),
     }
-    return jnp.mean(loss_vec), diag
+    if do_inverse_check:
+        z_inv, ldj_inverse = rg_coarse_eta_gaussian_flow_f(cfg, x, weights)
+        prior_lp_inverse = rg_coarse_eta_gaussian_flow_prior_log_prob(z_inv)
+        log_q_inverse = prior_lp_inverse + ldj_inverse
+        loss_vec_inverse = log_q_inverse + action
+        recon = z_inv - z_prior
+        diag.update(
+            {
+                "z_inv": _safe_summary(z_inv),
+                "ldj_inverse": _safe_summary(ldj_inverse),
+                "prior_log_prob_inverse": _safe_summary(prior_lp_inverse),
+                "log_q_inverse": _safe_summary(log_q_inverse),
+                "loss_vec_inverse": _safe_summary(loss_vec_inverse),
+                "z_recon_abs_max": jnp.max(jnp.abs(recon)),
+                "z_recon_rms": jnp.sqrt(jnp.mean(recon * recon)),
+            }
+        )
+    if loss_path == "forward":
+        return jnp.mean(loss_vec_forward), diag
+    if loss_path == "inverse":
+        if not do_inverse_check:
+            raise ValueError("inverse loss path requires inverse diagnostics")
+        return jnp.mean(loss_vec_inverse), diag
+    raise ValueError(f"Unsupported loss_path: {loss_path}")
 
 
-def _make_step(cfg, theory, batch_size, lr):
+def _make_step(cfg, theory, batch_size, lr, *, loss_path: str):
     opt = optax.adam(float(lr))
+    if loss_path == "forward":
+        active_loss_fn = prod.loss_fn_forward
+    elif loss_path == "inverse":
+        active_loss_fn = prod.loss_fn_inverse
+    else:
+        raise ValueError(f"Unsupported loss_path: {loss_path}")
 
     @jax.jit
     def step(weights, opt_state, key):
-        (lval, aux), grads = jax.value_and_grad(_diag_loss_fn, argnums=1, has_aux=True)(
-            cfg, weights, key, batch_size, theory
-        )
+        lval, grads = jax.value_and_grad(active_loss_fn, argnums=1)(cfg, weights, key, batch_size, theory)
         updates, next_opt_state = opt.update(grads, opt_state, weights)
         next_weights = optax.apply_updates(weights, updates)
-        aux = dict(aux)
-        aux["grad_norm"] = optax.global_norm(grads)
-        return next_weights, next_opt_state, lval, aux
+        grad_norm = optax.global_norm(grads)
+        return next_weights, next_opt_state, lval, grad_norm
 
     return step, opt
 
@@ -197,9 +218,11 @@ def _write_debug_summary(
 
 def _print_diag(epoch: int, stage_label: str | None, loss_value: float, diag) -> None:
     stage_text = stage_label if stage_label else "-"
-    dq = diag["log_q"]
+    dq = diag["log_q_forward"]
     da = diag["action"]
-    dl = diag["loss_vec"]
+    dl = diag["loss_vec_forward"]
+    z_inv_abs_max = diag.get("z_inv", {}).get("abs_max", jnp.nan)
+    z_recon_abs_max = diag.get("z_recon_abs_max", jnp.nan)
     print(
         "diag"
         f" epoch={epoch}"
@@ -208,10 +231,10 @@ def _print_diag(epoch: int, stage_label: str | None, loss_value: float, diag) ->
         f" logq_mean={float(np.asarray(dq['mean'])):.6g}"
         f" action_mean={float(np.asarray(da['mean'])):.6g}"
         f" loss_finite={float(np.asarray(dl['finite_fraction'])):.3f}"
-        f" z_abs_max={float(np.asarray(diag['z_inv']['abs_max'])):.6g}"
         f" x_abs_max={float(np.asarray(diag['x']['abs_max'])):.6g}"
-        f" ldj_abs_max={float(np.asarray(diag['ldj']['abs_max'])):.6g}"
-        f" z_recon_abs_max={float(np.asarray(diag['z_recon_abs_max'])):.6g}"
+        f" ldj_fwd_abs_max={float(np.asarray(diag['ldj_forward']['abs_max'])):.6g}"
+        f" z_inv_abs_max={float(np.asarray(z_inv_abs_max)):.6g}"
+        f" z_recon_abs_max={float(np.asarray(z_recon_abs_max)):.6g}"
         f" grad_norm={float(np.asarray(diag['grad_norm'])):.6g}"
     )
 
@@ -259,7 +282,20 @@ def main():
     ap.add_argument("--batch", type=int, default=None)
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--loss-path", type=str, default="forward", choices=["forward", "inverse"])
     ap.add_argument("--diag-every", type=int, default=50, help="print diagnostics every N epochs")
+    ap.add_argument(
+        "--inverse-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="run the inverse map during debug diagnostics to monitor reconstruction health",
+    )
+    ap.add_argument(
+        "--max-z-recon-abs",
+        type=float,
+        default=0.0,
+        help="if >0, abort when a diagnostic inverse check exceeds this reconstruction threshold",
+    )
     ap.add_argument(
         "--save-last-finite",
         action=argparse.BooleanOptionalAction,
@@ -384,7 +420,7 @@ def main():
         theory = Phi4([args.L, args.L], args.lam, args.mass, batch_size=batch_size)
         opt_state = optax.adam(lr).init(weights)
 
-    step, _ = _make_step(cfg, theory, batch_size, lr)
+    step, _ = _make_step(cfg, theory, batch_size, lr, loss_path=args.loss_path)
 
     arch = prod._build_arch_from_cfg(cfg, theory)
     train_cfg = {
@@ -392,6 +428,7 @@ def main():
         "batch": int(batch_size),
         "epochs": int(target_epochs),
         "schedule": schedule,
+        "loss_path": str(args.loss_path),
     }
 
     if args.max_epochs > 0:
@@ -427,7 +464,10 @@ def main():
     print(f"  remaining_epochs: {remaining_epochs}")
     print(f"  batch: {batch_size}")
     print(f"  lr: {lr}")
+    print(f"  loss_path: {args.loss_path}")
     print(f"  diag_every: {args.diag_every}")
+    print(f"  inverse_check: {args.inverse_check}")
+    print(f"  max_z_recon_abs: {args.max_z_recon_abs}")
     if args.config:
         print(f"  config: {args.config}")
     if schedule:
@@ -479,17 +519,67 @@ def main():
             stage_batch = int(stage["batch"])
             stage_lr = float(stage["lr"])
             theory = Phi4([arch["L"], arch["L"]], arch["lam"], arch["mass"], batch_size=stage_batch)
-            step, _ = _make_step(cfg, theory, stage_batch, stage_lr)
+            step, _ = _make_step(cfg, theory, stage_batch, stage_lr, loss_path=args.loss_path)
             train_cfg["lr"] = stage_lr
             train_cfg["batch"] = stage_batch
             pbar = tqdm(range(stage_begin, stage_end), desc=f"DebugTrain(RG:{stage['label']})")
             for ep in pbar:
                 key, k = jax.random.split(key)
-                next_weights, next_opt_state, lv, diag = step(weights, opt_state, k)
+                next_weights, next_opt_state, lv, grad_norm = step(weights, opt_state, k)
                 loss_value = float(np.asarray(lv))
-                if args.diag_every > 0 and ((ep + 1) % args.diag_every == 0 or not math.isfinite(loss_value)):
+                diag = None
+                need_diag = args.diag_every > 0 and ((ep + 1) % args.diag_every == 0 or not math.isfinite(loss_value))
+                if need_diag:
+                    _, diag = _diag_batch(
+                        cfg,
+                        weights,
+                        k,
+                        stage_batch,
+                        theory,
+                        loss_path=args.loss_path,
+                        do_inverse_check=args.inverse_check,
+                    )
+                    diag["grad_norm"] = grad_norm
                     _print_diag(ep + 1, stage["label"], loss_value, diag)
+                    if args.max_z_recon_abs > 0.0 and args.inverse_check:
+                        z_recon_abs = float(np.asarray(diag.get("z_recon_abs_max", jnp.nan)))
+                        if math.isfinite(z_recon_abs) and z_recon_abs > float(args.max_z_recon_abs):
+                            if args.save_last_finite and args.save:
+                                prod.save_checkpoint(
+                                    f"{args.save}.lastfinite.pkl",
+                                    cfg,
+                                    weights,
+                                    opt_state,
+                                    key,
+                                    losses,
+                                    last_finite_epoch,
+                                    arch,
+                                    train_cfg,
+                                )
+                            _write_debug_summary(
+                                args.save,
+                                status="healthcheck_abort",
+                                epoch=ep + 1,
+                                stage_label=stage["label"],
+                                loss_value=loss_value,
+                                diag=diag,
+                            )
+                            raise RuntimeError(
+                                f"Inverse health check exceeded at epoch {ep + 1} stage={stage['label']}: "
+                                f"z_recon_abs_max={z_recon_abs}"
+                            )
                 if not math.isfinite(loss_value):
+                    if diag is None:
+                        _, diag = _diag_batch(
+                            cfg,
+                            weights,
+                            k,
+                            stage_batch,
+                            theory,
+                            loss_path=args.loss_path,
+                            do_inverse_check=args.inverse_check,
+                        )
+                        diag["grad_norm"] = grad_norm
                     if args.save_last_finite and args.save:
                         prod.save_checkpoint(
                             f"{args.save}.lastfinite.pkl",
@@ -520,11 +610,60 @@ def main():
         pbar = tqdm(range(start_epoch, int(target_epochs)), desc="DebugTrain(RG)")
         for ep in pbar:
             key, k = jax.random.split(key)
-            next_weights, next_opt_state, lv, diag = step(weights, opt_state, k)
+            next_weights, next_opt_state, lv, grad_norm = step(weights, opt_state, k)
             loss_value = float(np.asarray(lv))
-            if args.diag_every > 0 and ((ep + 1) % args.diag_every == 0 or not math.isfinite(loss_value)):
+            diag = None
+            need_diag = args.diag_every > 0 and ((ep + 1) % args.diag_every == 0 or not math.isfinite(loss_value))
+            if need_diag:
+                _, diag = _diag_batch(
+                    cfg,
+                    weights,
+                    k,
+                    int(train_cfg["batch"]),
+                    theory,
+                    loss_path=args.loss_path,
+                    do_inverse_check=args.inverse_check,
+                )
+                diag["grad_norm"] = grad_norm
                 _print_diag(ep + 1, None, loss_value, diag)
+                if args.max_z_recon_abs > 0.0 and args.inverse_check:
+                    z_recon_abs = float(np.asarray(diag.get("z_recon_abs_max", jnp.nan)))
+                    if math.isfinite(z_recon_abs) and z_recon_abs > float(args.max_z_recon_abs):
+                        if args.save_last_finite and args.save:
+                            prod.save_checkpoint(
+                                f"{args.save}.lastfinite.pkl",
+                                cfg,
+                                weights,
+                                opt_state,
+                                key,
+                                losses,
+                                last_finite_epoch,
+                                arch,
+                                train_cfg,
+                            )
+                        _write_debug_summary(
+                            args.save,
+                            status="healthcheck_abort",
+                            epoch=ep + 1,
+                            stage_label=None,
+                            loss_value=loss_value,
+                            diag=diag,
+                        )
+                        raise RuntimeError(
+                            f"Inverse health check exceeded at epoch {ep + 1}: z_recon_abs_max={z_recon_abs}"
+                        )
             if not math.isfinite(loss_value):
+                if diag is None:
+                    _, diag = _diag_batch(
+                        cfg,
+                        weights,
+                        k,
+                        int(train_cfg["batch"]),
+                        theory,
+                        loss_path=args.loss_path,
+                        do_inverse_check=args.inverse_check,
+                    )
+                    diag["grad_norm"] = grad_norm
                 if args.save_last_finite and args.save:
                     prod.save_checkpoint(
                         f"{args.save}.lastfinite.pkl",
@@ -552,7 +691,15 @@ def main():
     print(f"final loss {losses[-1] if losses else 'n/a'}")
     if losses:
         key, k_diag = jax.random.split(key)
-        final_loss, final_diag = _diag_loss_fn(cfg, weights, k_diag, int(train_cfg["batch"]), theory)
+        final_loss, final_diag = _diag_batch(
+            cfg,
+            weights,
+            k_diag,
+            int(train_cfg["batch"]),
+            theory,
+            loss_path=args.loss_path,
+            do_inverse_check=args.inverse_check,
+        )
         final_loss_value = float(np.asarray(final_loss))
         final_stage = schedule[-1]["label"] if schedule else None
         _write_debug_summary(

@@ -51,6 +51,7 @@ from jaxqft.models.phi4_rg_coarse_eta_gaussian_flow import (
     rg_coarse_eta_gaussian_flow_g,
     rg_coarse_eta_gaussian_flow_log_prob,
     rg_coarse_eta_gaussian_flow_prior_sample,
+    rg_coarse_eta_gaussian_flow_sample_log_prob,
 )
 
 
@@ -62,10 +63,16 @@ def tree_to_jax(tree):
     return jax.tree_util.tree_map(lambda x: jnp.asarray(x), tree)
 
 
-def loss_fn(cfg, weights, key, batch_size, theory):
+def loss_fn_inverse(cfg, weights, key, batch_size, theory):
     z = rg_coarse_eta_gaussian_flow_prior_sample(key, cfg, batch_size)
     x = rg_coarse_eta_gaussian_flow_g(cfg, z, weights)
     return jnp.mean(rg_coarse_eta_gaussian_flow_log_prob(cfg, x, weights) + theory.action(x))
+
+
+def loss_fn_forward(cfg, weights, key, batch_size, theory):
+    z = rg_coarse_eta_gaussian_flow_prior_sample(key, cfg, batch_size)
+    x, log_q = rg_coarse_eta_gaussian_flow_sample_log_prob(cfg, z, weights)
+    return jnp.mean(log_q + theory.action(x))
 
 
 def save_checkpoint(path, cfg, weights, opt_state, key, losses, epoch, arch, train_cfg):
@@ -93,13 +100,19 @@ def load_checkpoint(path):
     return payload
 
 
-def validate(cfg, weights, theory, key, batch_size, super_batch, tag):
+def validate(cfg, weights, theory, key, batch_size, super_batch, tag, *, loss_path: str = "forward"):
     diffs = []
     for _ in range(super_batch):
         key, k = jax.random.split(key)
         z = rg_coarse_eta_gaussian_flow_prior_sample(k, cfg, batch_size)
-        x = rg_coarse_eta_gaussian_flow_g(cfg, z, weights)
-        ds = rg_coarse_eta_gaussian_flow_log_prob(cfg, x, weights) + theory.action(x)
+        if loss_path == "forward":
+            x, log_q = rg_coarse_eta_gaussian_flow_sample_log_prob(cfg, z, weights)
+        elif loss_path == "inverse":
+            x = rg_coarse_eta_gaussian_flow_g(cfg, z, weights)
+            log_q = rg_coarse_eta_gaussian_flow_log_prob(cfg, x, weights)
+        else:
+            raise ValueError(f"Unsupported loss_path: {loss_path}")
+        ds = log_q + theory.action(x)
         ds = np.asarray(ds)
         ds = ds[np.isfinite(ds)]
         if ds.size:
@@ -219,6 +232,7 @@ def _load_toml_defaults(path: str, *, cli_resume: str = ""):
     put("batch", train.get("batch"))
     put("lr", train.get("lr"))
     put("seed", train.get("seed"))
+    put("loss_path", train.get("loss_path"))
 
     if "enabled" in validation:
         defaults["validate"] = bool(validation.get("enabled"))
@@ -360,12 +374,18 @@ def _schedule_to_text(values):
     return "[" + ", ".join(str(v) for v in vals) + "]"
 
 
-def _make_step(cfg, theory, batch_size, lr):
+def _make_step(cfg, theory, batch_size, lr, *, loss_path: str):
     opt = optax.adam(float(lr))
+    if loss_path == "forward":
+        active_loss_fn = loss_fn_forward
+    elif loss_path == "inverse":
+        active_loss_fn = loss_fn_inverse
+    else:
+        raise ValueError(f"Unsupported loss_path: {loss_path}")
 
     @jax.jit
     def step(weights, opt_state, key):
-        lval, grads = jax.value_and_grad(loss_fn, argnums=1)(cfg, weights, key, batch_size, theory)
+        lval, grads = jax.value_and_grad(active_loss_fn, argnums=1)(cfg, weights, key, batch_size, theory)
         updates, opt_state = opt.update(grads, opt_state, weights)
         weights = optax.apply_updates(weights, updates)
         return weights, opt_state, lval
@@ -469,6 +489,7 @@ def main():
     ap.add_argument("--batch", type=int, default=None)
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--loss-path", type=str, default="forward", choices=["forward", "inverse"])
     ap.add_argument(
         "--fail-on-nonfinite",
         action=argparse.BooleanOptionalAction,
@@ -593,7 +614,7 @@ def main():
         theory = Phi4([args.L, args.L], args.lam, args.mass, batch_size=batch_size)
         opt_state = optax.adam(lr).init(weights)
 
-    step, _ = _make_step(cfg, theory, batch_size, lr)
+    step, _ = _make_step(cfg, theory, batch_size, lr, loss_path=args.loss_path)
 
     arch = _build_arch_from_cfg(cfg, theory)
     train_cfg = {
@@ -601,6 +622,7 @@ def main():
         "batch": int(batch_size),
         "epochs": int(target_epochs),
         "schedule": schedule,
+        "loss_path": str(args.loss_path),
     }
 
     remaining_epochs = max(0, int(target_epochs) - int(start_epoch))
@@ -614,6 +636,7 @@ def main():
     print(f"  validate_only: {args.validate_only}")
     print(f"  batch: {batch_size}")
     print(f"  lr: {lr}")
+    print(f"  loss_path: {args.loss_path}")
     if args.config:
         print(f"  config: {args.config}")
     if schedule:
@@ -656,7 +679,16 @@ def main():
             print("validate_only requested without --validate; enabling validation")
         val_theory = Phi4([arch["L"], arch["L"]], arch["lam"], arch["mass"], batch_size=args.validate_batch)
         val_key = jax.random.fold_in(key, int(start_epoch if start_epoch > 0 else target_epochs))
-        validate(cfg, weights, val_theory, val_key, args.validate_batch, args.validate_super, tag="validate_only")
+        validate(
+            cfg,
+            weights,
+            val_theory,
+            val_key,
+            args.validate_batch,
+            args.validate_super,
+            tag="validate_only",
+            loss_path=args.loss_path,
+        )
         return
 
     tic = time.perf_counter()
@@ -671,7 +703,7 @@ def main():
             stage_batch = int(stage["batch"])
             stage_lr = float(stage["lr"])
             theory = Phi4([arch["L"], arch["L"]], arch["lam"], arch["mass"], batch_size=stage_batch)
-            step, _ = _make_step(cfg, theory, stage_batch, stage_lr)
+            step, _ = _make_step(cfg, theory, stage_batch, stage_lr, loss_path=args.loss_path)
             train_cfg["lr"] = stage_lr
             train_cfg["batch"] = stage_batch
             pbar = tqdm(
@@ -703,6 +735,7 @@ def main():
                     args.validate_batch,
                     args.validate_super,
                     tag=stage["label"],
+                    loss_path=args.loss_path,
                 )
             prev_end = stage_end
     else:
@@ -730,7 +763,16 @@ def main():
 
     if args.validate:
         final_key = jax.random.fold_in(key, int(target_epochs))
-        validate(cfg, weights, theory, final_key, args.validate_batch, args.validate_super, tag="final")
+        validate(
+            cfg,
+            weights,
+            theory,
+            final_key,
+            args.validate_batch,
+            args.validate_super,
+            tag="final",
+            loss_path=args.loss_path,
+        )
 
 
 if __name__ == "__main__":

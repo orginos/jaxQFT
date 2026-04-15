@@ -15,6 +15,32 @@ Last updated: 2026-04-14
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Forward-logdet training path for RG coarse-eta Gaussian phi^4 flow:
+  - Model-side exact forward Jacobian support added for:
+    - terminal RealNVP
+    - per-level eta flow
+    - per-level Gaussian whitening maps
+  - New exact forward helpers in:
+    - `jaxqft/models/phi4_mg.py`
+    - `jaxqft/models/phi4_rg_coarse_eta_flow.py`
+    - `jaxqft/models/phi4_rg_coarse_eta_gaussian_flow.py`
+  - Production trainer update:
+    - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
+    - supports `--loss-path {forward,inverse}`
+    - default is now `forward`
+    - validation uses the same path on generated samples
+  - Motivation:
+    - avoids recomputing `log q(x)` via the inverse map during training
+    - uses the sampled latent and the exact forward log-Jacobian instead
+    - removes the extra inverse pass from each training step
+  - Local checks:
+    - forward/inverse sample-logprob consistency on a tiny random model:
+      - `x_match = 0.0`
+      - `max |logq_forward - logq_inverse| = 7.6e-6`
+    - production smoke:
+      - `source /opt/python/jax/bin/activate`
+      - `MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --L 8 --lam 2.4 --mass -0.4 --width 16 --n-cycles 1 --gaussian-width 16 --terminal-width 16 --eta-gaussian level --epochs 2 --batch 4 --lr 1e-4 --loss-path forward --save /tmp/phi4_rg_prod_forward_smoke.pkl`
+      - succeeded
 - Separate debug trainer for nonfinite canonical flow failures:
   - New script:
     - `scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py`
@@ -31,9 +57,12 @@ Last updated: 2026-04-14
   - Quality-of-life flags:
     - `--max-epochs` to cap a scheduled run early without editing the input card
     - `--save-last-finite` to keep a checkpoint for the last stable iterate
+    - `--loss-path {forward,inverse}` with default `forward`
+    - `--inverse-check/--no-inverse-check` to monitor inverse reconstruction separately from the training path
+    - `--max-z-recon-abs` to abort on large inverse-reconstruction drift before non-finite loss
   - Local smoke test:
     - `source /opt/python/jax/bin/activate`
-    - `MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py --config configs/phi4/paper-2/canonical-scaling/L16_uniform.toml --max-epochs 2 --diag-every 1 --save /tmp/phi4_rg_debug_smoke.pkl`
+    - `MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py --config configs/phi4/paper-2/canonical-scaling/L16_uniform.toml --loss-path forward --max-epochs 2 --diag-every 1 --save /tmp/phi4_rg_forward_debug_smoke.pkl`
     - succeeded and printed per-epoch diagnostics
 - Bundled canonical debug wave launcher:
   - Debug-only wrapper:
@@ -87,6 +116,12 @@ Last updated: 2026-04-14
       - near-critical original vs repair vs repair+clip
       - broken-phase original vs repair vs repair+clip
     - use fresh `_v2` debug run directories to avoid clobbering first-wave output
+  - Forward-path third-wave manifest:
+    - `configs/phi4/paper-2/canonical-point-scan/debug-wave-20260415-forward/tasks.tsv`
+  - Forward-path third-wave purpose:
+    - re-run the key hard cases using `--loss-path forward`
+    - keep inverse diagnostics enabled to see whether inverse health still collapses even when the optimization path remains finite
+    - use `--max-z-recon-abs 1e6` as a debug-only health guard
 - Canonical point-scan conservative repair wave:
   - Root cause review on Perlmutter:
     - unresolved canonical logical runs are dominated by
