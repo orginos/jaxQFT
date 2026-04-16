@@ -61,6 +61,17 @@ Interpretation:
 - `canonical3`: near-critical
 - `canonical4`: deep in the broken phase; `phi` histograms should show a double-peak structure
 
+For the clean forward-loss rerun campaign, use:
+
+- `forward_points.tsv`
+
+This explicitly includes all four physics points:
+
+- `canonical`: `g2 = -0.4`
+- `canonical2`: `g2 = -0.5`
+- `canonical3`: `g2 = -0.585`
+- `canonical4`: `g2 = -0.70`
+
 ## Width Variants
 
 - `w64`: original canonical transport width
@@ -94,6 +105,18 @@ For the bundled `w64c3` family, use:
 
 ```bash
 scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_bundles_nersc.sh
+```
+
+For the clean forward-loss rerun campaign, use:
+
+```bash
+scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_forward_bundles_nersc.sh
+```
+
+and for the bundled `w64c3` forward rerun:
+
+```bash
+scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_bundles_nersc.sh
 ```
 
 This submitter groups tasks by common volume and emits one regular-qos bundle
@@ -137,6 +160,13 @@ Important:
   anneal stages
 - for the analogous bundled `w64c3` launch, `canonical3/L128` uses
   `L128_uniform_c3_batch64_then_anneal.toml`
+- the forward-loss rerun campaign is meant to be apples-to-apples against the
+  original baseline, so it uses the original base cards plus explicit
+  `--loss-path forward` rather than the conservative rescue cards
+- the recommended runtime root for the forward rerun is:
+  `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward`
+  which preserves the original `canonical-point-scan` tree as the historical
+  inverse-path archive
 
 ## Conservative Repair Wave
 

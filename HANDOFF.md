@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-14
+Last updated: 2026-04-15
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -118,6 +118,17 @@ Last updated: 2026-04-14
     - use fresh `_v2` debug run directories to avoid clobbering first-wave output
   - Forward-path third-wave manifest:
     - `configs/phi4/paper-2/canonical-point-scan/debug-wave-20260415-forward/tasks.tsv`
+  - Forward-rerun campaign scaffolding:
+    - `configs/phi4/paper-2/canonical-point-scan/forward_points.tsv`
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_forward_bundles_nersc.sh`
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_bundles_nersc.sh`
+  - Recommended forward rerun roots:
+    - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward`
+    - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/bundles/canonical-point-scan-forward/...`
+  - Rationale:
+    - rerun the canonical point-scan apples-to-apples under explicit
+      `--loss-path forward`
+    - leave the old `canonical-point-scan` tree intact as the inverse-path archive
   - Forward-path third-wave purpose:
     - re-run the key hard cases using `--loss-path forward`
     - keep inverse diagnostics enabled to see whether inverse health still collapses even when the optimization path remains finite
