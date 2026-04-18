@@ -1,0 +1,72 @@
+mode = "fresh"
+
+[io]
+save = "ckpts/phi4/paper-2/canonical-point-scan/L128/rg_coarse_eta_gauss_L128_uniform_c3_batch32_accum4_warmup_lr3e5_then_anneal.pkl"
+save_every = 1000
+
+[physics]
+L = 128
+lam = 2.4
+mass = -0.4
+
+[model]
+width = 64
+n_cycles = 3
+radius = 1
+eta_gaussian = "level"
+gaussian_radius = 1
+gaussian_width = 64
+terminal_prior = "learned"
+terminal_n_layers = 2
+terminal_width = 64
+output_init_scale = 1e-2
+parity = "sym"
+rg_type = "average"
+log_scale_clip = 5.0
+offdiag_clip = 2.0
+
+[train]
+seed = 0
+grad_accum_steps = 4
+
+[[schedule.stage]]
+epoch_end = 500
+batch = 32
+lr = 2e-5
+label = "warmup_1"
+
+[[schedule.stage]]
+epoch_end = 1500
+batch = 32
+lr = 3e-5
+label = "warmup_2"
+
+[[schedule.stage]]
+epoch_end = 3000
+batch = 32
+lr = 3e-5
+label = "hold_1"
+
+[[schedule.stage]]
+epoch_end = 5000
+batch = 32
+lr = 2e-5
+label = "anneal_1"
+
+[[schedule.stage]]
+epoch_end = 7000
+batch = 32
+lr = 1e-5
+label = "anneal_2"
+
+[[schedule.stage]]
+epoch_end = 11000
+batch = 32
+lr = 5e-6
+label = "anneal_3"
+
+[validation]
+enabled = true
+each_stage = true
+batch = 16
+super = 4

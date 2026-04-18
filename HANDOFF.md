@@ -47,6 +47,18 @@ Last updated: 2026-04-18
   - motivation:
     - the low-`lr` accumulated repair improved failure times for the broken-phase `L128` runs but did not stabilize them
     - this tests whether gentle early stabilization is enough before late anneal
+- Forward `w64c3` warmup repair card for near-critical `L128` runs with lower peak lr:
+  - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_warmup_lr3e5_then_anneal.toml`
+  - intended use:
+    - near-critical `canonical3 / w64c3 / L128`
+    - microbatch `32`, `grad_accum_steps = 4`, effective batch `128`
+    - same warmup/anneal shape as the successful warmup attempt, but lower peak lr:
+      - `0-500`: `2e-5`
+      - `500-3000`: `3e-5`
+      - then late anneal `2e-5 -> 1e-5 -> 5e-6`
+  - motivation:
+    - the `canonical3` warmup bundle showed one full success (`s22`) and two failures while lr was still at `5e-5`
+    - this isolates the likely remaining problem: peak step size, not batch size or schedule shape
 - Forward `w64c3` warmup + higher-effective-batch repair card for broken-phase `L128` runs:
   - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum8_warmup_then_anneal.toml`
   - intended use:
