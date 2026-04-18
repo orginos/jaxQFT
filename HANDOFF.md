@@ -43,6 +43,15 @@ Last updated: 2026-04-18
   - Motivation:
     - raise effective batch size without increasing peak activation memory proportionally
     - intended for hard large-volume / near-critical `w64c3` training points
+  - Follow-up repair wave scaffolding:
+    - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-accum4/w64c3_bundle_a.tsv`
+    - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-accum4/w64c3_bundle_b.tsv`
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum4_repairs_nersc.sh`
+  - Policy:
+    - retry only the unresolved `L128 w64c3` forward repairs
+    - use fresh `s7+` / `s8+` / `s9+` / `s10` replacement seeds
+    - leave all successful forward runs untouched
+    - submit through the fixed multi-task bundler
   - Local checks:
     - production accumulation smoke:
       - `source /opt/python/jax/bin/activate`
