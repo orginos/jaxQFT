@@ -17,6 +17,7 @@ Last updated: 2026-04-18
 ## Implemented Status
 - Forward `w64c3` repair follow-up card for unresolved `L128` hard points:
   - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr1e4_then_anneal.toml`
+  - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr5e5_then_anneal.toml`
   - intended use:
     - microbatch `32`
     - `grad_accum_steps = 4`
@@ -56,11 +57,15 @@ Last updated: 2026-04-18
     - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-accum4/w64c3_bundle_a.tsv`
     - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-accum4/w64c3_bundle_b.tsv`
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum4_repairs_nersc.sh`
+    - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-lr5e5/w64c3_bundle_a.tsv`
+    - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-lr5e5/w64c3_bundle_b.tsv`
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum4_lr5e5_repairs_nersc.sh`
   - Policy:
     - retry only the unresolved `L128 w64c3` forward repairs
     - use fresh `s7+` / `s8+` / `s9+` / `s10` replacement seeds
     - leave all successful forward runs untouched
     - submit through the fixed multi-task bundler
+    - if `lr=1e-4` accum4 still fails in `ramp_32`, retry the remaining unresolved slots with the same microbatch/accumulation but lower only the ramp learning rate to `5e-5`
   - Local checks:
     - production accumulation smoke:
       - `source /opt/python/jax/bin/activate`
