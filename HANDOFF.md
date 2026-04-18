@@ -113,6 +113,8 @@ Last updated: 2026-04-18
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum16_final_repairs_nersc.sh`
     - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-accum4-warmup-canonical3/w64c3_bundle.tsv`
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum4_warmup_canonical3_repairs_nersc.sh`
+    - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-accum4-warmup-lr3e5-canonical3/w64c3_bundle.tsv`
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum4_warmup_lr3e5_canonical3_repairs_nersc.sh`
   - Policy:
     - retry only the unresolved `L128 w64c3` forward repairs
     - use fresh `s7+` / `s8+` / `s9+` / `s10` replacement seeds
@@ -122,6 +124,7 @@ Last updated: 2026-04-18
     - for the still-unresolved broken-phase `canonical4 / w64c3 / L128` slots, an additional canonical4-only retry wave now uses `grad_accum_steps = 8` plus a conservative warmup card, with fresh active seeds `s13-s15`
     - the final broken-phase attempt uses `grad_accum_steps = 16` with fresh active seeds `s16-s19`; if this wave fails, stop broken-phase training work rather than continuing seed churn
     - the unresolved `canonical3 / w64c3 / L128` forward slots `s0-s2` can be retried independently with the `accum4 + warmup` card, using fresh active seeds `s20-s22`; leave logical `s3 -> s7` untouched because that slot is already repaired
+    - after `s22` completed under the `accum4 + warmup` card, the remaining unresolved canonical3 slots `s0-s1` can be retried alone with the same effective batch and warmup shape but lower peak lr `3e-5`, using fresh active seeds `s23-s24`
   - Local checks:
     - production accumulation smoke:
       - `source /opt/python/jax/bin/activate`
