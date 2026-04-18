@@ -34,6 +34,19 @@ Last updated: 2026-04-18
   - motivation:
     - the accumulated-batch repair still failed on all 6 unresolved `L128` seeds, but typically later than the previous `batch=64` repair
     - this isolates whether the remaining instability is dominated by optimizer step size rather than batch noise
+- Forward `w64c3` warmup repair card for broken-phase `L128` runs:
+  - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_warmup_then_anneal.toml`
+  - intended use:
+    - broken-phase `canonical4 / w64c3 / L128`
+    - microbatch `32`, `grad_accum_steps = 4`, effective batch `128`
+    - explicit warmup schedule:
+      - `0-500`: `2e-5`
+      - `500-1500`: `5e-5`
+      - `1500-3000`: `5e-5`
+      - then late anneal `2e-5 -> 1e-5 -> 5e-6`
+  - motivation:
+    - the low-`lr` accumulated repair improved failure times for the broken-phase `L128` runs but did not stabilize them
+    - this tests whether gentle early stabilization is enough before late anneal
 - Training-side gradient accumulation for RG coarse-eta Gaussian phi^4 flow:
   - Production trainer:
     - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
