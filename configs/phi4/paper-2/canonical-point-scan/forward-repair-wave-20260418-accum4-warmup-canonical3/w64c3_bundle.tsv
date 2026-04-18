@@ -1,0 +1,4 @@
+# task_name	config	run_dir	seed	extra args...
+phi4-canonical3-w64c3-L128-s20	configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_warmup_then_anneal.toml	runs/phi4/canonical-point-scan-forward/canonical3/w64c3/L128/s20	20	--lam	2.4	--mass	-0.585	--width	64	--n-cycles	3	--loss-path	forward
+phi4-canonical3-w64c3-L128-s21	configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_warmup_then_anneal.toml	runs/phi4/canonical-point-scan-forward/canonical3/w64c3/L128/s21	21	--lam	2.4	--mass	-0.585	--width	64	--n-cycles	3	--loss-path	forward
+phi4-canonical3-w64c3-L128-s22	configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_warmup_then_anneal.toml	runs/phi4/canonical-point-scan-forward/canonical3/w64c3/L128/s22	22	--lam	2.4	--mass	-0.585	--width	64	--n-cycles	3	--loss-path	forward
