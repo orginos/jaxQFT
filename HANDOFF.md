@@ -97,6 +97,8 @@ Last updated: 2026-04-18
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum4_lr5e5_repairs_nersc.sh`
     - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-accum8-warmup/w64c3_bundle.tsv`
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum8_warmup_repairs_nersc.sh`
+    - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418-accum16-final/w64c3_bundle.tsv`
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_accum16_final_repairs_nersc.sh`
   - Policy:
     - retry only the unresolved `L128 w64c3` forward repairs
     - use fresh `s7+` / `s8+` / `s9+` / `s10` replacement seeds
@@ -104,6 +106,7 @@ Last updated: 2026-04-18
     - submit through the fixed multi-task bundler
     - if `lr=1e-4` accum4 still fails in `ramp_32`, retry the remaining unresolved slots with the same microbatch/accumulation but lower only the ramp learning rate to `5e-5`
     - for the still-unresolved broken-phase `canonical4 / w64c3 / L128` slots, an additional canonical4-only retry wave now uses `grad_accum_steps = 8` plus a conservative warmup card, with fresh active seeds `s13-s15`
+    - the final broken-phase attempt uses `grad_accum_steps = 16` with fresh active seeds `s16-s19`; if this wave fails, stop broken-phase training work rather than continuing seed churn
   - Local checks:
     - production accumulation smoke:
       - `source /opt/python/jax/bin/activate`
