@@ -47,6 +47,19 @@ Last updated: 2026-04-18
   - motivation:
     - the low-`lr` accumulated repair improved failure times for the broken-phase `L128` runs but did not stabilize them
     - this tests whether gentle early stabilization is enough before late anneal
+- Forward `w64c3` warmup + higher-effective-batch repair card for broken-phase `L128` runs:
+  - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum8_warmup_then_anneal.toml`
+  - intended use:
+    - broken-phase `canonical4 / w64c3 / L128`
+    - microbatch `32`, `grad_accum_steps = 8`, effective batch `256`
+    - conservative warmup / no return to `1e-4`:
+      - `0-500`: `1e-5`
+      - `500-1500`: `2e-5`
+      - `1500-3000`: `5e-5`
+      - then late anneal `2e-5 -> 1e-5 -> 5e-6`
+  - motivation:
+    - `eff_batch=128` and warmup-like low-`lr` schedules improved broken-phase failure times but did not stabilize them
+    - this combines both remaining promising knobs without changing the model family
 - Training-side gradient accumulation for RG coarse-eta Gaussian phi^4 flow:
   - Production trainer:
     - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
