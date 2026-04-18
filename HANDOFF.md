@@ -122,6 +122,9 @@ Last updated: 2026-04-15
     - `configs/phi4/paper-2/canonical-point-scan/forward_points.tsv`
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_forward_bundles_nersc.sh`
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_bundles_nersc.sh`
+    - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418/w64c3_bundle_a.tsv`
+    - `configs/phi4/paper-2/canonical-point-scan/forward-repair-wave-20260418/w64c3_bundle_b.tsv`
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_w64c3_forward_repairs_nersc.sh`
   - Recommended forward rerun roots:
     - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward`
     - `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/bundles/canonical-point-scan-forward/...`
@@ -133,6 +136,17 @@ Last updated: 2026-04-15
     - re-run the key hard cases using `--loss-path forward`
     - keep inverse diagnostics enabled to see whether inverse health still collapses even when the optimization path remains finite
     - use `--max-z-recon-abs 1e6` as a debug-only health guard
+  - Forward `w64c3` repair-wave policy:
+    - repair only the failed `w64c3` forward runs
+    - leave successful `w48`/`w64` forward runs untouched
+    - preserve failed `s0..s3` forward run dirs as audit history
+    - launch fresh replacement seeds with the conservative `batch64/lr1e-4` `c3` cards
+    - every repair task explicitly passes:
+      - `--lam 2.4`
+      - `--width 64`
+      - `--n-cycles 3`
+      - `--loss-path forward`
+    - submit through the fixed multi-task bundler so one node runs four tasks concurrently
 - Canonical point-scan conservative repair wave:
   - Root cause review on Perlmutter:
     - unresolved canonical logical runs are dominated by
