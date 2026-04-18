@@ -15,6 +15,15 @@ Last updated: 2026-04-18
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Forward `w64c3` repair follow-up card for unresolved `L128` hard points:
+  - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr1e4_then_anneal.toml`
+  - intended use:
+    - microbatch `32`
+    - `grad_accum_steps = 4`
+    - effective batch `128`
+  - motivation:
+    - the first conservative `batch=64, lr=1e-4` repair partially succeeded, but the remaining `L128` failures still died early in `ramp_64`
+    - this card keeps the same learning-rate schedule while doubling effective batch and halving peak batch memory
 - Training-side gradient accumulation for RG coarse-eta Gaussian phi^4 flow:
   - Production trainer:
     - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
