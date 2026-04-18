@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-15
+Last updated: 2026-04-18
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -15,6 +15,34 @@ Last updated: 2026-04-15
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Training-side gradient accumulation for RG coarse-eta Gaussian phi^4 flow:
+  - Production trainer:
+    - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
+    - new CLI/config knob:
+      - `--grad-accum-steps`
+      - TOML: `train.grad_accum_steps`
+    - semantics:
+      - `batch` remains the microbatch size
+      - effective batch is `batch * grad_accum_steps`
+      - gradients and loss are averaged across accumulation microsteps before the Adam update
+    - run config / checkpoint metadata now records:
+      - `grad_accum_steps`
+      - `effective_batch`
+  - Debug trainer:
+    - `scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py`
+    - same `--grad-accum-steps` support, with inverse-health diagnostics preserved
+  - Motivation:
+    - raise effective batch size without increasing peak activation memory proportionally
+    - intended for hard large-volume / near-critical `w64c3` training points
+  - Local checks:
+    - production accumulation smoke:
+      - `source /opt/python/jax/bin/activate`
+      - `MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow.py --L 8 --lam 2.4 --mass -0.4 --width 16 --n-cycles 1 --gaussian-width 16 --terminal-width 16 --eta-gaussian level --epochs 2 --batch 2 --grad-accum-steps 2 --lr 1e-4 --loss-path forward --save /tmp/phi4_rg_prod_accum_smoke.pkl`
+      - succeeded
+    - debug accumulation smoke:
+      - `source /opt/python/jax/bin/activate`
+      - `MPLCONFIGDIR=/tmp/mpl-cache JAX_PLATFORMS=cpu python scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py --config configs/phi4/paper-2/canonical-scaling/L16_uniform.toml --loss-path forward --grad-accum-steps 2 --max-epochs 1 --diag-every 1 --save /tmp/phi4_rg_debug_accum_smoke.pkl`
+      - succeeded
 - Forward-logdet training path for RG coarse-eta Gaussian phi^4 flow:
   - Model-side exact forward Jacobian support added for:
     - terminal RealNVP

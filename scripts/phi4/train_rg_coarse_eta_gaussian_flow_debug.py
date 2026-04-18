@@ -129,7 +129,7 @@ def _diag_batch(cfg, weights, key, batch_size, theory, *, loss_path: str = "forw
     raise ValueError(f"Unsupported loss_path: {loss_path}")
 
 
-def _make_step(cfg, theory, batch_size, lr, *, loss_path: str):
+def _make_step(cfg, theory, batch_size, lr, *, loss_path: str, grad_accum_steps: int):
     opt = optax.adam(float(lr))
     if loss_path == "forward":
         active_loss_fn = prod.loss_fn_forward
@@ -137,10 +137,32 @@ def _make_step(cfg, theory, batch_size, lr, *, loss_path: str):
         active_loss_fn = prod.loss_fn_inverse
     else:
         raise ValueError(f"Unsupported loss_path: {loss_path}")
+    grad_accum_steps = int(grad_accum_steps)
+    if grad_accum_steps <= 0:
+        raise ValueError(f"grad_accum_steps must be positive, got {grad_accum_steps}")
 
     @jax.jit
     def step(weights, opt_state, key):
-        lval, grads = jax.value_and_grad(active_loss_fn, argnums=1)(cfg, weights, key, batch_size, theory)
+        if grad_accum_steps == 1:
+            lval, grads = jax.value_and_grad(active_loss_fn, argnums=1)(cfg, weights, key, batch_size, theory)
+        else:
+            keys = jax.random.split(key, grad_accum_steps)
+            zero_loss = jnp.asarray(0.0, dtype=jnp.float32)
+            zero_grads = jax.tree_util.tree_map(jnp.zeros_like, weights)
+
+            def accum_body(carry, micro_key):
+                loss_sum, grad_sum = carry
+                l_micro, g_micro = jax.value_and_grad(active_loss_fn, argnums=1)(
+                    cfg, weights, micro_key, batch_size, theory
+                )
+                loss_sum = loss_sum + l_micro
+                grad_sum = jax.tree_util.tree_map(lambda a, b: a + b, grad_sum, g_micro)
+                return (loss_sum, grad_sum), None
+
+            (loss_sum, grads), _ = jax.lax.scan(accum_body, (zero_loss, zero_grads), keys)
+            scale = jnp.asarray(1.0 / float(grad_accum_steps), dtype=loss_sum.dtype)
+            lval = loss_sum * scale
+            grads = jax.tree_util.tree_map(lambda g: g * scale, grads)
         updates, next_opt_state = opt.update(grads, opt_state, weights)
         next_weights = optax.apply_updates(weights, updates)
         grad_norm = optax.global_norm(grads)
@@ -280,6 +302,7 @@ def main():
         help="if >0, cap the training run at this epoch even when the schedule is longer",
     )
     ap.add_argument("--batch", type=int, default=None)
+    ap.add_argument("--grad-accum-steps", type=int, default=1)
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--loss-path", type=str, default="forward", choices=["forward", "inverse"])
@@ -344,6 +367,7 @@ def main():
             batch_size = int(train_prev.get("batch", 8) if args.batch is None else args.batch)
             lr = float(train_prev.get("lr", 3e-4) if args.lr is None else args.lr)
             target_epochs = int(args.epochs)
+        grad_accum_steps = int(train_prev.get("grad_accum_steps", args.grad_accum_steps))
         theory = Phi4([arch["L"], arch["L"]], arch["lam"], arch["mass"], batch_size=batch_size)
         model = init_rg_coarse_eta_gaussian_flow(
             key,
@@ -377,6 +401,7 @@ def main():
     else:
         batch_size = 8 if args.batch is None else int(args.batch)
         lr = 3e-4 if args.lr is None else float(args.lr)
+        grad_accum_steps = int(args.grad_accum_steps)
         schedule = prod._build_schedule_from_config(
             raw_cfg,
             fallback_epochs=int(args.epochs),
@@ -420,12 +445,21 @@ def main():
         theory = Phi4([args.L, args.L], args.lam, args.mass, batch_size=batch_size)
         opt_state = optax.adam(lr).init(weights)
 
-    step, _ = _make_step(cfg, theory, batch_size, lr, loss_path=args.loss_path)
+    step, _ = _make_step(
+        cfg,
+        theory,
+        batch_size,
+        lr,
+        loss_path=args.loss_path,
+        grad_accum_steps=grad_accum_steps,
+    )
 
     arch = prod._build_arch_from_cfg(cfg, theory)
     train_cfg = {
         "lr": float(lr),
         "batch": int(batch_size),
+        "grad_accum_steps": int(grad_accum_steps),
+        "effective_batch": int(batch_size) * int(grad_accum_steps),
         "epochs": int(target_epochs),
         "schedule": schedule,
         "loss_path": str(args.loss_path),
@@ -463,6 +497,8 @@ def main():
     print(f"  target_epochs: {target_epochs}")
     print(f"  remaining_epochs: {remaining_epochs}")
     print(f"  batch: {batch_size}")
+    print(f"  grad_accum_steps: {grad_accum_steps}")
+    print(f"  effective_batch: {int(batch_size) * int(grad_accum_steps)}")
     print(f"  lr: {lr}")
     print(f"  loss_path: {args.loss_path}")
     print(f"  diag_every: {args.diag_every}")
@@ -475,7 +511,7 @@ def main():
         for stage in schedule:
             print(
                 f"    - {stage['label']}: epoch_end={stage['epoch_end']}"
-                f" batch={stage['batch']} lr={stage['lr']}"
+                f" batch={stage['batch']} eff_batch={int(stage['batch']) * int(grad_accum_steps)} lr={stage['lr']}"
             )
     print(
         "  model:"
@@ -519,9 +555,17 @@ def main():
             stage_batch = int(stage["batch"])
             stage_lr = float(stage["lr"])
             theory = Phi4([arch["L"], arch["L"]], arch["lam"], arch["mass"], batch_size=stage_batch)
-            step, _ = _make_step(cfg, theory, stage_batch, stage_lr, loss_path=args.loss_path)
+            step, _ = _make_step(
+                cfg,
+                theory,
+                stage_batch,
+                stage_lr,
+                loss_path=args.loss_path,
+                grad_accum_steps=grad_accum_steps,
+            )
             train_cfg["lr"] = stage_lr
             train_cfg["batch"] = stage_batch
+            train_cfg["effective_batch"] = int(stage_batch) * int(grad_accum_steps)
             pbar = tqdm(range(stage_begin, stage_end), desc=f"DebugTrain(RG:{stage['label']})")
             for ep in pbar:
                 key, k = jax.random.split(key)
