@@ -24,6 +24,15 @@ Last updated: 2026-04-18
   - motivation:
     - the first conservative `batch=64, lr=1e-4` repair partially succeeded, but the remaining `L128` failures still died early in `ramp_64`
     - this card keeps the same learning-rate schedule while doubling effective batch and halving peak batch memory
+- Forward `w64c3` second repair card for unresolved `L128` hard points:
+  - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr5e5_then_anneal.toml`
+  - intended use:
+    - same microbatch `32`, `grad_accum_steps = 4`, effective batch `128`
+    - lower only the failing-stage learning rate: `ramp lr 5e-5`
+    - keep the same later anneal schedule
+  - motivation:
+    - the accumulated-batch repair still failed on all 6 unresolved `L128` seeds, but typically later than the previous `batch=64` repair
+    - this isolates whether the remaining instability is dominated by optimizer step size rather than batch noise
 - Training-side gradient accumulation for RG coarse-eta Gaussian phi^4 flow:
   - Production trainer:
     - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
