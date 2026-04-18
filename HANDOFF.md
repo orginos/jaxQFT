@@ -144,6 +144,29 @@ Last updated: 2026-04-15
     - `scripts/phi4/rg_coarse_eta_gaussian_4task_perlmutter.slurm`
     - the launcher now skips `cp` when the config is already the localized
       `run_dir/input.toml`
+  - Bundler concurrency fix:
+    - `scripts/phi4/rg_coarse_eta_gaussian_4task_perlmutter.slurm`
+    - `scripts/phi4/rg_coarse_eta_gaussian_bundle_task.sh`
+    - `scripts/phi4/hmc_phi4_bundle_perlmutter.slurm`
+    - `scripts/phi4/hmc_phi4_bundle_task.sh`
+    - root cause:
+      - the original bundlers spawned many one-task `srun` steps with
+        `--exclusive --nodes=1`
+      - on Perlmutter this serialized step placement by node and produced
+        repeated:
+        - `srun: Job ... step creation temporarily disabled ... Requested nodes are busy`
+      - practical effect:
+        - only one task per node ran at a time instead of four concurrent tasks
+    - fix:
+      - replace the background `srun` loop with one multi-task `srun` step
+      - one Slurm task now maps directly to one bundle task via `SLURM_PROCID`
+      - keep one GPU per task with `--gpus-per-task=1 --gpu-bind=single:1`
+      - task-level status is now written under:
+        - `${BUNDLE_ROOT}/slurm/task_status_${SLURM_JOB_ID}/`
+      - the bundle launcher collates those status files back into:
+        - `success_tasks.txt`
+        - `failed_tasks.txt`
+        - `failed_task_status.tsv`
   - Bundle-helper generalization:
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_4task_bundle_nersc.sh`
     - `scripts/phi4/rg_coarse_eta_gaussian_4task_perlmutter.slurm`

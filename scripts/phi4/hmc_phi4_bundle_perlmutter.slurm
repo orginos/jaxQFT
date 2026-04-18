@@ -20,6 +20,7 @@ BUNDLE_ROOT="${BUNDLE_ROOT:-}"
 WRAPPER="${WRAPPER:-${REPO_ROOT}/scripts/phi4/run_hmc_phi4.sh}"
 JSON_NAME="${JSON_NAME:-hmc_phi4.json}"
 HIST_NAME="${HIST_NAME:-hmc_phi4.npz}"
+TASK_RUNNER="${TASK_RUNNER:-${SCRIPT_DIR}/hmc_phi4_bundle_task.sh}"
 
 contains_exact() {
   local needle="$1"
@@ -59,6 +60,10 @@ if [[ ! -x "${WRAPPER}" ]]; then
   echo "Wrapper not executable: ${WRAPPER}" >&2
   exit 2
 fi
+if [[ ! -x "${TASK_RUNNER}" ]]; then
+  echo "Task runner not executable: ${TASK_RUNNER}" >&2
+  exit 2
+fi
 
 mkdir -p "${BUNDLE_ROOT}/slurm"
 exec >> "${BUNDLE_ROOT}/slurm/job.log" 2>&1
@@ -70,6 +75,7 @@ echo "  BUNDLE_ROOT=${BUNDLE_ROOT}"
 echo "  WRAPPER=${WRAPPER}"
 echo "  JSON_NAME=${JSON_NAME}"
 echo "  HIST_NAME=${HIST_NAME}"
+echo "  TASK_RUNNER=${TASK_RUNNER}"
 
 declare -a TASK_NAMES=()
 declare -a TASK_RUN_DIRS=()
@@ -123,91 +129,38 @@ node_count=$(( (task_count + 3) / 4 ))
 
 echo "  task_count=${task_count}"
 echo "  node_count=${node_count}"
+TASK_STATUS_DIR="${BUNDLE_ROOT}/slurm/task_status_${SLURM_JOB_ID}"
+mkdir -p "${TASK_STATUS_DIR}"
+export REPO_ROOT TASKS_FILE BUNDLE_ROOT WRAPPER JSON_NAME HIST_NAME TASK_STATUS_DIR
 
-launch_one() {
-  local idx="$1"
-  local task_name="${TASK_NAMES[$idx]}"
-  local run_dir="${TASK_RUN_DIRS[$idx]}"
-  local extra_count="${TASK_ARG_COUNTS[$idx]}"
-  local arg_offset=0
-  local extra=()
-  local j=0
-  local task_record=""
-  local json_out=""
-  local hist_out=""
-  local arg=""
-
-  for ((j = 0; j < idx; j++)); do
-    arg_offset=$(( arg_offset + TASK_ARG_COUNTS[j] ))
-  done
-  for ((j = 0; j < extra_count; j++)); do
-    extra+=("${TASK_EXTRA_ARGS[$((arg_offset + j))]}")
-  done
-
-  mkdir -p "${run_dir}/slurm"
-  task_record="${run_dir}/bundle_task.tsv"
-  {
-    printf "%s\t%s" "${task_name}" "${run_dir}"
-    for arg in "${extra[@]}"; do
-      printf "\t%s" "${arg}"
-    done
-    printf "\n"
-  } > "${task_record}"
-
-  json_out="${run_dir}/${JSON_NAME}"
-  hist_out="${run_dir}/${HIST_NAME}"
-
-  local cmd=(
-    "${WRAPPER}"
-    "--workdir" "${run_dir}"
-    "--gpu" "all"
-    "--"
-    "--json-out" "${json_out}"
-    "--hist-out" "${hist_out}"
-  )
-  if [[ ${#extra[@]} -gt 0 ]]; then
-    cmd+=("${extra[@]}")
-  fi
-
-  echo "Launching task ${task_name}"
-  echo "  run_dir=${run_dir}"
-  echo "  extra_args=${extra[*]:-<none>}"
-
-  srun \
-    --exact \
-    --exclusive \
-    --nodes=1 \
-    --ntasks=1 \
-    --gpus-per-task=1 \
-    --gpu-bind=single:1 \
-    --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
-    "${cmd[@]}" \
-    > "${run_dir}/slurm/hmc.out" \
-    2> "${run_dir}/slurm/hmc.err" &
-  local pid=$!
-  PIDS+=("${pid}")
-  PID_TASKS+=("${task_name}")
-}
-
-declare -a PIDS=()
-declare -a PID_TASKS=()
-
-for idx in "${!TASK_NAMES[@]}"; do
-  launch_one "${idx}"
-done
+if srun \
+  --kill-on-bad-exit=0 \
+  --ntasks="${task_count}" \
+  --ntasks-per-node=4 \
+  --gpus-per-task=1 \
+  --gpu-bind=single:1 \
+  --cpus-per-task="${SLURM_CPUS_PER_TASK}" \
+  "${TASK_RUNNER}"; then
+  srun_status=0
+else
+  srun_status=$?
+fi
 
 fail_count=0
 : > "${BUNDLE_ROOT}/slurm/success_tasks.txt"
 : > "${BUNDLE_ROOT}/slurm/failed_tasks.txt"
 : > "${BUNDLE_ROOT}/slurm/failed_task_status.tsv"
 
-for idx in "${!PIDS[@]}"; do
-  pid="${PIDS[$idx]}"
-  task_name="${PID_TASKS[$idx]}"
-  if wait "${pid}"; then
+for task_name in "${TASK_NAMES[@]}"; do
+  status_file="${TASK_STATUS_DIR}/${task_name}.status"
+  if [[ -f "${status_file}" ]]; then
+    status="$(cat "${status_file}")"
+  else
+    status=99
+  fi
+  if [[ "${status}" == "0" ]]; then
     echo "${task_name}" >> "${BUNDLE_ROOT}/slurm/success_tasks.txt"
   else
-    status=$?
     echo "${task_name}" >> "${BUNDLE_ROOT}/slurm/failed_tasks.txt"
     printf "%s\t%s\n" "${task_name}" "${status}" >> "${BUNDLE_ROOT}/slurm/failed_task_status.tsv"
     echo "Task ${task_name} failed with exit status ${status}"
@@ -218,4 +171,8 @@ done
 if [[ ${fail_count} -gt 0 ]]; then
   echo "${fail_count} task(s) failed; see ${BUNDLE_ROOT}/slurm/failed_tasks.txt"
   exit 1
+fi
+if [[ "${srun_status}" -ne 0 ]]; then
+  echo "srun returned nonzero status ${srun_status} despite zero recorded task failures" >&2
+  exit "${srun_status}"
 fi
