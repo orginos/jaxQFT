@@ -1,0 +1,40 @@
+mode = "resume"
+
+[io]
+save = "checkpoint_refine4096.pkl"
+save_every = 1000
+
+[physics]
+L = 64
+lam = 2.4
+mass = -0.4
+
+[model]
+width = 64
+n_cycles = 2
+radius = 1
+eta_gaussian = "level"
+gaussian_radius = 1
+gaussian_width = 64
+terminal_prior = "learned"
+terminal_n_layers = 2
+terminal_width = 64
+output_init_scale = 1e-2
+parity = "sym"
+rg_type = "average"
+log_scale_clip = 5.0
+offdiag_clip = 2.0
+
+[train]
+seed = 0
+epochs = 21000
+batch = 128
+grad_accum_steps = 32
+lr = 5e-6
+loss_path = "forward"
+
+[validation]
+enabled = true
+each_stage = false
+batch = 64
+super = 4

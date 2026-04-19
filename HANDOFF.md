@@ -15,6 +15,67 @@ Last updated: 2026-04-18
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Bundled forward level-analysis campaign for the current forward checkpoints:
+  - new task runner:
+    - `scripts/phi4/rg_coarse_eta_gaussian_level_analysis_bundle_task.sh`
+  - new submitter:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_forward_level_analysis_bundles_nersc.sh`
+  - scope by default:
+    - points `canonical`, `canonical2`, `canonical3`, `canonical4`
+    - arches `w64`, `w48`
+    - volumes `L=16,32,64,128`
+    - seeds `0,1,2,3`
+    - `4` independent analysis shards per checkpoint
+  - default roots:
+    - run root:
+      `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-level-analysis/before_refine4096`
+    - bundle root:
+      `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/bundles/canonical-point-scan-forward-level-analysis/before_refine4096`
+  - default analysis options:
+    - `nsamples=65536` per shard
+    - `jk_bin_size=256`
+    - `k_max=4`
+    - locality enabled with `16` fields and `4` sources
+    - locality metrics `manhattan,euclidean2`
+  - rationale:
+    - accumulate large physics statistics via multiple independent model-sampling calls
+      per checkpoint instead of one monolithic analysis job
+- Bundled `refine4096` resume wave for stable forward checkpoints:
+  - new schedule-free resume cards:
+    - `configs/phi4/paper-2/canonical-point-scan/L16_uniform_refine4096_resume.toml`
+    - `configs/phi4/paper-2/canonical-point-scan/L32_uniform_refine4096_resume.toml`
+    - `configs/phi4/paper-2/canonical-point-scan/L64_uniform_refine4096_resume.toml`
+    - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_refine4096_resume.toml`
+  - new submitter:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_forward_refine4096_bundles_nersc.sh`
+  - default scope:
+    - stable families only: `w64`, `w48`
+    - all four physics points
+    - all four seeds
+    - volumes `L=16,32,64,128`
+  - behavior:
+    - resume from the existing forward checkpoints in
+      `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward`
+    - write new outputs into
+      `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-refine4096`
+    - save as `checkpoint_refine4096.pkl`
+    - additional `10000` epochs (`target epoch = 21000`)
+    - fixed refinement lr `5e-6`
+    - effective batch `4096` via gradient accumulation, not a true batch of `4096`
+  - volume-specific microbatch / accumulation:
+    - `L16`: `512 x 8`
+    - `L32`: `256 x 16`
+    - `L64`: `128 x 32`
+    - `L128`: `64 x 64`
+  - walltime policy:
+    - `L16`: `06:00:00`
+    - `L32`: `08:00:00`
+    - `L64`: `10:00:00`
+    - `L128`: `16:00:00`
+  - rationale:
+    - scale from the completed forward baseline timings by the sample-count increase
+      from the original staged schedule (`624k` samples) to the refinement wave
+      (`10000 x 4096 = 40.96M` effective samples), then add margin
 - Forward `w64c3` repair follow-up card for unresolved `L128` hard points:
   - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr1e4_then_anneal.toml`
   - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr5e5_then_anneal.toml`

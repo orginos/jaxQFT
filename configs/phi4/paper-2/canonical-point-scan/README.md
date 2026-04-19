@@ -168,6 +168,82 @@ Important:
   which preserves the original `canonical-point-scan` tree as the historical
   inverse-path archive
 
+## Bundled Forward Level Analysis
+
+To analyze the completed forward checkpoints before any refinement wave, use:
+
+```bash
+scripts/phi4/submit_rg_coarse_eta_gaussian_forward_level_analysis_bundles_nersc.sh
+```
+
+Default scope:
+
+- points: `canonical`, `canonical2`, `canonical3`, `canonical4`
+- arches: `w64`, `w48`
+- volumes: `L = 16, 32, 64, 128`
+- seeds: `0,1,2,3`
+- shards: `4` independent analysis calls per checkpoint
+
+Important:
+
+- each shard gets its own run directory
+  `.../s<seed>/shardXX/`
+- this is deliberate: large aggregate statistics are accumulated through
+  multiple independent model-sampling calls rather than a single oversized run
+- the default output root is:
+  `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-level-analysis/before_refine4096`
+
+The analysis bundler uses the generic 4-task Perlmutter bundle helper with the
+dedicated level-analysis task runner:
+
+- `scripts/phi4/submit_rg_coarse_eta_gaussian_4task_bundle_nersc.sh`
+- `scripts/phi4/rg_coarse_eta_gaussian_level_analysis_bundle_task.sh`
+
+## Refine4096 Resume Wave
+
+To continue the stable forward checkpoints with very large effective batch
+training, use:
+
+```bash
+scripts/phi4/submit_rg_coarse_eta_gaussian_canonical_point_forward_refine4096_bundles_nersc.sh
+```
+
+Default scope:
+
+- arches: `w64`, `w48`
+- points: `canonical`, `canonical2`, `canonical3`, `canonical4`
+- volumes: `L = 16, 32, 64, 128`
+- seeds: `0,1,2,3`
+
+This wave:
+
+- resumes from the existing forward checkpoints
+- writes into a separate runtime root:
+  `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-refine4096`
+- saves a different checkpoint file:
+  `checkpoint_refine4096.pkl`
+- runs for an additional `10000` epochs (`target epoch = 21000`)
+- uses a fixed refinement lr `5e-6`
+- reaches effective batch `4096` through gradient accumulation, not by trying to
+  fit a real batch of `4096` in memory
+
+The volume-specific microbatch / accumulation pairs are:
+
+- `L16`: `batch=512`, `grad_accum_steps=8`
+- `L32`: `batch=256`, `grad_accum_steps=16`
+- `L64`: `batch=128`, `grad_accum_steps=32`
+- `L128`: `batch=64`, `grad_accum_steps=64`
+
+The schedule-free resume cards are:
+
+- `L16_uniform_refine4096_resume.toml`
+- `L32_uniform_refine4096_resume.toml`
+- `L64_uniform_refine4096_resume.toml`
+- `L128_uniform_refine4096_resume.toml`
+
+The default refinement wave intentionally excludes `w64c3` because that family
+is still in repair mode at `L=128`.
+
 ## Conservative Repair Wave
 
 The unresolved April 14, 2026 repair wave is tracked in:

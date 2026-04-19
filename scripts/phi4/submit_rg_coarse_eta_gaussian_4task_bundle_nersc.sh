@@ -41,6 +41,10 @@ Optional:
   --mode NAME            Wrapper mode. Default: interactive.
   --wrapper PATH         Wrapper script. Default: scripts/phi4/run_rg_coarse_eta_gaussian.sh
   --launcher PATH        Slurm launcher. Default: scripts/phi4/rg_coarse_eta_gaussian_4task_perlmutter.slurm
+  --task-runner PATH     Per-task runner used by the launcher. Default:
+                         scripts/phi4/rg_coarse_eta_gaussian_bundle_task.sh
+  --checkpoint-name NAME Checkpoint file name passed to the training task runner.
+                         Default: checkpoint.pkl
   --print-only           Print the generated sbatch command and exit.
 EOF
 }
@@ -80,6 +84,8 @@ cpus_per_task="32"
 mode="interactive"
 wrapper="scripts/phi4/run_rg_coarse_eta_gaussian.sh"
 launcher="scripts/phi4/rg_coarse_eta_gaussian_4task_perlmutter.slurm"
+task_runner="scripts/phi4/rg_coarse_eta_gaussian_bundle_task.sh"
+checkpoint_name="checkpoint.pkl"
 print_only=0
 
 while [[ $# -gt 0 ]]; do
@@ -96,6 +102,8 @@ while [[ $# -gt 0 ]]; do
     --mode) mode="${2:-}"; shift 2 ;;
     --wrapper) wrapper="${2:-}"; shift 2 ;;
     --launcher) launcher="${2:-}"; shift 2 ;;
+    --task-runner) task_runner="${2:-}"; shift 2 ;;
+    --checkpoint-name) checkpoint_name="${2:-}"; shift 2 ;;
     --print-only) print_only=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -131,6 +139,14 @@ if [[ "${launcher}" != /* ]]; then
 fi
 if [[ ! -f "${launcher}" ]]; then
   echo "Launcher not found: ${launcher}" >&2
+  exit 2
+fi
+
+if [[ "${task_runner}" != /* ]]; then
+  task_runner="${repo_root}/${task_runner}"
+fi
+if [[ ! -x "${task_runner}" ]]; then
+  echo "Task runner not executable: ${task_runner}" >&2
   exit 2
 fi
 
@@ -229,6 +245,8 @@ node_count=$(( (task_count + 3) / 4 ))
   printf "export BUNDLE_ROOT=%q\n" "${bundle_root}"
   printf "export MODE=%q\n" "${mode}"
   printf "export WRAPPER=%q\n" "${wrapper}"
+  printf "export TASK_RUNNER=%q\n" "${task_runner}"
+  printf "export CHECKPOINT_NAME=%q\n" "${checkpoint_name}"
   printf "exec /bin/bash %q\n" "${launcher}"
 } > "${sbatch_file}"
 
