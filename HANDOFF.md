@@ -81,6 +81,15 @@ Last updated: 2026-04-18
   - motivation:
     - `eff_batch=256` with warmup moved failures later but still did not stabilize all seeds
     - this is the last clean test of whether very large effective batch alone can tame the broken-phase outlier/noise problem
+- Forward `w64c3` extra-high-batch warmup repair card for broken-phase `L128` runs:
+  - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum32_warmup_then_anneal.toml`
+  - intended use:
+    - aggressive broken-phase retry for `canonical4 / w64c3 / L128`
+    - microbatch `32`, `grad_accum_steps = 32`, effective batch `1024`
+    - same warmup/anneal shape as the `accum16` card
+  - motivation:
+    - the `accum16` warmup wave achieved one full success and two very late failures
+    - this is the natural next batch-only escalation when compute budget is not the bottleneck
 - Training-side gradient accumulation for RG coarse-eta Gaussian phi^4 flow:
   - Production trainer:
     - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
