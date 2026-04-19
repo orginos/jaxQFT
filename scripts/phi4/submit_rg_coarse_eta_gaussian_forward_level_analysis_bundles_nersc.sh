@@ -168,23 +168,30 @@ for arch in "${arches[@]}"; do
           analysis_seed=$(( seed * 1000 + shard ))
           run_dir="${run_root}/${label}/${arch}/L${L}/s${seed}/shard$(printf '%02d' "${shard}")"
           task_name="phi4-${label}-${arch}-L${L}-s${seed}-levels-sh$(printf '%02d' "${shard}")"
-          printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-            "${task_name}" \
-            "${checkpoint}" \
-            "${run_dir}" \
-            "${analysis_seed}" \
-            "--nsamples" "${nsamples}" \
-            "--batch-size" "${batch_size}" \
-            "--jk-bin-size" "${jk_bin_size}" \
-            "--k-max" "${k_max}" \
-            "--reweight-ess-min" "${reweight_ess_min}" \
-            "--locality" \
-            "--locality-nsamples" "${locality_nsamples}" \
-            "--locality-nsources" "${locality_nsources}" \
-            "--locality-metric" "${locality_metrics}" \
-            "--locality-fit-rmin" "${locality_fit_rmin}" \
-            "--locality-fit-rmax" "${locality_fit_rmax}" \
-            >> "${tasks_in}"
+          row=(
+            "${task_name}"
+            "${checkpoint}"
+            "${run_dir}"
+            "${analysis_seed}"
+            "--nsamples" "${nsamples}"
+            "--batch-size" "${batch_size}"
+            "--jk-bin-size" "${jk_bin_size}"
+            "--k-max" "${k_max}"
+            "--reweight-ess-min" "${reweight_ess_min}"
+            "--locality"
+            "--locality-nsamples" "${locality_nsamples}"
+            "--locality-nsources" "${locality_nsources}"
+            "--locality-metric" "${locality_metrics}"
+            "--locality-fit-rmin" "${locality_fit_rmin}"
+            "--locality-fit-rmax" "${locality_fit_rmax}"
+          )
+          {
+            printf "%s" "${row[0]}"
+            for field in "${row[@]:1}"; do
+              printf "\t%s" "${field}"
+            done
+            printf "\n"
+          } >> "${tasks_in}"
         done
       done
     done < "${points_file}"

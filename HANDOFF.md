@@ -20,6 +20,13 @@ Last updated: 2026-04-18
     - `scripts/phi4/rg_coarse_eta_gaussian_level_analysis_bundle_task.sh`
   - new submitter:
     - `scripts/phi4/submit_rg_coarse_eta_gaussian_forward_level_analysis_bundles_nersc.sh`
+  - manifest writer fix:
+    - the initial tracked submitter version truncated task rows because the
+      fixed-width `printf` line did not have enough `%s` slots for the full
+      analysis argument list
+    - fixed by building each TSV row as an array and tab-joining it field by
+      field, so bare flags like `--locality` and later argument additions do
+      not corrupt the manifest
   - scope by default:
     - points `canonical`, `canonical2`, `canonical3`, `canonical4`
     - arches `w64`, `w48`
