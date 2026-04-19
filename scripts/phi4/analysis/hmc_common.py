@@ -419,3 +419,109 @@ def phi4_summary_from_histories(
         "primitive": primitive,
         "derived": derived,
     }
+
+
+def phi4_level_unweighted_from_summary(summary: dict) -> dict:
+    """Convert an HMC level summary to the flow-style per-level observable shape."""
+    primitive = summary["primitive"]
+    derived = summary["derived"]
+    out = {
+        "n_measurements": int(primitive["magnetization"]["nmeas"]),
+        "batch_size": int(primitive["magnetization"]["batch_size"]),
+        "momenta_k": [int(v) for v in summary["momenta_k"]],
+        "magnetization": {"mean": float(primitive["magnetization"]["mean"]), "stderr": float(primitive["magnetization"]["sigma"])},
+        "abs_magnetization": {
+            "mean": float(primitive["abs_magnetization"]["mean"]),
+            "stderr": float(primitive["abs_magnetization"]["sigma"]),
+        },
+        "magnetization2": {"mean": float(primitive["magnetization2"]["mean"]), "stderr": float(primitive["magnetization2"]["sigma"])},
+        "magnetization4": {"mean": float(primitive["magnetization4"]["mean"]), "stderr": float(primitive["magnetization4"]["sigma"])},
+        "chi_m": dict(derived["chi_m"]),
+        "binder_ratio": dict(derived["binder_ratio"]),
+        "binder_cumulant": dict(derived["binder_cumulant"]),
+        "C2p_x": {"mean": float(primitive["C2p_x"]["mean"]), "stderr": float(primitive["C2p_x"]["sigma"])},
+        "C2p_y": {"mean": float(primitive["C2p_y"]["mean"]), "stderr": float(primitive["C2p_y"]["sigma"])},
+        "C2p": {"mean": float(primitive["C2p"]["mean"]), "stderr": float(primitive["C2p"]["sigma"])},
+        "xi2_x": dict(derived["xi2_x"]),
+        "xi2_y": dict(derived["xi2_y"]),
+        "xi2": dict(derived["xi2"]),
+        "xi2_over_L": dict(derived["xi2_over_L"]),
+        "xi2_fit_linear": dict(derived["xi2_fit_linear"]),
+        "xi2_fit_quadratic": dict(derived["xi2_fit_quadratic"]),
+        "xi2_momentum_scan": [dict(row) for row in derived.get("xi2_momentum_scan", [])],
+    }
+    return out
+
+
+def phi4_multilevel_summaries_from_payload(
+    payload: dict[str, np.ndarray],
+    *,
+    iat_method: str = "gamma",
+    iat_c: float = 5.0,
+    block_size: int = 0,
+) -> dict:
+    """Summarize a level-0 or blocked-multilevel phi^4 HMC payload."""
+    if "shape" not in payload or "magnetization" not in payload:
+        raise ValueError("payload missing required level-0 history keys")
+
+    if "blocked_level_shapes" in payload:
+        shapes = np.asarray(payload["blocked_level_shapes"], dtype=np.int64)
+        if shapes.ndim != 2 or shapes.shape[1] != 2:
+            raise ValueError(f"blocked_level_shapes must have shape (n_levels, 2), got {shapes.shape}")
+        n_levels = int(np.asarray(payload.get("blocked_n_levels", shapes.shape[0])).reshape(-1)[0])
+        if n_levels != int(shapes.shape[0]):
+            raise ValueError("blocked_n_levels does not match blocked_level_shapes")
+    else:
+        shapes = np.asarray(payload["shape"], dtype=np.int64).reshape(1, -1)
+        n_levels = 1
+
+    levels = []
+    for level in range(n_levels):
+        prefix = f"level{level}_"
+        shape = tuple(int(v) for v in shapes[level].tolist())
+        magnetization = payload.get(prefix + "magnetization", payload["magnetization"] if level == 0 else None)
+        if magnetization is None:
+            raise ValueError(f"missing magnetization history for level {level}")
+        energy_density = payload.get(prefix + "energy_density", payload["energy_density"] if level == 0 and "energy_density" in payload else None)
+        if prefix + "c2pk_x" in payload:
+            c2p_x = payload[prefix + "c2pk_x"]
+        elif level == 0 and "c2pk_x" in payload:
+            c2p_x = payload["c2pk_x"]
+        elif level == 0 and "c2p_x" in payload:
+            c2p_x = payload["c2p_x"]
+        else:
+            raise ValueError(f"missing c2p_x history for level {level}")
+        if prefix + "c2pk_y" in payload:
+            c2p_y = payload[prefix + "c2pk_y"]
+        elif level == 0 and "c2pk_y" in payload:
+            c2p_y = payload["c2pk_y"]
+        elif level == 0 and "c2p_y" in payload:
+            c2p_y = payload["c2p_y"]
+        else:
+            raise ValueError(f"missing c2p_y history for level {level}")
+        momenta_k = payload.get(prefix + "momenta_k", payload.get("momenta_k") if level == 0 else None)
+        level_summary = phi4_summary_from_histories(
+            shape=shape,
+            magnetization=magnetization,
+            energy_density=energy_density,
+            c2p_x=c2p_x,
+            c2p_y=c2p_y,
+            momenta_k=momenta_k,
+            iat_method=iat_method,
+            iat_c=float(iat_c),
+            block_size=int(block_size),
+        )
+        levels.append(
+            {
+                "level_from_fine": int(level),
+                "L": int(shape[0]),
+                "shape": [int(shape[0]), int(shape[1])],
+                "summary": level_summary,
+                "unweighted": phi4_level_unweighted_from_summary(level_summary),
+            }
+        )
+
+    return {
+        "n_levels": int(n_levels),
+        "levels": levels,
+    }

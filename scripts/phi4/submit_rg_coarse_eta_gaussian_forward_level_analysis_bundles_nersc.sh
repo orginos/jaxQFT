@@ -30,6 +30,7 @@ Optional:
   --arches LIST               Comma-separated architectures. Default: w64,w48
   --volumes LIST              Comma-separated volumes. Default: 16,32,64,128
   --seeds LIST                Comma-separated seeds. Default: 0,1,2,3
+  --checkpoint-name NAME      Checkpoint file name inside each run dir. Default: checkpoint.pkl
   --shards INT                Number of independent analysis calls per checkpoint. Default: 4
   --nsamples INT              Total i.i.d. model samples per checkpoint. Default: 65536
   --jk-bin-size INT           Jackknife bin size. Default: 256
@@ -54,6 +55,7 @@ points_file="configs/phi4/paper-2/canonical-point-scan/forward_points.tsv"
 arches_csv="w64,w48"
 volumes_csv="16,32,64,128"
 seeds_csv="0,1,2,3"
+checkpoint_name="checkpoint.pkl"
 shards="4"
 nsamples="65536"
 jk_bin_size="256"
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     --arches) arches_csv="${2:-}"; shift 2 ;;
     --volumes) volumes_csv="${2:-}"; shift 2 ;;
     --seeds) seeds_csv="${2:-}"; shift 2 ;;
+    --checkpoint-name) checkpoint_name="${2:-}"; shift 2 ;;
     --shards) shards="${2:-}"; shift 2 ;;
     --nsamples) nsamples="${2:-}"; shift 2 ;;
     --jk-bin-size) jk_bin_size="${2:-}"; shift 2 ;;
@@ -159,7 +162,7 @@ for arch in "${arches[@]}"; do
       [[ -z "${label}" ]] && continue
       [[ "${label}" == \#* ]] && continue
       for seed in "${seeds[@]}"; do
-        checkpoint="${checkpoint_root}/${label}/${arch}/L${L}/s${seed}/checkpoint.pkl"
+        checkpoint="${checkpoint_root}/${label}/${arch}/L${L}/s${seed}/${checkpoint_name}"
         if [[ ! -f "${checkpoint}" ]]; then
           echo "Skipping missing checkpoint: ${checkpoint}" >&2
           continue

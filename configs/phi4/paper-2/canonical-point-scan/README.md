@@ -199,6 +199,22 @@ dedicated level-analysis task runner:
 - `scripts/phi4/submit_rg_coarse_eta_gaussian_4task_bundle_nersc.sh`
 - `scripts/phi4/rg_coarse_eta_gaussian_level_analysis_bundle_task.sh`
 
+For the matching post-refinement analysis wave, use:
+
+```bash
+scripts/phi4/submit_rg_coarse_eta_gaussian_forward_level_analysis_after_refine4096_bundles_nersc.sh
+```
+
+This reads:
+
+- `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-refine4096`
+
+and writes:
+
+- `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-level-analysis/after_refine4096`
+
+using `checkpoint_refine4096.pkl` as the checkpoint file name.
+
 ## Refine4096 Resume Wave
 
 To continue the stable forward checkpoints with very large effective batch

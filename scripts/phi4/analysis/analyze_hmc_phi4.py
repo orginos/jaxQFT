@@ -29,7 +29,7 @@ ROOT = _project_root()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.phi4.analysis.hmc_common import phi4_summary_from_histories
+from scripts.phi4.analysis.hmc_common import phi4_multilevel_summaries_from_payload, phi4_summary_from_histories
 
 
 def _load_histories(path: str) -> dict:
@@ -91,6 +91,23 @@ def _print_summary(summary: dict, acceptance: float | None = None) -> None:
         print(f"acceptance        {acceptance:.6f}")
 
 
+def _print_level_summaries(multilevel: dict | None) -> None:
+    if not multilevel or int(multilevel.get("n_levels", 0)) <= 1:
+        return
+    print("")
+    print("Blocked levels")
+    print(f"{'lvl':>3}  {'L':>5}  {'xi2':>22}  {'U4':>22}")
+    for row in multilevel["levels"]:
+        obs = row["unweighted"]
+        xi = obs["xi2"]
+        u4 = obs["binder_cumulant"]
+        print(
+            f"{row['level_from_fine']:3d}  {row['L']:5d}  "
+            f"{xi['mean']:+13.6f} +/- {xi['stderr']:<8.6f}  "
+            f"{u4['mean']:+13.6f} +/- {u4['stderr']:<8.6f}"
+        )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Reanalyze saved phi^4 HMC histories")
     ap.add_argument("histories", type=str, help="Input .npz file written by scripts/phi4/hmc_phi4.py")
@@ -116,15 +133,22 @@ def main() -> None:
         iat_c=float(args.iat_c),
         block_size=int(args.block_size),
     )
+    multilevel = phi4_multilevel_summaries_from_payload(
+        payload,
+        iat_method=str(args.iat_method),
+        iat_c=float(args.iat_c),
+        block_size=int(args.block_size),
+    )
     meta = {}
     for key in ("lam", "mass", "nwarm", "nmeas", "nskip", "batch_size", "nmd", "tau", "acceptance"):
         if key in payload:
             val = np.asarray(payload[key]).reshape(-1)
             if val.size == 1:
                 meta[key] = float(val[0]) if key in {"lam", "mass", "tau", "acceptance"} else int(round(float(val[0])))
-    out = {**meta, **summary, "histories": str(Path(args.histories).resolve())}
+    out = {**meta, **summary, "histories": str(Path(args.histories).resolve()), "blocked_levels": multilevel}
 
     _print_summary(summary, acceptance=meta.get("acceptance"))
+    _print_level_summaries(multilevel)
     if args.json_out:
         Path(args.json_out).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
         with open(args.json_out, "w") as f:

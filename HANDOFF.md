@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-18
+Last updated: 2026-04-19
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -15,6 +15,58 @@ Last updated: 2026-04-18
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Blocked-HMC RT-reference tooling for phi^4:
+  - `scripts/phi4/hmc_phi4.py`
+    - new flags:
+      - `--measure-blocked-levels`
+      - `--blocked-rg-mode {average,select}`
+    - when enabled, the runner saves per-level blocked histories using the same
+      average `2x2` RG split as the flow analysis
+    - saved `.npz` payload now includes:
+      - `blocked_n_levels`
+      - `blocked_level_shapes`
+      - `level{l}_magnetization`
+      - `level{l}_magnetization2`
+      - `level{l}_magnetization4`
+      - `level{l}_c2pk_x`
+      - `level{l}_c2pk_y`
+      - `level{l}_momenta_k`
+  - shared HMC multilevel analysis helpers:
+    - `scripts/phi4/analysis/hmc_common.py`
+    - added:
+      - `phi4_level_unweighted_from_summary`
+      - `phi4_multilevel_summaries_from_payload`
+  - HMC reanalysis:
+    - `scripts/phi4/analysis/analyze_hmc_phi4.py`
+    - now emits a `blocked_levels` section and prints every blocked level when
+      blocked histories are present
+  - blocked-reference tracked point lists:
+    - `configs/phi4/paper-2/hmc-g2-scan/blocked_core_points.tsv`
+    - `configs/phi4/paper-2/hmc-g2-scan/blocked_interp_points.tsv`
+  - blocked-reference NERSC submitters:
+    - `scripts/phi4/submit_hmc_phi4_blocked_reference_campaign_nersc.sh`
+    - `scripts/phi4/submit_hmc_phi4_blocked_core_campaign_nersc.sh`
+    - `scripts/phi4/submit_hmc_phi4_blocked_interp_campaign_nersc.sh`
+  - defaults for the blocked-reference campaign:
+    - volumes `L=64,128`
+    - tuned production settings reused from `production_tuned.tsv`
+    - `core` wave uses `4` replicas
+    - `interp` wave uses `2` replicas
+- Forward after-refinement level-analysis launcher:
+  - `scripts/phi4/submit_rg_coarse_eta_gaussian_forward_level_analysis_bundles_nersc.sh`
+    - new option:
+      - `--checkpoint-name`
+  - new convenience wrapper:
+    - `scripts/phi4/submit_rg_coarse_eta_gaussian_forward_level_analysis_after_refine4096_bundles_nersc.sh`
+    - defaults:
+      - checkpoint root:
+        `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-refine4096`
+      - run root:
+        `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-level-analysis/after_refine4096`
+      - bundle root:
+        `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/bundles/canonical-point-scan-forward-level-analysis/after_refine4096`
+      - checkpoint file:
+        `checkpoint_refine4096.pkl`
 - Bundled forward level-analysis campaign for the current forward checkpoints:
   - new task runner:
     - `scripts/phi4/rg_coarse_eta_gaussian_level_analysis_bundle_task.sh`

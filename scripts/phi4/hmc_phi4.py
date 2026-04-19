@@ -33,8 +33,9 @@ if str(ROOT) not in sys.path:
 
 from jaxqft.core.integrators import force_gradient, leapfrog, minnorm2, minnorm4pf4
 from jaxqft.models.phi4 import Phi4
+from jaxqft.models.phi4_rg_cond_flow import _split_rg
 from jaxqft.core.update import hmc
-from scripts.phi4.analysis.hmc_common import phi4_summary_from_histories
+from scripts.phi4.analysis.hmc_common import phi4_multilevel_summaries_from_payload, phi4_summary_from_histories
 import jax
 
 
@@ -49,6 +50,58 @@ def _build_integrator(name: str, theory: Phi4, nmd: int, tau: float):
     if key == "minnorm4pf4":
         return minnorm4pf4(theory.force, theory.evolveQ, nmd, tau)
     raise ValueError(f"Unknown integrator: {name}")
+
+
+def _blocked_level_shapes(shape: tuple[int, int]) -> list[tuple[int, int]]:
+    shapes = [tuple(int(v) for v in shape)]
+    cur = tuple(int(v) for v in shape)
+    while min(cur) > 2:
+        if cur[0] % 2 != 0 or cur[1] % 2 != 0:
+            break
+        cur = (cur[0] // 2, cur[1] // 2)
+        shapes.append(cur)
+    return shapes
+
+
+def _collect_blocked_level_fields(x: jax.Array, rg_mode: int) -> list[jax.Array]:
+    fields = [x]
+    xx = x
+    while min(int(xx.shape[1]), int(xx.shape[2])) > 2:
+        if int(xx.shape[1]) % 2 != 0 or int(xx.shape[2]) % 2 != 0:
+            break
+        xx, _ = _split_rg(xx, int(rg_mode))
+        fields.append(xx)
+    return fields
+
+
+def _phase_cache_for_shape(shape: tuple[int, int], k_max: int) -> dict:
+    ny, nx = (int(shape[0]), int(shape[1]))
+    nk = max(1, min(int(k_max), ny // 2, nx // 2))
+    ks = np.arange(1, nk + 1, dtype=np.int64)
+    phase_x = np.exp(
+        2j * np.pi * np.outer(ks.astype(np.float64), np.arange(nx, dtype=np.float64)) / float(nx)
+    ).reshape((nk, 1, nx))
+    phase_y = np.exp(
+        2j * np.pi * np.outer(ks.astype(np.float64), np.arange(ny, dtype=np.float64)) / float(ny)
+    ).reshape((nk, ny, 1))
+    return {
+        "shape": (ny, nx),
+        "volume": float(ny * nx),
+        "momenta_k": ks,
+        "phase_x": phase_x,
+        "phase_y": phase_y,
+    }
+
+
+def _measure_level_observables(x: np.ndarray, cache: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    arr = np.asarray(x, dtype=np.float64)
+    m = np.mean(arr, axis=(1, 2))
+    x_complex = arr.astype(np.complex128)
+    pkx = np.mean(x_complex[:, None, :, :] * cache["phase_x"][None, :, :, :], axis=(2, 3))
+    pky = np.mean(x_complex[:, None, :, :] * cache["phase_y"][None, :, :, :], axis=(2, 3))
+    c2pk_x = cache["volume"] * np.real(np.conj(pkx) * pkx)
+    c2pk_y = cache["volume"] * np.real(np.conj(pky) * pky)
+    return np.asarray(m, dtype=np.float64), np.asarray(c2pk_x, dtype=np.float64), np.asarray(c2pk_y, dtype=np.float64)
 
 
 def main():
@@ -73,6 +126,10 @@ def main():
                     help="Integrated autocorrelation-time estimator")
     ap.add_argument("--iat-c",      type=float, default=5.0,      help="Window parameter for gamma/sokal IAT")
     ap.add_argument("--block-size", type=int,   default=0,        help="Blocked jackknife size; <=0 selects automatically")
+    ap.add_argument("--measure-blocked-levels", action="store_true",
+                    help="Also save blocked-level histories using the same 2x2 RG split as the flow analysis")
+    ap.add_argument("--blocked-rg-mode", type=str, default="average", choices=["average", "select"],
+                    help="RG split used for blocked-level measurements")
     args = ap.parse_args()
 
     lat = [int(x) for x in args.shape.split(",")]
@@ -81,6 +138,9 @@ def main():
     Vol = int(np.prod(lat))
     k_max = max(1, min(int(args.k_max), lat[0] // 2, lat[1] // 2))
     momenta_k = np.arange(1, k_max + 1, dtype=np.int64)
+    blocked_rg_mode = 0 if str(args.blocked_rg_mode) == "average" else 1
+    blocked_shapes = _blocked_level_shapes((int(lat[0]), int(lat[1])))
+    blocked_caches = [_phase_cache_for_shape(shape, k_max) for shape in blocked_shapes]
     hist_out = args.hist_out
     if hist_out is None and args.json_out:
         hist_out = str(Path(args.json_out).with_suffix(".npz"))
@@ -96,6 +156,9 @@ def main():
     print(f"Seed: {args.seed}")
     print(f"Momentum scan: k=1..{k_max}")
     print(f"Nwarm={args.nwarm}  Nmeas={args.nmeas}  Nskip={args.nskip}")
+    if args.measure_blocked_levels:
+        shape_str = ", ".join(f"{s[0]}x{s[1]}" for s in blocked_shapes)
+        print(f"Blocked levels: {shape_str}  rg_mode={args.blocked_rg_mode}")
 
     sg    = Phi4(lat, args.lam, args.mass, batch_size=args.batch_size, seed=args.seed)
     phi   = sg.hotStart()
@@ -113,27 +176,36 @@ def main():
     obs_m        = np.zeros((args.nmeas, args.batch_size), dtype=np.float64)
     obs_C2pk_x   = np.zeros((args.nmeas, args.batch_size, k_max), dtype=np.float64)
     obs_C2pk_y   = np.zeros((args.nmeas, args.batch_size, k_max), dtype=np.float64)
-    phase_x      = np.exp(
-        2j * np.pi * np.outer(momenta_k.astype(np.float64), np.arange(lat[0], dtype=np.float64)) / float(lat[0])
-    ).reshape((k_max, lat[0], 1))
-    phase_y      = np.exp(
-        2j * np.pi * np.outer(momenta_k.astype(np.float64), np.arange(lat[1], dtype=np.float64)) / float(lat[1])
-    ).reshape((k_max, 1, lat[1]))
+    level_m = [np.zeros((args.nmeas, args.batch_size), dtype=np.float64) for _ in blocked_shapes] if args.measure_blocked_levels else None
+    level_m2 = [np.zeros((args.nmeas, args.batch_size), dtype=np.float64) for _ in blocked_shapes] if args.measure_blocked_levels else None
+    level_m4 = [np.zeros((args.nmeas, args.batch_size), dtype=np.float64) for _ in blocked_shapes] if args.measure_blocked_levels else None
+    level_C2pk_x = [
+        np.zeros((args.nmeas, args.batch_size, int(cache["momenta_k"].size)), dtype=np.float64) for cache in blocked_caches
+    ] if args.measure_blocked_levels else None
+    level_C2pk_y = [
+        np.zeros((args.nmeas, args.batch_size, int(cache["momenta_k"].size)), dtype=np.float64) for cache in blocked_caches
+    ] if args.measure_blocked_levels else None
     print_every  = max(1, args.nmeas // 10)
 
     tic = time.perf_counter()
     for k in range(args.nmeas):
         ttE      = np.asarray(sg.action(phi) / Vol)
-        av_sigma = np.asarray(phi.mean(axis=(1, 2)))
-        p1_x     = np.asarray((phi[:, None, :, :] * phase_x[None, :, :, :]).mean(axis=(2, 3)))
-        p1_y     = np.asarray((phi[:, None, :, :] * phase_y[None, :, :, :]).mean(axis=(2, 3)))
-        C2p_x_k  = np.real(np.conj(p1_x) * p1_x) * Vol
-        C2p_y_k  = np.real(np.conj(p1_y) * p1_y) * Vol
+        av_sigma, C2p_x_k, C2p_y_k = _measure_level_observables(np.asarray(phi), blocked_caches[0])
 
         obs_E[k]       = ttE
         obs_m[k]       = av_sigma
         obs_C2pk_x[k]  = C2p_x_k
         obs_C2pk_y[k]  = C2p_y_k
+
+        if args.measure_blocked_levels and level_m is not None:
+            blocked_fields = _collect_blocked_level_fields(phi, blocked_rg_mode)
+            for level, (field, cache) in enumerate(zip(blocked_fields, blocked_caches)):
+                level_mean, level_c2x, level_c2y = _measure_level_observables(np.asarray(field), cache)
+                level_m[level][k] = level_mean
+                level_m2[level][k] = level_mean * level_mean
+                level_m4[level][k] = level_m2[level][k] * level_m2[level][k]
+                level_C2pk_x[level][k] = level_c2x
+                level_C2pk_y[level][k] = level_c2y
 
         if k % print_every == 0:
             print(f"  k={k:5d}  av_phi={float(av_sigma.mean()):+.4f}"
@@ -214,28 +286,66 @@ def main():
             f"cost=(t_traj*tau/batch)={row['cost_usec_tau_over_batch']:.3f} usec"
         )
 
-    if hist_out:
-        np.savez_compressed(
-            hist_out,
-            shape=np.asarray(lat, dtype=np.int64),
-            lam=np.asarray([args.lam], dtype=np.float64),
-            mass=np.asarray([args.mass], dtype=np.float64),
-            nwarm=np.asarray([args.nwarm], dtype=np.int64),
-            nmeas=np.asarray([args.nmeas], dtype=np.int64),
-            nskip=np.asarray([args.nskip], dtype=np.int64),
-            batch_size=np.asarray([args.batch_size], dtype=np.int64),
-            nmd=np.asarray([args.nmd], dtype=np.int64),
-            tau=np.asarray([args.tau], dtype=np.float64),
-            k_max=np.asarray([k_max], dtype=np.int64),
-            momenta_k=momenta_k,
-            acceptance=np.asarray([acc], dtype=np.float64),
-            magnetization=obs_m,
-            energy_density=obs_E,
-            c2p_x=obs_C2pk_x[:, :, 0],
-            c2p_y=obs_C2pk_y[:, :, 0],
-            c2pk_x=obs_C2pk_x,
-            c2pk_y=obs_C2pk_y,
+    hist_payload = {
+        "shape": np.asarray(lat, dtype=np.int64),
+        "lam": np.asarray([args.lam], dtype=np.float64),
+        "mass": np.asarray([args.mass], dtype=np.float64),
+        "nwarm": np.asarray([args.nwarm], dtype=np.int64),
+        "nmeas": np.asarray([args.nmeas], dtype=np.int64),
+        "nskip": np.asarray([args.nskip], dtype=np.int64),
+        "batch_size": np.asarray([args.batch_size], dtype=np.int64),
+        "nmd": np.asarray([args.nmd], dtype=np.int64),
+        "tau": np.asarray([args.tau], dtype=np.float64),
+        "k_max": np.asarray([k_max], dtype=np.int64),
+        "momenta_k": momenta_k,
+        "acceptance": np.asarray([acc], dtype=np.float64),
+        "magnetization": obs_m,
+        "energy_density": obs_E,
+        "c2p_x": obs_C2pk_x[:, :, 0],
+        "c2p_y": obs_C2pk_y[:, :, 0],
+        "c2pk_x": obs_C2pk_x,
+        "c2pk_y": obs_C2pk_y,
+    }
+    if args.measure_blocked_levels and level_m is not None and level_C2pk_x is not None and level_C2pk_y is not None:
+        hist_payload["blocked_n_levels"] = np.asarray([len(blocked_shapes)], dtype=np.int64)
+        hist_payload["blocked_rg_mode"] = np.asarray([blocked_rg_mode], dtype=np.int64)
+        hist_payload["blocked_level_shapes"] = np.asarray(blocked_shapes, dtype=np.int64)
+        for level, shape in enumerate(blocked_shapes):
+            prefix = f"level{level}_"
+            hist_payload[prefix + "shape"] = np.asarray(shape, dtype=np.int64)
+            hist_payload[prefix + "momenta_k"] = np.asarray(blocked_caches[level]["momenta_k"], dtype=np.int64)
+            hist_payload[prefix + "magnetization"] = level_m[level]
+            hist_payload[prefix + "magnetization2"] = level_m2[level]
+            hist_payload[prefix + "magnetization4"] = level_m4[level]
+            hist_payload[prefix + "c2pk_x"] = level_C2pk_x[level]
+            hist_payload[prefix + "c2pk_y"] = level_C2pk_y[level]
+            if level == 0:
+                hist_payload[prefix + "energy_density"] = obs_E
+
+    blocked_summary = (
+        phi4_multilevel_summaries_from_payload(
+            hist_payload,
+            iat_method=str(args.iat_method),
+            iat_c=float(args.iat_c),
+            block_size=int(args.block_size),
         )
+        if args.measure_blocked_levels
+        else None
+    )
+    if blocked_summary is not None:
+        print("\n--- Blocked level summary ---")
+        print(f"{'lvl':>3}  {'L':>5}  {'xi2':>22}  {'U4':>22}")
+        for row in blocked_summary["levels"]:
+            xi = row["unweighted"]["xi2"]
+            u4 = row["unweighted"]["binder_cumulant"]
+            print(
+                f"{row['level_from_fine']:3d}  {row['L']:5d}  "
+                f"{xi['mean']:>+13.6f} +/- {xi['stderr']:<8.6f}  "
+                f"{u4['mean']:>+13.6f} +/- {u4['stderr']:<8.6f}"
+            )
+
+    if hist_out:
+        np.savez_compressed(hist_out, **hist_payload)
         print(f"Histories saved to {hist_out}")
 
     if args.json_out:
@@ -263,6 +373,7 @@ def main():
             },
             "tuning_costs": tuning_costs,
             "histories": str(Path(hist_out).resolve()) if hist_out else None,
+            "blocked_levels": blocked_summary,
         }
         with open(args.json_out, "w") as f:
             json.dump(out, f, indent=2)
