@@ -242,7 +242,7 @@ def main():
         seed=int(args.seed),
     )
     site_values = fields.reshape(-1)
-    magnetizations = np.mean(fields, axis=(1, 2, 3))
+    magnetizations = np.mean(fields, axis=tuple(range(1, fields.ndim)))
 
     site_range = _auto_range(site_values, quantile=float(args.site_quantile))
     mag_range = _auto_range(magnetizations, quantile=float(args.mag_quantile))
