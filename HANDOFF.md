@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-19
+Last updated: 2026-04-20
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -47,6 +47,16 @@ Last updated: 2026-04-19
     - `scripts/phi4/submit_hmc_phi4_blocked_reference_campaign_nersc.sh`
     - `scripts/phi4/submit_hmc_phi4_blocked_core_campaign_nersc.sh`
     - `scripts/phi4/submit_hmc_phi4_blocked_interp_campaign_nersc.sh`
+  - local checkpoint histogram probe:
+    - `scripts/phi4/analysis/sample_rg_coarse_eta_gaussian_histograms.py`
+    - draws direct model samples from a saved flow checkpoint and writes:
+      - pooled site-field histogram
+      - configuration magnetization histogram
+      - JSON peak diagnostics (peak separation, valley-to-peak ratio, FWHM)
+    - intended use:
+      - quick broken-phase sanity check on laptop/CPU
+      - note: one batch is already enough for the pooled site histogram at large
+        volume, but not for a reliable magnetization histogram
   - defaults for the blocked-reference campaign:
     - volumes `L=64,128`
     - tuned production settings reused from `production_tuned.tsv`
@@ -96,9 +106,16 @@ Last updated: 2026-04-19
     - `k_max=4`
     - locality enabled with `16` fields and `4` sources
     - locality metrics `manhattan,euclidean2`
+  - walltime policy:
+    - `L16`: `01:00:00`
+    - `L32`: `01:00:00`
+    - `L64`: `02:00:00`
+    - `L128`: `03:00:00`
   - rationale:
     - accumulate large physics statistics via multiple independent model-sampling calls
       per checkpoint instead of one monolithic analysis job
+    - analysis is dominated by forward sampling and per-level reductions, so the
+      original training-like `4/6/8h` limits were needlessly long for queue placement
 - Bundled `refine4096` resume wave for stable forward checkpoints:
   - new schedule-free resume cards:
     - `configs/phi4/paper-2/canonical-point-scan/L16_uniform_refine4096_resume.toml`
@@ -127,14 +144,14 @@ Last updated: 2026-04-19
     - `L64`: `128 x 32`
     - `L128`: `64 x 64`
   - walltime policy:
-    - `L16`: `06:00:00`
-    - `L32`: `08:00:00`
-    - `L64`: `10:00:00`
-    - `L128`: `16:00:00`
+    - `L16`: `05:00:00`
+    - `L32`: `06:30:00`
+    - `L64`: `09:00:00`
+    - `L128`: `14:00:00`
   - rationale:
-    - scale from the completed forward baseline timings by the sample-count increase
-      from the original staged schedule (`624k` samples) to the refinement wave
-      (`10000 x 4096 = 40.96M` effective samples), then add margin
+    - these resumes still do substantial work (`+10000` epochs at effective batch `4096`),
+      but the original pure sample-work scaling heuristic proved too conservative
+    - current limits are based on the measured forward baselines plus explicit queue margin
 - Forward `w64c3` repair follow-up card for unresolved `L128` hard points:
   - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr1e4_then_anneal.toml`
   - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr5e5_then_anneal.toml`
