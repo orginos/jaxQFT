@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample a trained RG coarse-eta Gaussian flow and plot field histograms."""
+"""Sample phi^4 fields from a trained flow or HMC and plot field histograms."""
 
 from __future__ import annotations
 
@@ -43,6 +43,9 @@ from jaxqft.models.phi4_rg_coarse_eta_gaussian_flow import (
     rg_coarse_eta_gaussian_flow_g,
     rg_coarse_eta_gaussian_flow_prior_sample,
 )
+from jaxqft.core.integrators import minnorm2
+from jaxqft.core.update import hmc
+from jaxqft.models.phi4 import Phi4
 
 
 def tree_to_jax(tree):
@@ -71,10 +74,59 @@ def sample_model_fields(*, cfg: dict, weights: dict, n_samples: int, batch_size:
     elapsed = time.perf_counter() - tic
     arr = np.concatenate(chunks, axis=0)
     return arr, {
+        "source": "model",
         "n_samples": int(arr.shape[0]),
         "batch_size": int(batch_size),
         "seed": int(seed),
         "sample_sec": float(elapsed),
+    }
+
+
+def sample_hmc_fields(
+    *,
+    shape: tuple[int, int],
+    lam: float,
+    mass: float,
+    nwarm: int,
+    nmeas: int,
+    nskip: int,
+    batch_size: int,
+    nmd: int,
+    tau: float,
+) -> tuple[np.ndarray, dict]:
+    theory = Phi4(shape, lam, mass, batch_size=batch_size)
+    phi = theory.hotStart()
+    integrator = minnorm2(theory.force, theory.evolveQ, nmd, tau)
+    chain = hmc(T=theory, I=integrator, verbose=False)
+
+    tic = time.perf_counter()
+    phi = chain.evolve(phi, nwarm)
+    warm_s = time.perf_counter() - tic
+
+    samples = []
+    tic = time.perf_counter()
+    for _ in range(nmeas):
+        phi = chain.evolve(phi, nskip)
+        samples.append(np.asarray(phi))
+    meas_s = time.perf_counter() - tic
+
+    arr = np.concatenate(samples, axis=0)
+    return arr, {
+        "source": "hmc",
+        "shape": [int(shape[0]), int(shape[1])],
+        "lam": float(lam),
+        "mass": float(mass),
+        "nwarm": int(nwarm),
+        "nmeas": int(nmeas),
+        "nskip": int(nskip),
+        "batch_size": int(batch_size),
+        "nmd": int(nmd),
+        "tau": float(tau),
+        "n_samples": int(arr.shape[0]),
+        "acceptance": float(chain.calc_Acceptance()),
+        "warmup_sec": float(warm_s),
+        "measure_sec": float(meas_s),
+        "traj_usec": float(meas_s * 1e6 / max(1, nmeas * nskip)),
     }
 
 
@@ -171,7 +223,7 @@ def plot_histograms(
     site_hist: dict,
     mag_hist: dict,
     plot_path: str,
-    checkpoint: str,
+    title_label: str,
     sample_info: dict,
 ):
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
@@ -205,16 +257,25 @@ def plot_histograms(
     ax.grid(alpha=0.2)
 
     fig.suptitle(
-        "RG coarse-eta Gaussian flow sample histograms\n"
-        f"{Path(checkpoint).name}  samples={sample_info['n_samples']}  batch={sample_info['batch_size']}"
+        "Phi^4 sample histograms\n"
+        f"{title_label}  samples={sample_info['n_samples']}  batch={sample_info['batch_size']}"
     )
     fig.savefig(plot_path, dpi=180)
     plt.close(fig)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Sample a trained phi^4 flow and plot field/magnetization histograms.")
-    ap.add_argument("--resume", type=str, required=True, help="checkpoint to analyze")
+    ap = argparse.ArgumentParser(description="Sample phi^4 fields and plot field/magnetization histograms.")
+    ap.add_argument("--source", type=str, default="model", choices=["model", "hmc"], help="sampling source")
+    ap.add_argument("--resume", type=str, default="", help="checkpoint to analyze when --source=model")
+    ap.add_argument("--shape", type=str, default="128,128", help="lattice shape H,W for HMC runs")
+    ap.add_argument("--lam", type=float, default=2.4, help="phi^4 coupling for HMC runs")
+    ap.add_argument("--mass", type=float, default=-0.70, help="mass^2 parameter for HMC runs")
+    ap.add_argument("--nwarm", type=int, default=200, help="warmup trajectories for HMC runs")
+    ap.add_argument("--nmeas", type=int, default=1, help="number of HMC measurement blocks")
+    ap.add_argument("--nskip", type=int, default=1, help="trajectories between HMC measurements")
+    ap.add_argument("--nmd", type=int, default=8, help="MD steps per HMC trajectory")
+    ap.add_argument("--tau", type=float, default=1.0, help="HMC trajectory length")
     ap.add_argument("--n-samples", type=int, default=64, help="number of full-field samples to draw")
     ap.add_argument("--batch-size", type=int, default=16, help="sampling batch size")
     ap.add_argument("--seed", type=int, default=0, help="PRNG seed")
@@ -230,17 +291,34 @@ def main():
     ap.add_argument("--json-out", type=str, default="", help="optional JSON summary path")
     args = ap.parse_args()
 
-    ckpt = load_checkpoint(args.resume)
-    cfg = ckpt["cfg"]
-    weights = ckpt["weights"]
-
-    fields, sample_info = sample_model_fields(
-        cfg=cfg,
-        weights=weights,
-        n_samples=int(args.n_samples),
-        batch_size=int(args.batch_size),
-        seed=int(args.seed),
-    )
+    if args.source == "model":
+        if not args.resume:
+            raise ValueError("--resume is required when --source=model")
+        ckpt = load_checkpoint(args.resume)
+        cfg = ckpt["cfg"]
+        weights = ckpt["weights"]
+        fields, sample_info = sample_model_fields(
+            cfg=cfg,
+            weights=weights,
+            n_samples=int(args.n_samples),
+            batch_size=int(args.batch_size),
+            seed=int(args.seed),
+        )
+        title_label = Path(args.resume).name
+    else:
+        shape = tuple(int(x) for x in args.shape.split(","))
+        fields, sample_info = sample_hmc_fields(
+            shape=shape,
+            lam=float(args.lam),
+            mass=float(args.mass),
+            nwarm=int(args.nwarm),
+            nmeas=int(args.nmeas),
+            nskip=int(args.nskip),
+            batch_size=int(args.batch_size),
+            nmd=int(args.nmd),
+            tau=float(args.tau),
+        )
+        title_label = f"HMC L={shape[0]} mass={args.mass} lam={args.lam}"
     site_values = fields.reshape(-1)
     magnetizations = np.mean(fields, axis=tuple(range(1, fields.ndim)))
 
@@ -250,7 +328,8 @@ def main():
     mag_hist = _histogram(magnetizations, bins=int(args.bins), value_range=mag_range)
 
     result = {
-        "checkpoint": str(args.resume),
+        "source": str(args.source),
+        "checkpoint": str(args.resume) if args.source == "model" else "",
         "sample_info": sample_info,
         "field_shape": list(fields.shape),
         "site_stats": _basic_stats(site_values),
@@ -273,7 +352,7 @@ def main():
         site_hist=site_hist,
         mag_hist=mag_hist,
         plot_path=args.plot_out,
-        checkpoint=str(args.resume),
+        title_label=title_label,
         sample_info=sample_info,
     )
     print(f"Wrote {args.plot_out}")
