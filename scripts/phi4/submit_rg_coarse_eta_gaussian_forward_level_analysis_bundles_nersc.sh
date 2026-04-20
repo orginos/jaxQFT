@@ -120,9 +120,9 @@ fi
 
 time_for_L() {
   case "$1" in
-    16|32) echo "04:00:00" ;;
-    64) echo "06:00:00" ;;
-    128) echo "08:00:00" ;;
+    16|32) echo "01:00:00" ;;
+    64) echo "02:00:00" ;;
+    128) echo "03:00:00" ;;
     *)
       echo "Unsupported volume: $1" >&2
       return 2

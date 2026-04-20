@@ -95,16 +95,15 @@ config_for_L() {
   esac
 }
 
-# Walltimes are based on the completed forward baseline timings scaled by the
-# sample-count increase from the original staged schedule (624k samples) to the
-# refinement wave (10k epochs × 4096 effective batch = 40.96M samples), i.e.
-# about 65.6x more sample work, plus margin.
+# Walltimes are based on measured forward baseline task timings with additional
+# headroom for the 10k-epoch low-lr resume phase. The earlier pure sample-work
+# scaling heuristic was too conservative for queue placement.
 time_for_L() {
   case "$1" in
-    16) echo "06:00:00" ;;
-    32) echo "08:00:00" ;;
-    64) echo "10:00:00" ;;
-    128) echo "16:00:00" ;;
+    16) echo "05:00:00" ;;
+    32) echo "06:30:00" ;;
+    64) echo "09:00:00" ;;
+    128) echo "14:00:00" ;;
     *)
       echo "Unsupported volume: $1" >&2
       return 2
