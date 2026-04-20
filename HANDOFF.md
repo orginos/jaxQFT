@@ -15,6 +15,13 @@ Last updated: 2026-04-20
   - `scripts/<model>/`: runnable production/benchmark scripts.
 
 ## Implemented Status
+- Phi4 sanity-check note added:
+  - `docs/notes/phi4_flow_sanity_checks_2026-04.md`
+  - records the direct HMC/model cross-checks that matter for confidence:
+    - `canonical2 / w64 / L16` versus HMC
+    - `canonical3 / w64 / L16` versus HMC
+    - `canonical4 / w48,w64 / L16` versus HMC
+    - localized nature of the `canonical4 / w64c3 / L128` failure
 - Blocked-HMC RT-reference tooling for phi^4:
   - `scripts/phi4/hmc_phi4.py`
     - new flags:
