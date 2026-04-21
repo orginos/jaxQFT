@@ -515,22 +515,57 @@ def _filter_rows(rows: list[dict[str, Any]], *, points: set[str], arches: set[st
     return out
 
 
+def _fmt_est(mean: float | None, err: float | None) -> str:
+    if mean is None:
+        return "nan"
+    if err is None:
+        return f"{mean:.6f}"
+    return f"{mean:.6f} +/- {err:.6f}"
+
+
 def _print_level0_summary(family_summaries: list[dict[str, Any]]) -> None:
     print("Level-0 family summaries")
-    print(f"{'source':<8} {'point':<10} {'arch':<8} {'L':>4} {'n':>3} {'xi2/L':>14} {'U4':>14} {'chi_m':>14}")
+    print("  errors shown here are between-seed / between-replica standard errors")
+    print(f"{'source':<8} {'point':<10} {'arch':<8} {'L':>4} {'n':>3} {'xi2/L':>24} {'U4':>24} {'chi_m':>24}")
     for row in family_summaries:
         if int(row["level_from_fine"]) != 0:
             continue
-        xi = row["xi2_over_L"]["mean"]
-        u4 = row["U4"]["mean"]
-        chi = row["chi_m"]["mean"]
+        xi = _fmt_est(row["xi2_over_L"]["mean"], row["xi2_over_L"].get("stderr_between"))
+        u4 = _fmt_est(row["U4"]["mean"], row["U4"].get("stderr_between"))
+        chi = _fmt_est(row["chi_m"]["mean"], row["chi_m"].get("stderr_between"))
         arch = row["arch"] if row["arch"] is not None else "-"
         print(
             f"{row['source']:<8} {str(row.get('point')):<10} {arch:<8} {int(row['volume']):4d} {int(row['n_runs']):3d} "
-            f"{xi if xi is not None else float('nan'):>14.6f} "
-            f"{u4 if u4 is not None else float('nan'):>14.6f} "
-            f"{chi if chi is not None else float('nan'):>14.6f}"
+            f"{xi:>24} "
+            f"{u4:>24} "
+            f"{chi:>24}"
         )
+
+
+def _print_level0_model_vs_hmc(model_vs_hmc: list[dict[str, Any]]) -> None:
+    rows = [row for row in model_vs_hmc if int(row["level_from_fine"]) == 0 and row["variant"] == "unweighted"]
+    if not rows:
+        return
+    print("")
+    print("Level-0 model minus HMC")
+    print("  errors shown here are combined between-seed / between-replica standard errors")
+    for row in rows:
+        print(f"  {row['point']} {row['arch']} L{row['volume']}")
+        for metric in ("xi2_over_L", "U4", "chi_m", "C2_ratio_k2_k1", "C2_ratio_k3_k1"):
+            item = row.get(metric)
+            if not isinstance(item, dict):
+                continue
+            delta = _safe_float(item.get("delta"))
+            err = _safe_float(item.get("combined_stderr"))
+            z = _safe_float(item.get("z_score"))
+            if delta is None:
+                continue
+            line = f"    {metric:<24} {delta:+.6f}"
+            if err is not None:
+                line += f" +/- {err:.6f}"
+            if z is not None:
+                line += f"   z={z:+.3f}"
+            print(line)
 
 
 def main() -> None:
@@ -592,6 +627,7 @@ def main() -> None:
     }
 
     _print_level0_summary(family_summaries)
+    _print_level0_model_vs_hmc(model_vs_hmc)
     print("")
     print(f"Loaded {len(rows)} normalized rows")
     print(f"Family summaries: {len(family_summaries)}")
