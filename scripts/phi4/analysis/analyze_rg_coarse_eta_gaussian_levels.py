@@ -762,13 +762,17 @@ def measure_flow_levels(
         cur = levels_out[level]["unweighted"]["xi2"]["mean"]
         ratio = float(cur / prev) if np.isfinite(cur) and np.isfinite(prev) and prev != 0.0 else float("nan")
         levels_out[level]["unweighted"]["xi2_over_prev_level"] = ratio
-        if "reweighted" in levels_out[level] and "reweighted" in levels_out[level - 1]:
-            prev_rw = levels_out[level - 1]["reweighted"]["xi2"]["mean"]
-            cur_rw = levels_out[level]["reweighted"]["xi2"]["mean"]
+        prev_rw_row = levels_out[level - 1].get("reweighted")
+        cur_rw_row = levels_out[level].get("reweighted")
+        prev_rw_xi2 = prev_rw_row.get("xi2") if isinstance(prev_rw_row, dict) else None
+        cur_rw_xi2 = cur_rw_row.get("xi2") if isinstance(cur_rw_row, dict) else None
+        if isinstance(prev_rw_xi2, dict) and isinstance(cur_rw_xi2, dict):
+            prev_rw = prev_rw_xi2.get("mean")
+            cur_rw = cur_rw_xi2.get("mean")
             ratio_rw = (
                 float(cur_rw / prev_rw) if np.isfinite(cur_rw) and np.isfinite(prev_rw) and prev_rw != 0.0 else float("nan")
             )
-            levels_out[level]["reweighted"]["xi2_over_prev_level"] = ratio_rw
+            cur_rw_row["xi2_over_prev_level"] = ratio_rw
 
     out = {
         "sample_source": {

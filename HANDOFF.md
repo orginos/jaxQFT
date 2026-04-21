@@ -1,6 +1,6 @@
 # HANDOFF
 
-Last updated: 2026-04-20
+Last updated: 2026-04-21
 
 ## Project Snapshot
 - Repository: `jaxQFT`
@@ -102,6 +102,20 @@ Last updated: 2026-04-20
     treated as theory-space spread, not collapsed into one pooled error bar
   - local smoke:
     - `python3 scripts/phi4/analysis/analyze_phi4_physics_suite.py --model-root /tmp/livas_inspect/before_refine4096/before_refine4096 --hmc-root /tmp/livas_inspect/blocked_hmc_core_L64/L64 --points canonical,canonical2 --arches w64,w48 --volumes 64 --json-out /tmp/phi4_physics_suite_l64.json`
+- Robustness fix for level-analysis reweighted cross-level ratios:
+  - `scripts/phi4/analysis/analyze_rg_coarse_eta_gaussian_levels.py`
+  - livas exposed a crash on:
+    - `canonical3 / w64 / L128 / s1`
+    - `canonical3 / w64 / L128 / s3`
+  - root cause:
+    - the script computed `reweighted.xi2_over_prev_level` assuming both
+      adjacent levels had a valid reweighted `xi2` estimate
+    - some checkpoints produce `reweighted` payloads where `xi2` is missing or
+      invalid, so the old code dereferenced `None`
+  - fix:
+    - only compute reweighted `xi2_over_prev_level` when both current and
+      previous levels have dictionary-valued `reweighted["xi2"]`
+    - otherwise skip the ratio and keep the rest of the analysis output
 - Bundled forward level-analysis campaign for the current forward checkpoints:
   - new task runner:
     - `scripts/phi4/rg_coarse_eta_gaussian_level_analysis_bundle_task.sh`
