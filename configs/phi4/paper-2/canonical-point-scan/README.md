@@ -243,6 +243,19 @@ This wave:
 - reaches effective batch `4096` through gradient accumulation, not by trying to
   fit a real batch of `4096` in memory
 
+Important:
+
+- early `refine4096` bundles launched before the resume-target fix were no-ops
+- the bad signature in `train.out` is:
+  - `start_epoch: 11000`
+  - `target_epochs: 11000`
+  - `remaining_epochs: 0`
+- the corrected behavior is:
+  - `target_epochs: 21000`
+  - `remaining_epochs: 10000`
+  - and the refinement-card `batch` / `grad_accum_steps` / `lr` are used instead
+    of the old checkpoint schedule
+
 The volume-specific microbatch / accumulation pairs are:
 
 - `L16`: `batch=512`, `grad_accum_steps=8`

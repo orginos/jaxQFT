@@ -159,6 +159,25 @@ Last updated: 2026-04-20
     - these resumes still do substantial work (`+10000` epochs at effective batch `4096`),
       but the original pure sample-work scaling heuristic proved too conservative
     - current limits are based on the measured forward baselines plus explicit queue margin
+  - important fix:
+    - early `refine4096` bundles launched before the resume-target fix were no-ops
+    - symptom in `train.out`:
+      - `start_epoch: 11000`
+      - `target_epochs: 11000`
+      - `remaining_epochs: 0`
+    - root cause:
+      - resume mode silently reused the checkpoint schedule when the refinement card
+        intentionally omitted a new `schedule` block
+      - that restored the original `11000`-epoch schedule instead of honoring the
+        explicit refinement card settings
+    - fixed in:
+      - `scripts/phi4/train_rg_coarse_eta_gaussian_flow.py`
+      - `scripts/phi4/train_rg_coarse_eta_gaussian_flow_debug.py`
+    - correct post-fix behavior for the refinement cards:
+      - `start_epoch: 11000`
+      - `target_epochs: 21000`
+      - `remaining_epochs: 10000`
+      - fixed-card batch/lr/grad-accum are honored
 - Forward `w64c3` repair follow-up card for unresolved `L128` hard points:
   - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr1e4_then_anneal.toml`
   - `configs/phi4/paper-2/canonical-point-scan/L128_uniform_c3_batch32_accum4_lr5e5_then_anneal.toml`

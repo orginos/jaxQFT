@@ -444,6 +444,26 @@ def _schedule_stage_for_epoch(schedule, epoch):
     return schedule[-1]
 
 
+def _argv_has_flag(*names):
+    argv = sys.argv[1:]
+    for arg in argv:
+        for name in names:
+            if arg == name or arg.startswith(f"{name}="):
+                return True
+    return False
+
+
+def _resume_override_flags(raw_cfg):
+    train_cfg = raw_cfg.get("train", {}) if isinstance(raw_cfg, dict) else {}
+    return {
+        "schedule": bool(raw_cfg.get("schedule", {})) if isinstance(raw_cfg, dict) else False,
+        "epochs": ("epochs" in train_cfg) or _argv_has_flag("--epochs"),
+        "batch": ("batch" in train_cfg) or _argv_has_flag("--batch"),
+        "lr": ("lr" in train_cfg) or _argv_has_flag("--lr"),
+        "grad_accum_steps": ("grad_accum_steps" in train_cfg) or _argv_has_flag("--grad-accum-steps"),
+    }
+
+
 def main():
     boot = argparse.ArgumentParser(add_help=False)
     boot.add_argument("--config", type=str, default="", help="TOML run configuration")
@@ -544,13 +564,30 @@ def main():
         key = ckpt["rng_key"]
         losses = list(ckpt["losses"])
         start_epoch = int(ckpt.get("epoch", 0))
+        resume_overrides = _resume_override_flags(raw_cfg)
+        explicit_resume_override = any(resume_overrides.values())
+        resume_batch = (
+            int(args.batch)
+            if resume_overrides["batch"] and args.batch is not None
+            else int(train_prev.get("batch", 8))
+        )
+        resume_lr = (
+            float(args.lr)
+            if resume_overrides["lr"] and args.lr is not None
+            else float(train_prev.get("lr", 3e-4))
+        )
+        resume_epochs = (
+            int(args.epochs)
+            if resume_overrides["epochs"]
+            else int(train_prev.get("epochs", args.epochs))
+        )
         schedule = _build_schedule_from_config(
             raw_cfg,
-            fallback_epochs=int(train_prev.get("epochs", args.epochs)),
-            fallback_batch=int(train_prev.get("batch", 8)),
-            fallback_lr=float(train_prev.get("lr", 3e-4)),
+            fallback_epochs=resume_epochs,
+            fallback_batch=resume_batch,
+            fallback_lr=resume_lr,
         )
-        if schedule is None:
+        if schedule is None and not explicit_resume_override:
             schedule = train_prev.get("schedule")
         if schedule:
             schedule = _normalize_schedule(schedule)
@@ -559,10 +596,14 @@ def main():
             lr = float(active["lr"])
             target_epochs = int(schedule[-1]["epoch_end"])
         else:
-            batch_size = int(train_prev.get("batch", 8) if args.batch is None else args.batch)
-            lr = float(train_prev.get("lr", 3e-4) if args.lr is None else args.lr)
-            target_epochs = int(args.epochs)
-        grad_accum_steps = int(train_prev.get("grad_accum_steps", args.grad_accum_steps))
+            batch_size = resume_batch
+            lr = resume_lr
+            target_epochs = resume_epochs
+        grad_accum_steps = (
+            int(args.grad_accum_steps)
+            if resume_overrides["grad_accum_steps"]
+            else int(train_prev.get("grad_accum_steps", args.grad_accum_steps))
+        )
         theory = Phi4([arch["L"], arch["L"]], arch["lam"], arch["mass"], batch_size=batch_size)
         model = init_rg_coarse_eta_gaussian_flow(
             key,
