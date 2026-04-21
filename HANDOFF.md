@@ -84,6 +84,24 @@ Last updated: 2026-04-20
         `/global/cfs/cdirs/hadron/jaxQFT/runs/phi4/bundles/canonical-point-scan-forward-level-analysis/after_refine4096`
       - checkpoint file:
         `checkpoint_refine4096.pkl`
+- Unified phi4 paper-2 physics analysis driver:
+  - new script:
+    - `scripts/phi4/analysis/analyze_phi4_physics_suite.py`
+  - purpose:
+    - single top-level analysis entry point over existing model `levels.json`
+      and blocked-HMC JSON outputs
+    - normalizes both sources into one row schema
+    - preserves seed / replica identity
+    - computes:
+      - family summaries by level
+      - pairwise seed spreads
+      - pairwise architecture spreads
+      - contraction vs level-0 spreads
+      - model-vs-HMC comparison rows
+  - useful for the RT argument because seed and architecture variation are
+    treated as theory-space spread, not collapsed into one pooled error bar
+  - local smoke:
+    - `python3 scripts/phi4/analysis/analyze_phi4_physics_suite.py --model-root /tmp/livas_inspect/before_refine4096/before_refine4096 --hmc-root /tmp/livas_inspect/blocked_hmc_core_L64/L64 --points canonical,canonical2 --arches w64,w48 --volumes 64 --json-out /tmp/phi4_physics_suite_l64.json`
 - Bundled forward level-analysis campaign for the current forward checkpoints:
   - new task runner:
     - `scripts/phi4/rg_coarse_eta_gaussian_level_analysis_bundle_task.sh`

@@ -215,6 +215,30 @@ and writes:
 
 using `checkpoint_refine4096.pkl` as the checkpoint file name.
 
+For the unified paper-2 physics summary over existing model-analysis JSONs and
+blocked-HMC JSONs, use:
+
+```bash
+python scripts/phi4/analysis/analyze_phi4_physics_suite.py \
+  --model-root /global/cfs/cdirs/hadron/jaxQFT/runs/phi4/canonical-point-scan-forward-level-analysis/before_refine4096 \
+  --hmc-root /global/cfs/cdirs/hadron/jaxQFT/runs/phi4/hmc-g2-scan/blocked-reference/core \
+  --points canonical,canonical2,canonical3 \
+  --arches w64,w48 \
+  --volumes 64,128 \
+  --json-out /global/cfs/cdirs/hadron/jaxQFT/runs/phi4/analysis/phi4_rt_physics_suite.json
+```
+
+This script:
+
+- preserves seed / replica identity in the normalized rows
+- emits family summaries by level
+- computes seed-spread and architecture-spread contraction with depth
+- computes model-vs-HMC comparison tables
+
+It is intended to be the single top-level analysis entry point for the RT and
+locality comparisons once the raw `levels.json` / blocked-HMC JSON artifacts
+exist.
+
 ## Refine4096 Resume Wave
 
 To continue the stable forward checkpoints with very large effective batch
